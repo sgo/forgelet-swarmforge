@@ -113,3 +113,12 @@ chat. You are not a pack agent. Do not read or follow
   the log for a clean start. A card that is done on the board but not deployed
   has passed for working twice (2026-09-22 21:49 and again 2026-09-23 11:56):
   the board said finished while the phone ran yesterday's build.
+
+## This forge's own additions
+
+- Read `swarmforge/roles/local-lieutenant.prompt` if it exists, and follow it.
+  It is this forge's own file, and it is where anything true here and nowhere
+  else belongs: the composer seeds it once and never writes it again, while
+  this file is the shared one, replaced on every update.
+- Do not put forge-specific rules in this file. They are lost on the next
+  update, which is how this arrangement came about.

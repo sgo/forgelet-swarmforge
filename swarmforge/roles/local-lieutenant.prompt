@@ -1,0 +1,12 @@
+# Local lieutenant additions
+
+This file is this forge's own. The composer seeds it once, when there is nothing
+here yet, and never writes it again - so whatever the operator wants their
+lieutenant to do that is true here and nowhere else belongs here, and survives
+every update.
+
+It is read after `swarmforge/roles/lieutenant.prompt`, which refers to it: that
+file is the shared operating manual, replaced on each update, and this one adds
+to it rather than repeating it.
+
+Nothing here yet.

@@ -1291,6 +1291,47 @@
                        "Answer with: pack_dashboard_request.sh answer req-1 ./tmp/answer.txt"))
     (is (str/includes? wake "a reply only in this pane reaches nobody"))))
 
+(deftest get-swarm-forge-seeds-this-forges-own-lieutenant-file-once
+  ;; Given a layer that carries a default for the forge's own lieutenant additions
+  ;; When a forge is composed twice, with the forge's own file written in between
+  ;; Then the first composition seeds it and the second leaves it alone
+  (let [host (tmp-dir)
+        base (tmp-dir)
+        packs (tmp-dir)
+        local-file (fs/path host "swarmforge/roles/local-lieutenant.prompt")]
+    (try
+      (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"]]
+        (write-file (fs/path base "swarmforge/scripts" name) (str name "\n")))
+      (write-file (fs/path base "swarmforge/roles/lieutenant.prompt") "LAYER-LIEUTENANT\n")
+      (write-file (fs/path base "swarmforge/roles/local-lieutenant.prompt") "LAYER-DEFAULT-LOCAL\n")
+      (write-file (fs/path base "swarmforge/constitution/articles/engineering.prompt") "MAIN-ENGINEERING\n")
+      (write-file (fs/path base "swarmforge/constitution/articles/workflow.prompt") "MAIN-WORKFLOW\n")
+      (write-file (fs/path base "swarmforge/constitution/articles/handoffs.prompt") "MAIN-HANDOFFS\n")
+      (write-file (fs/path base "swarm") "#!/bin/sh\necho swarm\n")
+      (doseq [pack-name ["two-pack" "four-pack" "six-pack"]]
+        (let [pack (fs/path packs pack-name)]
+          (write-file (fs/path pack "swarm") "#!/bin/sh\necho swarm\n")
+          (write-file (fs/path pack "swarmforge/swarmforge.conf") "window specifier grok master\n")
+          (write-file (fs/path pack "swarmforge/roles/specifier.prompt") "specifier\n")))
+      (let [compose (fn []
+                      (run {:dir host
+                            :env {"SWARMFORGE_BASE_DIR" (str base)
+                                  "SWARMFORGE_PACKS_DIR" (str packs)
+                                  "SWARMFORGE_SKIP_BRIDGE" "1"}}
+                           (str (fs/path repo-root "get-swarm-forge"))
+                           "project-manager"))]
+        (is (zero? (:exit (compose))) "the first composition failed")
+        (is (= "LAYER-DEFAULT-LOCAL\n" (slurp (str local-file)))
+            "a fresh forge did not get the layer's default")
+        (write-file local-file "WHAT-THIS-FORGE-ADDS\n")
+        (is (zero? (:exit (compose))) "the second composition failed")
+        (is (= "WHAT-THIS-FORGE-ADDS\n" (slurp (str local-file)))
+            "the second composition overwrote this forge's own words"))
+      (finally
+        (fs/delete-tree host)
+        (fs/delete-tree base)
+        (fs/delete-tree packs)))))
+
 (deftest six-pack-carries-the-ignore-lines-its-build-needs
   ;; Given a pack whose language writes build output beside its source
   ;; When the layer's copy of that pack's ignore lines is read
@@ -1300,6 +1341,14 @@
     (let [lines (set (str/split-lines (slurp (str file))))]
       (doseq [line [".idea/" "build/" ".gradle/" ".kotlin/" "local.properties" "tmp/"]]
         (is (contains? lines line) (str "six-pack gitignore lacks " line))))))
+
+(deftest the-lieutenant-is-told-where-this-forges-own-rules-live
+  ;; Given the shared lieutenant instructions
+  ;; When the prompt is read
+  ;; Then it names the file this forge's own additions live in, which is what the
+  ;; read-and-follow-it handover follows
+  (let [prompt (slurp (str (fs/path repo-root "swarmforge" "roles" "lieutenant.prompt")))]
+    (is (str/includes? prompt "swarmforge/roles/local-lieutenant.prompt"))))
 
 (deftest get-swarm-forge-installs-the-bridges-tools
   ;; Given a forge this fork composes, and a bridge to build it from
@@ -1389,7 +1438,8 @@
       (write-file (fs/path base "swarmforge/packs/six-pack/gitignore") "build/\n.idea/\n")
       (write-file (fs/path base "swarm") "#!/bin/sh\necho swarm\n")
       (write-file (fs/path base "swarmforge/constitution.prompt") "MAIN-CONSTITUTION\n")
-      (write-file (fs/path base "swarmforge/roles/lieutenant.prompt") "LIEUTENANT\n")
+      (write-file (fs/path base "swarmforge/roles/lieutenant.prompt") "LAYER-LIEUTENANT\n")
+      (write-file (fs/path base "swarmforge/roles/local-lieutenant.prompt") "LAYER-DEFAULT-LOCAL\n")
       (write-file (fs/path base "swarmforge/swarmforge.conf") "# Lieutenant grok\n")
       (write-file (fs/path base "swarmforge/constitution/articles/engineering.prompt") "MAIN-ENGINEERING\n")
       (write-file (fs/path base "swarmforge/constitution/articles/workflow.prompt") "MAIN-WORKFLOW\n")
@@ -1423,6 +1473,10 @@
         (is (= "MAIN-HANDOFFS\n" (slurp (str (fs/path host "swarmforge/constitution/articles/handoffs.prompt")))))
         (is (= "MAIN-CONSTITUTION\n" (slurp (str (fs/path host "swarmforge/constitution.prompt")))))
         (is (fs/exists? (fs/path host "swarmforge/roles/lieutenant.prompt")))
+        (is (= "LAYER-LIEUTENANT\n"
+               (slurp (str (fs/path host "swarmforge/roles/lieutenant.prompt")))))
+        (is (= "LAYER-DEFAULT-LOCAL\n"
+               (slurp (str (fs/path host "swarmforge/roles/local-lieutenant.prompt")))))
         (is (fs/exists? (fs/path host "swarmforge/swarmforge.conf")))
         (is (not (fs/exists? (fs/path host "swarmforge/roles/specifier.prompt"))))
         (is (not (fs/exists? (fs/path host "swarmforge/constitution/articles/project.prompt"))))

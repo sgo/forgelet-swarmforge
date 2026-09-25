@@ -103,6 +103,34 @@ copy_shared_scripts_and_articles() {
   done
 }
 
+# The lieutenant's instructions are the layer's own. A product branch carries
+# upstream's skeleton for them, and this fork's rules - the answering rule, the
+# gate, the backlog discipline, the routing gate, the completion duties - are what
+# a Forgelet forge runs, so the layer's copy wins, the way the shared articles do.
+overlay_lieutenant_prompt() {
+  local src prompt
+  for src in "$@"; do
+    prompt="$src/swarmforge/roles/lieutenant.prompt"
+    [[ -f "$prompt" ]] || continue
+    mkdir -p swarmforge/roles
+    cp "$prompt" swarmforge/roles/lieutenant.prompt
+  done
+}
+
+# Whatever this forge adds to those instructions lives beside them, in a file the
+# composition never writes once it exists: the layer's copy seeds it, so a fresh
+# forge arrives with the shape, and a forge that has written its own keeps it.
+seed_local_lieutenant_prompt() {
+  local src seeded
+  for src in "$@"; do
+    seeded="$src/swarmforge/roles/local-lieutenant.prompt"
+    [[ -f "$seeded" ]] || continue
+    mkdir -p swarmforge/roles
+    [[ -f swarmforge/roles/local-lieutenant.prompt ]] \
+      || cp "$seeded" swarmforge/roles/local-lieutenant.prompt
+  done
+}
+
 copy_host_files() {
   local src="$1"
   copy_shared_scripts_and_articles "$src"
@@ -374,6 +402,9 @@ copy_host_files "$host_dir"
 if [[ -z "${SWARMFORGE_BASE_DIR:-}" ]]; then
   copy_shared_scripts_and_articles "$main_dir"
 fi
+
+overlay_lieutenant_prompt "$host_dir" "$main_dir"
+seed_local_lieutenant_prompt "$host_dir" "$main_dir"
 
 if [[ "$product" == "lieutenant" ]]; then
   install_project_pack
