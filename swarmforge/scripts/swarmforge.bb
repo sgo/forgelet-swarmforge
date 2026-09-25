@@ -503,8 +503,8 @@
   ;; Every pack role is handed its prompt as the session's first message. A
   ;; lieutenant was excluded because claude and grok read the file themselves -
   ;; but codex and copilot have no such flag, so a codex lieutenant used to
-  ;; start with no instructions at all: that is the session that ran unaware of
-  ;; its own prompt. Ask the agent, not the role.
+  ;; start with no instructions at all: on 2026-09-24 the forgelet lieutenant
+  ;; ran a whole session unaware of its own prompt. Ask the agent, not the role.
   (or (not= role "lieutenant") (not (reads-own-prompt-file? agent))))
 
 (defn launch-command [ctx index row]
@@ -1056,7 +1056,10 @@
         (sync-worktree-scripts! ctx)
         (start-handoff-daemon! ctx)
         (launch-roles! ctx)
-        (announce-ready! ctx)))))
+        (announce-ready! ctx)
+        ;; A project opened from the dashboard is a project whose surfaces open,
+        ;; the same way starting the forge opens the host's.
+        (open-terminal-surfaces! ctx)))))
 
 (defn test-terminal-bridge! [root backend]
   (let [local-script-dir (fs/path root "swarmforge" "scripts")
