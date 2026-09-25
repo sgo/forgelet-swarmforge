@@ -177,11 +177,23 @@
             (when-not (str/blank? line)
               (ensure-line-in-file! file line))))))))
 
+;; What a project is written in: the pack's default, written once into the
+;; project's own `swarmforge/language.conf` and never written again. The file is
+;; the project's - a project re-languaged by hand keeps its answer through every
+;; refresh and update, and the pack's line is the template it started from.
+(defn seed-pack-language! [pack-root dest]
+  (let [src (fs/path pack-root "language.conf")
+        file (fs/path dest "swarmforge" "language.conf")]
+    (when (and (fs/regular-file? src) (not (fs/exists? file)))
+      (fs/create-dirs (fs/parent file))
+      (fs/copy src file))))
+
 (defn overlay-pack! [forge dest pack keep-conf?]
   (copy-shared-scripts! forge dest)
   (copy-shared-articles! forge dest)
   (copy-pack-local! (pack-dir forge pack) dest keep-conf?)
-  (copy-pack-ignores! (pack-dir forge pack) dest))
+  (copy-pack-ignores! (pack-dir forge pack) dest)
+  (seed-pack-language! (pack-dir forge pack) dest))
 
 (defn git-identity
   "The identity git would use for a commit here, or nil when the machine has

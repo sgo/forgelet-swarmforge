@@ -209,6 +209,22 @@ install_pack_ignores() {
   done
 }
 
+# The pack's default language, which a project composed from that pack is written
+# in unless it says otherwise in its own `swarmforge/language.conf`. It is the
+# layer's, so an update refreshes it; the project's own file is the override, and
+# the composition seeds that one only when the project has none.
+install_pack_languages() {
+  local src pack_name language
+  for src in "$@"; do
+    for pack_name in "${pack_names[@]}"; do
+      language="$src/swarmforge/packs/$pack_name/language.conf"
+      [[ -f "$language" ]] || continue
+      mkdir -p "packs/$pack_name"
+      cp "$language" "packs/$pack_name/language.conf"
+    done
+  done
+}
+
 verify_pack_roles() {
   local dest="$1"
   [[ -f "$dest/swarmforge/swarmforge.conf" ]] || fail_missing "$dest/swarmforge/swarmforge.conf"
@@ -411,6 +427,7 @@ if [[ "$product" == "lieutenant" ]]; then
 else
   install_named_packs
   install_pack_ignores "$main_dir" "$host_dir"
+  install_pack_languages "$main_dir" "$host_dir"
 fi
 
 required_files=(

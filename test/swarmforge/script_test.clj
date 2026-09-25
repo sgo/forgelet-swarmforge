@@ -1436,6 +1436,7 @@
       (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"]]
         (write-file (fs/path base "swarmforge/scripts" name) (str name "\n")))
       (write-file (fs/path base "swarmforge/packs/six-pack/gitignore") "build/\n.idea/\n")
+      (write-file (fs/path base "swarmforge/packs/six-pack/language.conf") "Kotlin\n")
       (write-file (fs/path base "swarm") "#!/bin/sh\necho swarm\n")
       (write-file (fs/path base "swarmforge/constitution.prompt") "MAIN-CONSTITUTION\n")
       (write-file (fs/path base "swarmforge/roles/lieutenant.prompt") "LAYER-LIEUTENANT\n")
@@ -1485,7 +1486,9 @@
         (is (fs/directory? (fs/path host "projects")))
         (is (fs/exists? (fs/path host "packs/six-pack/swarmforge/swarmforge.conf")))
         (is (= "build/\n.idea/\n" (slurp (str (fs/path host "packs/six-pack/gitignore")))))
+        (is (= "Kotlin\n" (slurp (str (fs/path host "packs/six-pack/language.conf")))))
         (is (not (fs/exists? (fs/path host "packs/two-pack/gitignore"))))
+        (is (not (fs/exists? (fs/path host "packs/two-pack/language.conf"))))
         (is (fs/exists? (fs/path host "swarm"))))
       (finally
         (fs/delete-tree host)
