@@ -56,6 +56,29 @@ even though the pack branches are upstream's. Set `SWARMFORGE_REPO_URL` to
 compose Uncle Bob's products instead, or point `SWARMFORGE_GIT_DIR` at a local
 checkout to compose from a branch you have not pushed.
 
+### Update a forge
+
+Run the same command in the forge again. It updates in place, and it is worth
+knowing exactly what that means:
+
+- **Replaced**: the shared runtime (`swarmforge/scripts`), the three shared
+  articles, `constitution.prompt`, `lieutenant.prompt`, the `swarm` launcher, and
+  every `packs/<name>` — so a forge's behavior follows this fork's `forgelet`
+  branch from then on.
+- **Kept**: the forge's own `swarmforge/swarmforge.conf`, because a forge
+  configures itself and the helper never overwrites a configuration that is
+  already there, and everything under `.swarmforge/` — the dashboard address, the
+  board, the handoffs, the sessions — because that is state rather than
+  composition.
+- **Untouched**: `projects/`. A project carries its own copy of the runtime, and
+  that copy is refreshed when the dashboard opens or refreshes the project, not
+  by this helper.
+
+Run it while the forge is stopped, so nothing is mid-launch. The one thing an
+update does replace is a forge's edited `lieutenant.prompt` or
+`constitution.prompt`, since those are shared files: a rule you want to keep
+belongs on the branch that owns it, not in the forge root.
+
 ### Hook the forge into a bridge
 
 A bridge is what gives a forge its phone: approvals, clarifications, and chat
