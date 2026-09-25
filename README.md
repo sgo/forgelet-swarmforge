@@ -126,6 +126,42 @@ bridge's acceptance fixture uses, with `init`, `start`, `stop`, `status`, `logs`
 `url`, and `create-user` — so the phone can reach a homeserver without one being
 hand-built first.
 
+Getting those tools into a forge is the bridge's own step, `install-kit` and
+`install-rules` on the adapter, and the adapter's paths default to a bridge that
+lives *inside the forge it serves*. Two shapes follow from that:
+
+- **The forge hosts the bridge.** Clone the bridge into `<forge root>/projects/`
+  and build it with its `scripts/build.sh`, then the defaults resolve and the
+  install is two commands:
+
+  ```sh
+  root="<forge root>"
+  cd "$root"
+  ./swarmforge/scripts/matrix-bridge.sh install-kit
+  ./swarmforge/scripts/matrix-bridge.sh install-rules
+  ```
+
+- **A bridge is already running for other forges.** Point the adapter at that
+  bridge's build, and at its kit and its rules, while naming the forge being
+  served:
+
+  ```sh
+  bridge="<bridge repository>"
+  root="<forge root>"
+  MATRIX_BRIDGE_FORGE_ROOT="$root" \
+  MATRIX_BRIDGE_KIT_BINARY="$bridge/build/acceptance/bin/install-kit" \
+  MATRIX_BRIDGE_KIT="$bridge/swarmforge/scripts" \
+  MATRIX_BRIDGE_RULES_BINARY="$bridge/build/acceptance/bin/install-rules" \
+  MATRIX_BRIDGE_RULES="$bridge/rules" \
+  "$bridge/scripts/matrix-bridge.sh" install-kit
+  # and the same again with install-rules
+  ```
+
+Either way the forge gains the route gate, the idler check, the stall watch and
+its agent, the doorbell, and the rules a bridge's rooms rely on. The kit
+installer also writes the watch's agent, so install into a forge you intend to
+keep rather than a throwaway one.
+
 ## Products
 
 | Command | Branch | Shape |
