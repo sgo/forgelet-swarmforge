@@ -5,6 +5,7 @@
 .superpowers/
 .swarmforge/
 .worktrees/
+.idea/
 target/
 node_modules/
 test-results/
