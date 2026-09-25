@@ -56,6 +56,19 @@ even though the pack branches are upstream's. Set `SWARMFORGE_REPO_URL` to
 compose Uncle Bob's products instead, or point `SWARMFORGE_GIT_DIR` at a local
 checkout to compose from a branch you have not pushed.
 
+The same command composes the bridge, because a forge that cannot reach a phone
+is half a forge. It downloads this family's bridge, builds it on the machine that
+will run it — no cross-compilation and no published binaries — lays the build out
+under `projects/forgelet-bridge/`, copies the adapter into the forge's own
+scripts, and installs the tools and the rules a bridge's rooms rely on. So the
+composition needs a Go toolchain, and it leaves a forge ready for a bridge:
+starting one is then `matrix-bridge.sh start`, once a configuration exists.
+
+Three overrides are for development rather than for choice: `SWARMFORGE_BRIDGE_DIR`
+builds from a local checkout instead of downloading, `SWARMFORGE_BRIDGE_REPO` and
+`SWARMFORGE_BRIDGE_REF` name another repository or branch, and
+`SWARMFORGE_SKIP_BRIDGE=1` leaves the bridge out entirely.
+
 ### Update a forge
 
 Run the same command in the forge again. It updates in place, and it is worth

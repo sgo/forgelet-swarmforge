@@ -1203,6 +1203,81 @@
                        "Answer with: pack_dashboard_request.sh answer req-1 ./tmp/answer.txt"))
     (is (str/includes? wake "a reply only in this pane reaches nobody"))))
 
+(deftest get-swarm-forge-installs-the-bridges-tools
+  ;; Given a forge this fork composes, and a bridge to build it from
+  ;; When the composition runs
+  ;; Then the build is laid out where the adapter looks, the adapter lands in the
+  ;; forge's own scripts, and the tools and the rules are installed from that tree
+  (let [host (tmp-dir)
+        base (tmp-dir)
+        packs (tmp-dir)
+        bridge (tmp-dir)]
+    (try
+      (write-file (fs/path host "README.md") "host-readme\n")
+      (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"]]
+        (write-file (fs/path base "swarmforge/scripts" name) (str name "\n")))
+      (write-file (fs/path base "swarmforge/constitution.prompt") "MAIN\n")
+      (write-file (fs/path base "swarmforge/roles/lieutenant.prompt") "LIEUTENANT\n")
+      (write-file (fs/path base "swarmforge/swarmforge.conf") "# Lieutenant grok\n")
+      (doseq [name ["engineering.prompt" "workflow.prompt" "handoffs.prompt"]]
+        (write-file (fs/path base "swarmforge/constitution/articles" name) (str name "\n")))
+      (doseq [pack-name ["two-pack" "four-pack" "six-pack"]]
+        (let [pack (fs/path packs pack-name)]
+          (write-file (fs/path pack "swarm") "#!/bin/sh\necho swarm\n")
+          (write-file (fs/path pack "swarmforge/swarmforge.conf") "window specifier grok master\n")
+          (write-file (fs/path pack "swarmforge/constitution.prompt") "PACK\n")
+          (write-file (fs/path pack "swarmforge/roles/specifier.prompt") "specifier\n")))
+      ;; A bridge standing in for the real one: it builds the two installers and
+      ;; the adapter runs them, recording what each was handed.
+      (write-file (fs/path bridge "scripts/build.sh")
+                  (str "#!/bin/sh\nset -eu\n"
+                       "mkdir -p build/acceptance/bin\n"
+                       "cp -R installers/. build/acceptance/bin/\n"
+                       "chmod +x build/acceptance/bin/*\n"))
+      (write-file (fs/path bridge "scripts/matrix-bridge.sh")
+                  (str "#!/bin/sh\nset -eu\n"
+                       "case \"$1\" in\n"
+                       "  install-kit) \"$MATRIX_BRIDGE_KIT_BINARY\" --kit \"$MATRIX_BRIDGE_KIT\" ;;\n"
+                       "  install-rules) \"$MATRIX_BRIDGE_RULES_BINARY\" --rules \"$MATRIX_BRIDGE_RULES\" ;;\n"
+                       "esac\n"))
+      (write-file (fs/path bridge "installers/install-kit")
+                  (str "#!/bin/sh\n"
+                       "mkdir -p \"$MATRIX_BRIDGE_FORGE_ROOT/.swarmforge\"\n"
+                       "echo \"kit $MATRIX_BRIDGE_KIT\" >> \"$MATRIX_BRIDGE_FORGE_ROOT/.swarmforge/bridge-record\"\n"))
+      (write-file (fs/path bridge "installers/install-rules")
+                  (str "#!/bin/sh\n"
+                       "mkdir -p \"$MATRIX_BRIDGE_FORGE_ROOT/.swarmforge\"\n"
+                       "echo \"rules $MATRIX_BRIDGE_RULES\" >> \"$MATRIX_BRIDGE_FORGE_ROOT/.swarmforge/bridge-record\"\n"))
+      (write-file (fs/path bridge "swarmforge/scripts/kit-marker.sh") "the tools\n")
+      (write-file (fs/path bridge "rules/stopping-without-finishing.md") "the rules\n")
+      (run {:dir bridge} "chmod" "+x"
+           "scripts/build.sh" "scripts/matrix-bridge.sh"
+           "installers/install-kit" "installers/install-rules")
+      (let [result (run {:dir host
+                         :ok? false
+                         :env {"SWARMFORGE_BASE_DIR" (str base)
+                               "SWARMFORGE_PACKS_DIR" (str packs)
+                               "SWARMFORGE_BRIDGE_DIR" (str bridge)}}
+                        (str (fs/path repo-root "get-swarm-forge"))
+                        "project-manager")
+            record (fs/path host ".swarmforge/bridge-record")]
+        (is (zero? (:exit result)) (:err result))
+        (is (fs/directory? (fs/path host "projects/forgelet-bridge/build/acceptance/bin")))
+        (is (fs/directory? (fs/path host "projects/forgelet-bridge/rules")))
+        (is (fs/executable? (fs/path host "swarmforge/scripts/matrix-bridge.sh")))
+        (is (fs/exists? record))
+        (let [lines (str/split-lines (slurp (str record)))]
+          (is (= 2 (count lines)))
+          (is (str/includes? (first lines)
+                             (str host "/projects/forgelet-bridge/swarmforge/scripts")))
+          (is (str/includes? (second lines)
+                             (str host "/projects/forgelet-bridge/rules")))))
+      (finally
+        (fs/delete-tree host)
+        (fs/delete-tree base)
+        (fs/delete-tree packs)
+        (fs/delete-tree bridge)))))
+
 (deftest get-swarm-forge-copies-only-swarmforge-owned-paths
   (let [host (tmp-dir)
         base (tmp-dir)
@@ -1234,7 +1309,10 @@
           (write-file (fs/path pack "swarmforge/constitution/articles/local-workflow.prompt") "PACK-LOCAL-WORKFLOW\n")))
       (let [result (run {:dir host
                          :env {"SWARMFORGE_BASE_DIR" (str base)
-                               "SWARMFORGE_PACKS_DIR" (str packs)}}
+                               "SWARMFORGE_PACKS_DIR" (str packs)
+                               ;; The bridge step builds a real bridge; this test is
+                               ;; about which files the composition owns.
+                               "SWARMFORGE_SKIP_BRIDGE" "1"}}
                         (str (fs/path repo-root "get-swarm-forge"))
                         "project-manager")]
         (is (zero? (:exit result)) (:err result))

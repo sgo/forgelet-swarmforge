@@ -206,6 +206,93 @@ require_files() {
   done
 }
 
+# A Forgelet forge arrives able to talk to a phone. This fork builds the bridge on
+# the machine that will run it - no cross-compilation, no published binaries - and
+# installs the tools and rules the bridge's rooms rely on into the forge.
+bridge_repo_url="${SWARMFORGE_BRIDGE_REPO:-https://github.com/sgo/forgelet-bridge}"
+bridge_ref="${SWARMFORGE_BRIDGE_REF:-master}"
+bridge_source="${SWARMFORGE_BRIDGE_DIR:-}"
+
+bridge_tarball() {
+  local dest="$1"
+  local tar="$tmp_dir/forgelet-bridge.tar.gz"
+  local url="${bridge_repo_url}/archive/refs/heads/${bridge_ref}.tar.gz"
+  mkdir -p "$dest"
+  if ! curl -fsSL "$url" -o "$tar" 2>/dev/null; then
+    # A private repository needs a token, and gh has one when it is signed in.
+    if command -v gh >/dev/null 2>&1 && gh auth token >/dev/null 2>&1; then
+      curl -fsSL -H "Authorization: Bearer $(gh auth token)" "$url" -o "$tar" \
+        || fail_missing "the bridge at $url"
+    else
+      fail_missing "the bridge at $url (make the repository public, or sign in with gh)"
+    fi
+  fi
+  tar -xzf "$tar" --strip-components=1 -C "$dest"
+}
+
+build_forgelet_bridge() {
+  local dest="$1"
+  if [[ -n "$bridge_source" ]]; then
+    mkdir -p "$dest"
+    cp -R "$bridge_source/." "$dest"
+  else
+    bridge_tarball "$dest"
+  fi
+  [[ -f "$dest/scripts/build.sh" ]] || fail_missing "the bridge's build script in $dest"
+  command -v go >/dev/null 2>&1 \
+    || fail_missing "go (a Forgelet forge builds the bridge it runs)"
+  (cd "$dest" && ./scripts/build.sh >/dev/null) || fail_missing "the bridge's build"
+}
+
+install_forgelet_bridge() {
+  if [[ -n "${SWARMFORGE_SKIP_BRIDGE:-}" ]]; then
+    return 0
+  fi
+  local root="$PWD"
+  local installed="projects/forgelet-bridge"
+  local source="$tmp_dir/forgelet-bridge"
+  if [[ -d "$installed/.git" ]]; then
+    # This forge already carries the bridge as one of its projects, so its own
+    # tree is the one to build and install from.
+    source="$installed"
+  else
+    build_forgelet_bridge "$source"
+    mkdir -p "$installed"
+    local part
+    for part in build swarmforge rules; do
+      [[ -e "$source/$part" ]] || continue
+      mkdir -p "$installed/$part"
+      cp -R "$source/$part/." "$installed/$part/"
+    done
+  fi
+  if [[ ! -x "$installed/build/acceptance/bin/install-kit" ]]; then
+    build_forgelet_bridge "$source"
+  fi
+  if [[ -f "$source/scripts/matrix-bridge.sh" ]]; then
+    mkdir -p swarmforge/scripts
+    cp "$source/scripts/matrix-bridge.sh" swarmforge/scripts/matrix-bridge.sh
+    chmod +x swarmforge/scripts/matrix-bridge.sh
+  fi
+  local adapter="swarmforge/scripts/matrix-bridge.sh"
+  [[ -x "$adapter" ]] || fail_missing "the bridge's adapter at $adapter"
+  local kit_binary="$root/$installed/build/acceptance/bin/install-kit"
+  local kit_dir="$root/$installed/swarmforge/scripts"
+  local rules_binary="$root/$installed/build/acceptance/bin/install-rules"
+  local rules_dir="$root/$installed/rules"
+  MATRIX_BRIDGE_FORGE_ROOT="$root" \
+  MATRIX_BRIDGE_KIT_BINARY="$kit_binary" \
+  MATRIX_BRIDGE_KIT="$kit_dir" \
+  MATRIX_BRIDGE_RULES_BINARY="$rules_binary" \
+  MATRIX_BRIDGE_RULES="$rules_dir" \
+    "$adapter" install-kit
+  MATRIX_BRIDGE_FORGE_ROOT="$root" \
+  MATRIX_BRIDGE_KIT_BINARY="$kit_binary" \
+  MATRIX_BRIDGE_KIT="$kit_dir" \
+  MATRIX_BRIDGE_RULES_BINARY="$rules_binary" \
+  MATRIX_BRIDGE_RULES="$rules_dir" \
+    "$adapter" install-rules
+}
+
 host_dir="${SWARMFORGE_BASE_DIR:-$tmp_dir/host}"
 host_from="$product"
 packs_src="${SWARMFORGE_PACKS_DIR:-}"
@@ -286,5 +373,7 @@ else
 fi
 
 require_files "${required_files[@]}"
+
+install_forgelet_bridge
 
 echo "SwarmForge forge installed from $host_from. Run ./swarm to start the dashboard."
