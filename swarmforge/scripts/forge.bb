@@ -183,17 +183,43 @@
   (copy-pack-local! (pack-dir forge pack) dest keep-conf?)
   (copy-pack-ignores! (pack-dir forge pack) dest))
 
+(defn git-identity
+  "The identity git would use for a commit here, or nil when the machine has
+  none configured."
+  []
+  (let [asked (fn [key]
+                (str/trim (:out (sh {:continue true} "git" "config" "--get" key))))
+        name (asked "user.name")
+        email (asked "user.email")]
+    (when (and (not (str/blank? name)) (not (str/blank? email)))
+      [name email])))
+
 (defn init-git-if-needed! [dir]
   (when-not (fs/exists? (fs/path dir ".git"))
     (sh "git" "init" (str dir))
-    (sh "git" "-C" (str dir) "config" "user.email" "swarmforge@local")
-    (sh "git" "-C" (str dir) "config" "user.name" "SwarmForge")
     (sh "git" "-C" (str dir) "branch" "-M" "master")
     (let [gitignore (fs/path dir ".gitignore")]
       (when-not (fs/exists? gitignore)
         (spit (str gitignore) ".swarmforge/\n.worktrees/\n")))
     (sh {:continue true} "git" "-C" (str dir) "add" ".")
-    (sh {:continue true} "git" "-C" (str dir) "commit" "-q" "-m" "Initial swarmforge project")))
+    ;; Never write an identity into the project's config: the commits in this
+    ;; repository are the operator's work, not the scaffolding tool's, and a
+    ;; repository-local identity would silently claim every later commit too.
+    ;; Only when the machine has no identity at all do we lend one, and then
+    ;; for this single commit rather than for the repository. Upstream writes
+    ;; SwarmForge/swarmforge@local into every scaffold it makes; this layer does
+    ;; not, which is why the change lives here rather than in a pull request.
+    (let [commit (if (git-identity)
+                   (sh {:continue true} "git" "-C" (str dir)
+                       "commit" "-q" "-m" "Initial swarmforge project")
+                   (sh {:continue true} "git" "-C" (str dir)
+                       "-c" "user.name=SwarmForge Scaffold"
+                       "-c" "user.email=swarmforge@localhost"
+                       "commit" "-q" "-m" "Initial swarmforge project"))]
+      (when-not (zero? (:exit commit))
+        (throw (ex-info (str "Scaffold commit failed in " dir ": "
+                             (str/trim (str (:err commit) (:out commit))))
+                        {:exit (:exit commit)}))))))
 
 (defn clone-github! [url dest]
   (let [result (sh "git" "clone" "--" url (str dest))]

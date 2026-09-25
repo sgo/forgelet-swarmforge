@@ -2409,6 +2409,37 @@
         (is (= 1 (count (filter #{".idea/"} lines))))
         (is (= 1 (count (filter #{"build/"} lines))))))))
 
+(deftest forge-new-project-writes-no-identity-of-its-own
+  ;; Given a machine with an identity of its own, and a machine with none
+  ;; When a project is created under each
+  ;; Then the project's repository claims no identity, its scaffold commit is
+  ;; there, and the loan is the machine's own or a one-off - never a name written
+  ;; into the repository that would claim every later commit too
+  (let [root (tmp-dir)
+        home-with (fs/path root "home-with")
+        home-without (fs/path root "home-without")]
+    (seed-mini-forge! root)
+    (write-file (fs/path home-with ".gitconfig")
+                "[user]\n\tname = Operator\n\temail = operator@example.com\n")
+    (fs/create-dirs home-without)
+    (doseq [[label home expected] [["with" home-with "Operator <operator@example.com>"]
+                                   ["without" home-without "SwarmForge Scaffold <swarmforge@localhost>"]]]
+      (let [result (pack-web-env root {"SWARMFORGE_SKIP_START" "1" "HOME" (str home)}
+                                 "--test-new-project" (str root)
+                                 (str "cave-" label) "two-pack" "m")
+            dest (fs/path root "projects" (str "cave-" label))]
+        (is (zero? (:exit result)) (:err result))
+        (let [asked (fn [key]
+                      (str/trim (:out (run {:dir dest :ok? false}
+                                           "git" "config" "--local" "--get" key))))]
+          (is (str/blank? (asked "user.name"))
+              "the project's repository claims a name of its own")
+          (is (str/blank? (asked "user.email"))
+              "the project's repository claims an email of its own"))
+        (let [author (str/trim (:out (run {:dir dest}
+                                          "git" "log" "-1" "--format=%an <%ae>")))]
+          (is (= expected author)))))))
+
 (deftest forge-new-project-rejects-existing-name
   (let [root (tmp-dir)]
     (seed-mini-forge! root)
