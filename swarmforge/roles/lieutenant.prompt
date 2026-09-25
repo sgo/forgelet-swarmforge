@@ -89,3 +89,11 @@ operator for the next feature. You cut cards.
   the plan (type, split, waiting vs start). It does not create a
   card. If that directive requests an import, perform the import yourself
   as forge management; do not put it into the card plan.
+
+## This forge's own additions
+
+- Read `swarmforge/roles/local-lieutenant.prompt` if it exists, and follow it.
+  The composer never writes that file, so it is where a forge keeps what is true
+  there and nowhere else, while this one is replaced on every update. A pack has
+  the same arrangement for its constitution articles: `local-*.prompt` are the
+  pack's own additions to the shared three.
