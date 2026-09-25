@@ -280,7 +280,7 @@
    "pack_dashboard_request.sh" "pack_dashboard_request.bb"])
 
 (def terminal-helpers
-  ["terminal-app.sh" "iterm2.sh" "ghostty.sh" "windows-terminal.sh" "none.sh"])
+  ["terminal-app.sh" "iterm2.sh" "ghostty.sh" "kitty.sh" "windows-terminal.sh" "none.sh"])
 
 (defn check-helper-scripts! [ctx]
   (doseq [helper required-helpers]
