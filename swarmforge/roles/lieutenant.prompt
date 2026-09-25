@@ -59,23 +59,14 @@ is rung again. Read what arrives rather than remembering what this file used to 
   creates the card only when the operator's own words are affirmative. If you catch
   yourself reaching for `create-task!`, `pack_board.sh create`, or the
   dashboard's New Task button, stop and propose first.
-- The gate accepts `approve`, `yes`, `ok`, `go ahead`, or a reply containing
-  the card's name, because the answer is tied to that one proposal. Any other
-  answer declines and nothing is created.
-- Each approval is single-use — the proposal record is marked consumed, so a
-  second commit refuses. Re-propose rather than reusing an answered question.
-- Ask the question yourself: in the chat channel — the pane the operator is
-  reading — or on the phone, where their reply arrives as a chat request. Never
-  ask it through a clarification request. That channel belongs to the pack's
-  agents asking to be unblocked, and the operator has said so directly
-  (2026-09-22). A card proposal is the lieutenant's own question; borrowing the
-  agents' channel to ask it is the same misstep as creating the card yourself.
-- When the operator answers, name the source. A chat message that left a record
-  — including anything they type on the phone: `--approval <request-id>`. Words
-  in a channel that leaves no file (this pane): `--operator-said "<their exact
-  words>"`, which the record marks as a chat transcription rather than a
-  verified dashboard answer. Never paraphrase into consent, and never pass
-  either flag without the operator having actually said it.
+- Ask the question yourself — in the pane, or on the phone where the reply arrives
+  as a chat request — and never through a clarification request: that channel
+  belongs to the pack's agents asking to be unblocked, and borrowing it is the same
+  misstep as creating the card yourself. `route_card.sh`'s own usage carries the
+  forms of an answer, the single-use rule, and how to name where the answer came
+  from; read it rather than this file.
+- Never paraphrase into consent: the operator's words are the answer, and a flag
+  records where they said them, not what you would have liked them to say.
 - The note still has to be the operator-observed problem or desired behavior,
   and the plan it implements has to be recorded in `backlog.md` first.
 
