@@ -1,7 +1,11 @@
 #!/bin/zsh
 set -euo pipefail
 
-default_repo_url="https://github.com/unclebob/swarm-forge"
+# This fork composes a Forgelet forge: the shared runtime and shared articles come
+# from its own branch, and the packs come from the same repository. Both are
+# overridable, so the helper still installs Uncle Bob's products when asked to.
+default_repo_url="https://github.com/sgo/forgelet-swarmforge"
+base_ref="${SWARMFORGE_BASE_REF:-forgelet}"
 pack_names=(two-pack four-pack six-pack)
 
 usage() {
@@ -209,7 +213,7 @@ main_dir="$tmp_dir/main"
 
 if [[ "$product" == two-pack || "$product" == four-pack || "$product" == six-pack ]]; then
   if [[ -z "${SWARMFORGE_BASE_DIR:-}" ]]; then
-    download_branch "main" "$main_dir"
+    download_branch "$base_ref" "$main_dir"
     host_dir="$main_dir"
   fi
   pack_src="$(pack_tree "$product")"
@@ -239,10 +243,20 @@ fi
 
 if [[ -z "${SWARMFORGE_BASE_DIR:-}" ]]; then
   download_branch "$product" "$host_dir"
+  download_branch "$base_ref" "$main_dir"
 fi
 
 mkdir -p projects
 copy_host_files "$host_dir"
+
+# A forge product branch carries its own copy of the shared runtime, which is
+# whatever it was when that branch was last refreshed. This fork's shared runtime
+# is the layer on $base_ref, so it is overlaid last and wins, the way a pack is
+# overlaid by the branch that owns the shared files: the product keeps its
+# configuration, roles, and scaffolding.
+if [[ -z "${SWARMFORGE_BASE_DIR:-}" ]]; then
+  copy_shared_scripts_and_articles "$main_dir"
+fi
 
 if [[ "$product" == "lieutenant" ]]; then
   install_project_pack

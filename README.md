@@ -15,6 +15,76 @@ This repository's master branch is named `main`. It is the landing page,
 installer source, shared runtime, and shared engineering law. It is not itself
 a runnable SwarmForge product.
 
+## Forgelet
+
+This repository is a fork of SwarmForge for the Forgelet family, and two
+branches carry it.
+
+| Branch | What it is |
+|---|---|
+| `main` | Uncle Bob's SwarmForge, unmodified. It is only ever fast-forwarded from upstream. |
+| `forgelet` | The shared runtime this family runs: upstream's `main` plus the Forgelet layer. |
+
+The layer is additive and small: the operator's card tools (`approve_task`,
+`nudge_role`), the completion-hook runner (`run_hook`), a chat request that
+carries the command that answers it, a dashboard that keeps its address across
+restarts, and a `kitty` terminal adapter. Anything upstream should have for its
+own sake is offered there first as a pull request; `forgelet` carries it until it
+lands, and cleanly — `main` and `forgelet` both rebase onto upstream without our
+history in the way.
+
+### Start a Forgelet forge
+
+Install the helper from this repository's `forgelet` branch, then compose and
+start a forge:
+
+```sh
+mkdir -p ~/cmds
+curl -L -o ~/cmds/get-swarm-forge \
+  https://raw.githubusercontent.com/sgo/forgelet-swarmforge/forgelet/get-swarm-forge
+chmod +x ~/cmds/get-swarm-forge
+
+mkdir -p ~/my-forge && cd ~/my-forge
+get-swarm-forge project-manager      # a forge with selectable packs
+./swarm                              # dashboard, host lieutenant, projects/ waiting
+```
+
+The helper composes the shared runtime from this fork's `forgelet` branch and the
+packs from the same repository, so a forge started this way carries the layer
+even though the pack branches are upstream's. Set `SWARMFORGE_REPO_URL` to
+`https://github.com/unclebob/swarm-forge` and `SWARMFORGE_BASE_REF` to `main` to
+compose Uncle Bob's products instead, or point `SWARMFORGE_GIT_DIR` at a local
+checkout to compose from a branch you have not pushed.
+
+### Hook the forge into a bridge
+
+A bridge is what gives a forge its phone: approvals, clarifications, and chat
+travel through Matrix, and the bridge does the talking. Two cases when a forge is
+new:
+
+- **No bridge yet.** Install one — `forgelet-bridge`'s README covers the bridge
+  and its homeserver — then add this forge to it.
+- **A bridge and homeserver are already running.** Add one entry for this forge
+  root to the bridge's configuration and restart it. One bridge serves every
+  forge it lists, each with its own space and name, and its
+  `docs/adding-a-forge.md` is the whole runbook.
+
+The forge side of that is deliberately small, because the bridge reads the forge
+rather than the other way round:
+
+- **A running dashboard.** The bridge finds it through
+  `<forge root>/.swarmforge/dashboard-url` and reads that file fresh every time,
+  so a stopped dashboard leaves a stale address behind and the forge reads as
+  unreached.
+- **The endpoints the bridge calls** — `/api/state`, `/api/chat`,
+  `/api/approvals/<id>/<action>`, `/api/tasks/retry`, and
+  `/api/clarifications/<id>/answer`. A forge whose tooling predates one of them
+  is refreshed first, or left out.
+- **The forge's own adapter**, `swarmforge/scripts/matrix-bridge.sh`, which serves
+  the forge root it lives in. It, and the tools the bridge installs into a forge —
+  the route gate, the idler check, the stall watch, and the doorbell — arrive with
+  the bridge's installation, not with this fork.
+
 ## Products
 
 | Command | Branch | Shape |
@@ -51,7 +121,7 @@ Put `get-swarm-forge` somewhere on `PATH`:
 ```sh
 mkdir -p ~/cmds
 curl -L -o ~/cmds/get-swarm-forge \
-  https://raw.githubusercontent.com/unclebob/swarm-forge/main/get-swarm-forge
+  https://raw.githubusercontent.com/sgo/forgelet-swarmforge/forgelet/get-swarm-forge
 chmod +x ~/cmds/get-swarm-forge
 ```
 
@@ -175,6 +245,10 @@ behavior belong on `main` first. Pack branches own only their configuration,
 local constitution additions, role prompts, and launcher. Forge branches carry
 the common files needed for standalone installation and should be refreshed
 from `main` when those files change.
+
+In this fork, that rule reads `forgelet` for `main`: a change to shared behavior
+lands on `forgelet`, a change upstream should have goes there as a pull request,
+and `main` stays a mirror of upstream that is only fast-forwarded.
 
 Do not pin prompt prose with automated tests. Test observable runtime behavior
 instead.
