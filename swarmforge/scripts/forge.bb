@@ -155,10 +155,33 @@
               (fs/copy file (fs/path dest "swarmforge" "constitution" "articles" name)
                        {:replace-existing true}))))))))
 
+(defn ensure-line-in-file! [file line]
+  (let [lines (when (fs/exists? file) (set (str/split-lines (slurp (str file)))))]
+    (when-not (contains? lines line)
+      (spit (str file) (str line "\n") :append true))))
+
+;; A pack may carry a `gitignore` file: the lines its language needs ignored
+;; before the first build, so build output never becomes the first commit. They
+;; are merged into the project's .gitignore rather than copied over it - a line
+;; the project added later stays, and no line arrives twice.
+(defn copy-pack-ignores! [pack-root dest]
+  (let [src (fs/path pack-root "gitignore")]
+    (when (fs/regular-file? src)
+      (let [file (fs/path dest ".gitignore")]
+        (fs/create-dirs dest)
+        (fs/create-dirs (fs/parent file))
+        (when-not (fs/exists? file)
+          (spit (str file) ""))
+        (doseq [raw (str/split-lines (slurp (str src)))]
+          (let [line (str/trim raw)]
+            (when-not (str/blank? line)
+              (ensure-line-in-file! file line))))))))
+
 (defn overlay-pack! [forge dest pack keep-conf?]
   (copy-shared-scripts! forge dest)
   (copy-shared-articles! forge dest)
-  (copy-pack-local! (pack-dir forge pack) dest keep-conf?))
+  (copy-pack-local! (pack-dir forge pack) dest keep-conf?)
+  (copy-pack-ignores! (pack-dir forge pack) dest))
 
 (defn init-git-if-needed! [dir]
   (when-not (fs/exists? (fs/path dir ".git"))

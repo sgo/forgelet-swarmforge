@@ -1259,6 +1259,16 @@
                        "Answer with: pack_dashboard_request.sh answer req-1 ./tmp/answer.txt"))
     (is (str/includes? wake "a reply only in this pane reaches nobody"))))
 
+(deftest six-pack-carries-the-ignore-lines-its-build-needs
+  ;; Given a pack whose language writes build output beside its source
+  ;; When the layer's copy of that pack's ignore lines is read
+  ;; Then the lines a project needs before its first build are in the file
+  (let [file (fs/path repo-root "swarmforge" "packs" "six-pack" "gitignore")]
+    (is (fs/exists? file) (str "missing " file))
+    (let [lines (set (str/split-lines (slurp (str file))))]
+      (doseq [line [".idea/" "build/" ".gradle/" ".kotlin/" "local.properties" "tmp/"]]
+        (is (contains? lines line) (str "six-pack gitignore lacks " line))))))
+
 (deftest get-swarm-forge-installs-the-bridges-tools
   ;; Given a forge this fork composes, and a bridge to build it from
   ;; When the composition runs
@@ -1344,6 +1354,7 @@
       (write-file (fs/path host "test/keep.clj") "keep\n")
       (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"]]
         (write-file (fs/path base "swarmforge/scripts" name) (str name "\n")))
+      (write-file (fs/path base "swarmforge/packs/six-pack/gitignore") "build/\n.idea/\n")
       (write-file (fs/path base "swarm") "#!/bin/sh\necho swarm\n")
       (write-file (fs/path base "swarmforge/constitution.prompt") "MAIN-CONSTITUTION\n")
       (write-file (fs/path base "swarmforge/roles/lieutenant.prompt") "LIEUTENANT\n")
@@ -1387,6 +1398,8 @@
         (is (= "PACK-LOCAL-WORKFLOW\n" (slurp (str (fs/path host "packs/four-pack/swarmforge/constitution/articles/local-workflow.prompt")))))
         (is (fs/directory? (fs/path host "projects")))
         (is (fs/exists? (fs/path host "packs/six-pack/swarmforge/swarmforge.conf")))
+        (is (= "build/\n.idea/\n" (slurp (str (fs/path host "packs/six-pack/gitignore")))))
+        (is (not (fs/exists? (fs/path host "packs/two-pack/gitignore"))))
         (is (fs/exists? (fs/path host "swarm"))))
       (finally
         (fs/delete-tree host)

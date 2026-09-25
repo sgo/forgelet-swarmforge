@@ -1,0 +1,6 @@
+.idea/
+build/
+.gradle/
+.kotlin/
+local.properties
+tmp/

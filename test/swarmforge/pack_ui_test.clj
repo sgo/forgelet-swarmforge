@@ -2382,6 +2382,33 @@
       (is (str/includes? (slurp (str (fs/path dest ".swarmforge/pack"))) "four-pack"))
       (is (str/includes? (slurp (str (fs/path root ".swarmforge/open-projects"))) "cave")))))
 
+(deftest forge-new-project-takes-the-packs-ignore-lines
+  ;; Given a pack that carries the lines its language needs git to leave alone
+  ;; When a project is composed from it and opened again later
+  ;; Then the project ignores those lines, keeps its own, and adds none twice
+  (let [root (tmp-dir)]
+    (seed-mini-forge! root)
+    (write-file (fs/path root "packs/six-pack/gitignore") ".idea/\nbuild/\n.gradle/\n")
+    (let [result (pack-web-env root {"SWARMFORGE_SKIP_START" "1"}
+                               "--test-new-project" (str root) "cave" "six-pack" "m")
+          ignore (fs/path root "projects/cave/.gitignore")]
+      (is (zero? (:exit result)) (:err result))
+      (is (fs/exists? ignore))
+      (let [lines (set (str/split-lines (slurp (str ignore))))]
+        (is (contains? lines ".idea/"))
+        (is (contains? lines "build/"))
+        (is (contains? lines ".gradle/")))
+      ;; The project writes a line of its own, then the pack is overlaid again.
+      (spit (str ignore) (str (slurp (str ignore)) "coverage/\n"))
+      (pack-web-env root {"SWARMFORGE_SKIP_START" "1"}
+                    "--test-close-project" (str root) "cave")
+      (pack-web-env root {"SWARMFORGE_SKIP_START" "1"}
+                    "--test-open-project" (str root) "cave")
+      (let [lines (str/split-lines (slurp (str ignore)))]
+        (is (contains? (set lines) "coverage/"))
+        (is (= 1 (count (filter #{".idea/"} lines))))
+        (is (= 1 (count (filter #{"build/"} lines))))))))
+
 (deftest forge-new-project-rejects-existing-name
   (let [root (tmp-dir)]
     (seed-mini-forge! root)

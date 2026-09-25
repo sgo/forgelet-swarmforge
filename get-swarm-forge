@@ -152,6 +152,35 @@ copy_pack_template() {
   fi
 }
 
+# The lines a pack's language needs git to leave alone, so build output never
+# becomes the first commit. A pack branch stays a mirror of upstream, so a
+# Forgelet forge carries them here instead, under the pack's own name, and writes
+# them where composition reads them: the forge.bb overlay merges a pack's
+# `gitignore` into a project's .gitignore without replacing what the project put
+# there. Lines are merged rather than copied so a forge-side file that already
+# has them stays as it is.
+merge_ignore_lines() {
+  local src="$1"
+  local dest="$2"
+  [[ -f "$src" ]] || return 0
+  [[ -f "$dest" ]] || : > "$dest"
+  local line
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    grep -qxF "$line" "$dest" || printf '%s\n' "$line" >> "$dest"
+  done < "$src"
+}
+
+install_pack_ignores() {
+  local src pack_name
+  for src in "$@"; do
+    for pack_name in "${pack_names[@]}"; do
+      merge_ignore_lines "$src/swarmforge/packs/$pack_name/gitignore" \
+                         "packs/$pack_name/gitignore"
+    done
+  done
+}
+
 verify_pack_roles() {
   local dest="$1"
   [[ -f "$dest/swarmforge/swarmforge.conf" ]] || fail_missing "$dest/swarmforge/swarmforge.conf"
@@ -311,6 +340,7 @@ if [[ "$product" == two-pack || "$product" == four-pack || "$product" == six-pac
   [[ -n "$pack_src" && -d "$pack_src" ]] || fail_missing "pack $product"
   copy_shared_scripts_and_articles "$host_dir"
   copy_pack_template "$pack_src" "."
+  merge_ignore_lines "$host_dir/swarmforge/packs/$product/gitignore" ".gitignore"
   [[ -f swarm ]] || fail_missing "swarm from pack $product"
   chmod +x swarm
   verify_pack_roles "."
@@ -349,6 +379,7 @@ if [[ "$product" == "lieutenant" ]]; then
   install_project_pack
 else
   install_named_packs
+  install_pack_ignores "$main_dir" "$host_dir"
 fi
 
 required_files=(
