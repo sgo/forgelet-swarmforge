@@ -6,25 +6,17 @@ chat. You are not a pack agent. Do not read or follow
 
 - Follow-ups arrive as `[id] text`. Answer with
   `pack_dashboard_request.sh answer <id> ./tmp/answer.txt`.
-- Answer every `[id]` through that tool, even when you already answered the same
-  words in the pane. A request the pane answered and the tooling did not stays
-  open for the operator, whose phone then shows nothing at all — three times on
-  2026-09-23, one of them the answer to a direct question, which is how the
-  operator came to ask why they never received a reply. If the same text answers
-  both, answer the tool first and keep the pane for what the pane adds.
-- An approval or clarification notification the operator forwards is theirs to
-  decide, not yours to take. Read the pending handoff or the question, ground it
-  in the project's state, then reply with your assessment and what you would
-  approve, send back, or answer, and why. Take the action — `approve_task.sh`,
-  or the clarification's answer — only when the operator says to. A settled
-  reading of your own — "it looks fine" — is exactly the case where they may
-  still want to add an instruction.
 - Ask with `pack_dashboard_request.sh clarify ./tmp/question.txt`.
   Do not ask in the pane.
 - Write those files in `./tmp/`. Helpers are already on PATH.
 - Do not implement project work. That belongs to pack agents.
 - You may summarize status, suggest a pack or project, and point at
   `mission.md`.
+
+The tooling makes the two rules that used to live here: every request arrives with
+the command that answers it, and an approval or clarification the operator forwards
+arrives saying the decision is theirs. Where it does not, the request stays owed and
+is rung again. Read what arrives rather than remembering what this file used to say.
 
 ## Backlog tracking
 
@@ -52,21 +44,12 @@ chat. You are not a pack agent. Do not read or follow
 
 ## Operator tooling
 
-- Send a note to one role for an existing board card with
-  `nudge_role.sh <project-root> <role> <task-name-or-id> <message-file>`.
-  It queues a `note` handoff referencing that card; it neither creates a card
-  nor types into the role's pane. The card must already sit in the target
-  role's lane, and the tool says so when it does not.
-- When nudging a card whose deliverable is already committed, pass the
-  deliverable commit's parent as the optional `<base-commit>` so
-  `ready_for_next` snapshots it as `task_base_commit`; otherwise the role's
-  `git_handoff` can come back with an empty diff.
-- Approve the pending handoff for one card with
-  `approve_task.sh <project-root> <task-name-or-id>`. It prints
-  `NO_PENDING_APPROVAL` when nothing matches, so it is safe to probe. Prefer
-  it over blanket approvals when several cards are in flight.
-- Both tools take a project root, so they dispatch into any project from
-  here, not only the current one.
+- `nudge_role.sh <project-root> <role> <task-name-or-id> <message-file> [<base-commit>]`
+  queues a note for a card a role already holds, and
+  `approve_task.sh <project-root> <task-name-or-id>` approves one card's pending
+  handoff. Both take a project root, so they dispatch into any project from here.
+  Each says the rest in its own usage — read that rather than this file: a tool's
+  own words travel with the tool.
 
 ## Card routing
 
