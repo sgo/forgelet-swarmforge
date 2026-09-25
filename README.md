@@ -79,6 +79,18 @@ update does replace is a forge's edited `lieutenant.prompt` or
 `constitution.prompt`, since those are shared files: a rule you want to keep
 belongs on the branch that owns it, not in the forge root.
 
+One thing an update cannot restore is work a bridge installed. The kit — the
+route gate, the idler check, the stall watch, and the doorbell — and the rules a
+bridge's rooms rely on are *installed into* a forge rather than composed by this
+helper, so a bridge-served forge reinstalls them after an update:
+
+```sh
+root="<forge root>"
+adapter="<bridge repository>/scripts/matrix-bridge.sh"
+MATRIX_BRIDGE_FORGE_ROOT="$root" "$adapter" install-kit
+MATRIX_BRIDGE_FORGE_ROOT="$root" "$adapter" install-rules
+```
+
 ### Hook the forge into a bridge
 
 A bridge is what gives a forge its phone: approvals, clarifications, and chat
@@ -107,6 +119,12 @@ rather than the other way round:
   the forge root it lives in. It, and the tools the bridge installs into a forge —
   the route gate, the idler check, the stall watch, and the doorbell — arrive with
   the bridge's installation, not with this fork.
+
+For the homeserver side, `swarmforge/scripts/matrix-homeserver.sh` initialises,
+starts, and stops a Synapse homeserver on this machine, pinned to the version the
+bridge's acceptance fixture uses, with `init`, `start`, `stop`, `status`, `logs`,
+`url`, and `create-user` — so the phone can reach a homeserver without one being
+hand-built first.
 
 ## Products
 
