@@ -1222,6 +1222,28 @@
     (is (not (re-find #"--test-state\" \(test-state!" (slurp (script "pack_web.bb")))))
     (is (str/includes? (slurp (str (fs/path repo-root "test/swarmforge/pack_web_test.bb"))) "--test-state"))))
 
+(deftest a-forwarded-approval-carries-the-gate-with-it
+  ;; Given a request whose text is an approval or clarification notification the
+  ;; bridge wrote, and a request that is neither
+  ;; When the dashboard wakes the pane
+  ;; Then the matching one carries the rule that the decision is the operator's,
+  ;; and the ordinary one carries only the answering command
+  (let [approval (run {:dir repo-root} (script "pack_web.sh") "--test-chat-wake"
+                      "req-a" (str "Approval for initial-setup in forgelet-app\n"
+                                   "Gate: specifier → coder\n"
+                                   "React ✅ to approve, or reply in this thread to send it back."))
+        clarification (run {:dir repo-root} (script "pack_web.sh") "--test-chat-wake"
+                           "req-c" (str "Clarification for forgelet-app from specifier\n"
+                                        "Question: restart the daemon?\n"
+                                        "Reply in this thread with the answer."))
+        ordinary (run {:dir repo-root} (script "pack_web.sh") "--test-chat-wake"
+                      "req-o" "is the build green?")]
+    (is (str/includes? (:out approval) "the gate is the operator's"))
+    (is (str/includes? (:out approval) "Do not approve unless the operator says to"))
+    (is (str/includes? (:out clarification) "the answer is"))
+    (is (str/includes? (:out clarification) "Do not answer it unless the operator says to"))
+    (is (not (str/includes? (:out ordinary) "the operator's")))))
+
 (deftest chat-request-carries-the-command-that-answers-it
   ;; Given a chat request the dashboard took for the operator
   ;; When the dashboard wakes the master role's pane
