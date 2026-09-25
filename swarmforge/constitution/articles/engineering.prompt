@@ -8,6 +8,15 @@
   - Go: install with `go install`; mutation `github.com/unclebob/mutate4go`, CRAP `github.com/unclebob/crap4go`, DRY `github.com/unclebob/dry4go`.
   - Clojure: install with Clojure CLI/deps.edn; mutation `github.com/unclebob/clj-mutate`, CRAP `github.com/unclebob/crap4clj`, DRY `github.com/unclebob/dry4clj`.
   - Java: install with Maven (`mvn`); mutation `github.com/unclebob/mutate4java`, CRAP `github.com/unclebob/crap4java`, DRY `github.com/unclebob/dry4java`.
+  - Kotlin: build with the project's own Gradle wrapper (`./gradlew`), never a Gradle from PATH.
+    Mutation is PIT through its Gradle plugin — the `mutate4java` repository is not used, as it is not
+    used for Java — CRAP is `github.com/JeevanThandi/slopguard-kotlin`, built from source by the tool
+    registry's Kotlin recipe at the commit that recipe pins, DRY is detekt's duplication rule, and
+    coverage is Kover (JetBrains'), which slopguard drives itself. The family's Java tools cannot serve
+    Kotlin: `dry4java` parses Java source with JavaParser and `crap4java` drives Maven, so neither can
+    see a `.kt` file. slopguard's score is its own weighted formula — `(cyc × cog) × (1 − cov/100)³ +
+    sqrt(cyc × cog)`, default threshold 30 — not the classic `CC²(1−cov)³ + CC` that `crap4java`
+    computes, so a Kotlin score and a Java score are not the same number.
 
 ## Language Defaults
 - For Clojure projects, prefer Babashka where possible.
@@ -15,6 +24,22 @@
 - Install Speclj with `swarm_tool.sh require speclj`. If missing, `swarm_tool.sh ensure speclj`.
 - If a Speclj spec file changed, run `swarm_tool.sh require speclj-structure-check` (ensure if missing) and check the spec file before running tests.
 - For Java projects, avoid using Maven to run tests; build dedicated test runners and run those instead.
+- For Kotlin projects, the wrapper is the build: run `./gradlew <task>`, never a Gradle from PATH, and
+  never treat `./gradlew build` as a gate. Each suite has its own named task so a role runs only the
+  suite it owns, and the gates stay off unless the role that owns one invokes it.
+
+## Kotlin Gate Tasks
+- A Kotlin project's build provides these tasks through its own wrapper, and these names are the
+  contract every role uses:
+  - `unitTest` — the unit suite.
+  - `acceptanceTest` — the Gherkin acceptance suite, through the acceptance runner.
+  - `propertyTest` — property tests, and never part of `unitTest`.
+  - `mutation` — PIT, differential, with its history file kept.
+  - `coverage` — Kover, producing the report CRAP reads.
+  - `crap` — slopguard-kotlin over the changed sources, reading Kover's report rather than running
+    coverage again.
+- The build keeps them separate and off unless invoked: a role runs only the gate it owns, and no gate
+  is a homegrown substitute for the tool the table names.
 
 ## Design And Testability
 - Work in small, reviewable increments.
