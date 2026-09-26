@@ -63,6 +63,12 @@
               (str working-dir)))
 
 (defn kill-all-sessions! [script-dir window-state-file working-dir tmux-socket backend]
+  ;; Said before it is done, because this is the one actor that can end a
+  ;; project and the one that used to write nothing at all: a swarm that ends
+  ;; silently cannot be told from a swarm that was killed by something else.
+  (println (str "watchdog: ending the project at " working-dir
+                ": its cleanup owner's window stayed missing"))
+  (flush)
   (stop-handoff-daemon! script-dir working-dir)
   (doseq [{:keys [session]} (rows window-state-file)]
     (when-not (str/blank? session)
@@ -81,6 +87,9 @@
       (let [[_ state ids target replacement] args]
         (rewrite-window-id! (fs/path state) (fs/path ids) target replacement)
         (System/exit 0)))
+    (println (str "watchdog: watching the windows of " working-dir " on " tmux-socket
+                  ", with the cleanup owner at index " cleanup-owner-index))
+    (flush)
     (loop [missing-counts {}]
       (when (fs/exists? window-state-file)
         (let [current-rows (rows window-state-file)
@@ -88,6 +97,11 @@
           (when (and cleanup-row (tmux-session? tmux-socket (:session cleanup-row)))
             (let [cleanup-window-id (:window-id cleanup-row)]
               (if (terminal-ok? script-dir working-dir tmux-socket backend "terminal_window_exists" cleanup-window-id)
+                (do
+                  (when (pos? (get missing-counts cleanup-owner-index 0))
+                    (println (str "watchdog: the cleanup owner's window " cleanup-window-id
+                                  " (" (:session cleanup-row) ") is back"))
+                    (flush))
                 (let [missing-counts (assoc missing-counts cleanup-owner-index 0)
                       missing-counts
                       (reduce
@@ -101,15 +115,22 @@
                                (if (< count missing-threshold)
                                  (assoc counts index count)
                                  (let [new-window-id (terminal-out script-dir working-dir tmux-socket backend
-                                                                   "terminal_open_session" session title cleanup-window-id)]
+                                                                  "terminal_open_session" session title cleanup-window-id)]
                                    (when-not (str/blank? new-window-id)
                                      (rewrite-window-id! window-state-file window-ids-file index new-window-id))
+                                   (println (str "watchdog: " session " lost its window " window-id
+                                                 "; opened " (if (str/blank? new-window-id) "nothing" new-window-id)))
+                                   (flush)
                                    (assoc counts index 0)))))))
                        missing-counts
                        current-rows)]
                   (Thread/sleep 2000)
-                  (recur missing-counts))
+                  (recur missing-counts)))
                 (let [count (inc (get missing-counts cleanup-owner-index 0))]
+                  (println (str "watchdog: the cleanup owner's window " cleanup-window-id
+                                " (" (:session cleanup-row) ") is missing, check " count
+                                " of " missing-threshold))
+                  (flush)
                   (if (>= count missing-threshold)
                     (kill-all-sessions! script-dir window-state-file working-dir tmux-socket backend)
                     (do
