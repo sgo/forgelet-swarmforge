@@ -64,10 +64,14 @@ pushed.
 
 The same command composes the bridge, because a forge that cannot reach a phone
 is half a forge. It downloads this family's bridge, builds it on the machine that
-will run it — no cross-compilation and no published binaries — lays the build out
-under `projects/forgelet-bridge/`, copies the adapter into the forge's own
-scripts, and installs the tools and the rules a bridge's rooms rely on. Starting
-a bridge is then `matrix-bridge.sh start`, once a configuration exists. See
+will run it — no cross-compilation and no published binaries — copies the adapter
+into the forge's own scripts, and installs the tools and the rules a bridge's
+rooms rely on, from that fresh copy rather than from anything already in the
+forge. It also lays the built bridge out under `projects/forgelet-bridge/`, where
+the adapter's own defaults look for it. A forge that already keeps the bridge
+there as a project — that directory is a checkout, with its own history and its
+own build — keeps that one instead, and it is the build the adapter then runs.
+Starting a bridge is `matrix-bridge.sh start`, once a configuration exists. See
 *Hook the forge into a bridge* below.
 
 Three overrides are for development rather than for choice:
@@ -153,8 +157,9 @@ Getting the kit into a forge is the bridge's own step, `install-kit` and
 the forge it serves*, so there are two shapes:
 
 - **The forge hosts the bridge.** Clone the bridge into `<forge root>/projects/`
-  and build it with its `scripts/build.sh`, then the defaults resolve and the
-  install is two commands:
+  and build it with its `scripts/build.sh` — the defaults then point at that
+  build, and a clone that was never built is one the adapter cannot start — and
+  the install is two commands:
 
   ```sh
   root="<forge root>"
