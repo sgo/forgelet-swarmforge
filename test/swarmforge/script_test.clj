@@ -1041,6 +1041,34 @@
         (run {:dir root :ok? false} "tmux" "-S" sock "kill-server")
         (fs/delete-tree root)))))
 
+(deftest a-role-session-says-what-it-serves-in-the-status-bar
+  ;; Given a session's subject - a project's directory, as a project's session has
+  ;; When SwarmForge creates the role's session
+  ;; Then the status bar's window entries name the role and the subject, because
+  ;; the bar truncates the session name and every forge's sessions are named for
+  ;; their roles
+  (let [root (tmp-dir)
+        sock (str root "/status.sock")
+        subject (fs/path root "forgelet-app")]
+    (fs/create-dirs subject)
+    (try
+      (let [result (run {:dir root}
+                        (script "swarmforge.bb")
+                        "--test-create-role-session"
+                        sock
+                        "swarmforge-specifier"
+                        (str subject))
+            option (fn [name]
+                     (str/trim (:out (run {:dir root} "tmux" "-S" sock
+                                          "show-options" "-t" "swarmforge-specifier"
+                                          "-qv" name))))]
+        (is (zero? (:exit result)))
+        (is (= "#I:Specifier:forgelet-app" (option "window-status-format")))
+        (is (= "#I:Specifier:forgelet-app" (option "window-status-current-format"))))
+      (finally
+        (run {:dir root :ok? false} "tmux" "-S" sock "kill-server")
+        (fs/delete-tree root)))))
+
 (deftest swarm-cleanup-tolerates-missing-runtime-state
   (let [root (tmp-dir)
         ids-file (fs/path root ".swarmforge/window-ids")]

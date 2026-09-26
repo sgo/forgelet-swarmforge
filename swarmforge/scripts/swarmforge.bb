@@ -384,7 +384,20 @@
   (sh "tmux" "-S" (:tmux-socket ctx) "new-session" "-d" "-s" session "-n" agent-window)
   (sh "tmux" "-S" (:tmux-socket ctx) "set-option" "-t" session "history-limit" (str pane-history-limit))
   (sh "tmux" "-S" (:tmux-socket ctx) "rename-window" "-t" (str session ":" agent-window) title)
-  (sh "tmux" "-S" (:tmux-socket ctx) "set-window-option" "-t" (str session ":" title) "allow-rename" "off"))
+  (sh "tmux" "-S" (:tmux-socket ctx) "set-window-option" "-t" (str session ":" title) "allow-rename" "off")
+  ;; The tmux status bar truncates the session name, so the bottom line reads like
+  ;; "swarmforg0:Specifier" - which is ambiguous the moment two forges are up, since
+  ;; every forge's sessions are named for their roles. Tag the window-status entry
+  ;; with what the session serves: the project for a project's session, and the
+  ;; forge's own directory for the host's. The window name itself stays clean,
+  ;; because other code targets windows by name.
+  (when-let [working-dir (:working-dir ctx)]
+    (let [subject (str (fs/file-name working-dir))
+          window-status (str "#I:" title ":" subject)]
+      (sh "tmux" "-S" (:tmux-socket ctx) "set-option" "-t" session
+          "window-status-current-format" window-status)
+      (sh "tmux" "-S" (:tmux-socket ctx) "set-option" "-t" session
+          "window-status-format" window-status))))
 
 (def aps-tool-purpose
   {"gherkin-parser" "APS parsing"
@@ -1078,8 +1091,10 @@
                                         :tmux-socket-dir (str (fs/parent (fs/path tmux-socket)))})]
     (println (:tmux-window-base-index ctx) (:tmux-pane-base-index ctx))))
 
-(defn test-create-role-session! [tmux-socket session]
-  (create-role-session! {:tmux-socket tmux-socket} session "Specifier")
+(defn test-create-role-session! [tmux-socket session & [working-dir]]
+  (create-role-session! (cond-> {:tmux-socket tmux-socket}
+                          (some? working-dir) (assoc :working-dir working-dir))
+                        session "Specifier")
   (println (sh-out "tmux" "-S" tmux-socket "show-options" "-t" session "-qv" "history-limit")))
 
 (defn test-launch-command! [root agent & [extra-args]]
@@ -1141,7 +1156,7 @@
     "--test-reset-pack-web-state" (test-reset-pack-web-state! (second args))
     "--test-tmux-base-indexes" (test-tmux-base-indexes! (second args))
     "--test-dashboard-address" (test-dashboard-address! (second args) (nth args 2))
-    "--test-create-role-session" (test-create-role-session! (second args) (nth args 2))
+    "--test-create-role-session" (test-create-role-session! (second args) (nth args 2) (nth args 3 nil))
     "--start-project" (run-project! (second args))
     "--stop-project" (run-stop-project! (second args))
     (let [root (or (first args) (System/getProperty "user.dir"))]
