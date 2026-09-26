@@ -1291,6 +1291,54 @@
                        "Answer with: pack_dashboard_request.sh answer req-1 ./tmp/answer.txt"))
     (is (str/includes? wake "a reply only in this pane reaches nobody"))))
 
+(deftest get-swarm-forge-keeps-its-scratch-when-it-fails
+  ;; Given a bridge whose build fails
+  ;; When the composition runs
+  ;; Then it names the scratch it left, and that scratch is there to be read
+  (let [host (tmp-dir)
+        base (tmp-dir)
+        packs (tmp-dir)
+        bridge (tmp-dir)
+        marker "get-swarm-forge: failed, and left its scratch at "]
+    (try
+      (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"]]
+        (write-file (fs/path base "swarmforge/scripts" name) (str name "\n")))
+      (write-file (fs/path base "swarmforge/roles/lieutenant.prompt") "LIEUTENANT\n")
+      (write-file (fs/path base "swarmforge/constitution/articles/engineering.prompt") "ENG\n")
+      (write-file (fs/path base "swarmforge/constitution/articles/workflow.prompt") "WF\n")
+      (write-file (fs/path base "swarmforge/constitution/articles/handoffs.prompt") "HO\n")
+      (write-file (fs/path base "swarm") "#!/bin/sh\necho swarm\n")
+      (doseq [pack-name ["two-pack" "four-pack" "six-pack"]]
+        (let [pack (fs/path packs pack-name)]
+          (write-file (fs/path pack "swarm") "#!/bin/sh\necho swarm\n")
+          (write-file (fs/path pack "swarmforge/swarmforge.conf") "window specifier grok master\n")
+          (write-file (fs/path pack "swarmforge/roles/specifier.prompt") "specifier\n")))
+      (write-file (fs/path bridge "scripts/build.sh") "#!/bin/sh\nexit 1\n")
+      (run {:dir bridge} "chmod" "+x" "scripts/build.sh")
+      (let [result (run {:dir host
+                         :ok? false
+                         :env {"SWARMFORGE_BASE_DIR" (str base)
+                               "SWARMFORGE_PACKS_DIR" (str packs)
+                               "SWARMFORGE_BRIDGE_DIR" (str bridge)}}
+                        (str (fs/path repo-root "get-swarm-forge"))
+                        "project-manager")
+            named (some (fn [line]
+                          (let [line (str/trim line)]
+                            (when (str/starts-with? line marker)
+                              (subs line (count marker)))))
+                        (str/split-lines (str (:err result))))]
+        (is (not (zero? (:exit result))))
+        (is (some? named) (str "the failure did not name its scratch: " (:err result)))
+        (is (fs/directory? named))
+        ;; /var is a symlink to /private/var on macOS, so compare the real paths.
+        (is (str/starts-with? (str (fs/real-path named)) (str (fs/real-path host))))
+        (is (str/includes? (str named) "/tmp/swarmforge-compose-")))
+      (finally
+        (fs/delete-tree host)
+        (fs/delete-tree base)
+        (fs/delete-tree packs)
+        (fs/delete-tree bridge)))))
+
 (deftest get-swarm-forge-seeds-this-forges-own-lieutenant-file-once
   ;; Given a layer that carries a default for the forge's own lieutenant additions
   ;; When a forge is composed twice, with the forge's own file written in between
@@ -1415,10 +1463,17 @@
         (is (fs/exists? record))
         (let [lines (str/split-lines (slurp (str record)))]
           (is (= 2 (count lines)))
+          ;; The kit comes from the freshly fetched bridge under this directory's
+          ;; own tmp/, not from the forge's projects/forgelet-bridge - and that
+          ;; scratch is gone again, because the compose succeeded.
           (is (str/includes? (first lines)
-                             (str host "/projects/forgelet-bridge/swarmforge/scripts")))
+                             (str host "/tmp/swarmforge-compose-")))
+          (is (str/includes? (first lines) "/forgelet-bridge/swarmforge/scripts"))
           (is (str/includes? (second lines)
-                             (str host "/projects/forgelet-bridge/rules")))))
+                             (str host "/tmp/swarmforge-compose-")))
+          (is (str/includes? (second lines) "/forgelet-bridge/rules"))
+          (is (not (str/includes? (first lines) (str host "/projects/"))))
+          (is (empty? (fs/glob host "tmp/swarmforge-compose-*")))))
       (finally
         (fs/delete-tree host)
         (fs/delete-tree base)

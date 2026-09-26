@@ -35,10 +35,25 @@ case "$product" in
 esac
 
 repo_url="${SWARMFORGE_REPO_URL:-$default_repo_url}"
-tmp_dir="$(mktemp -d)"
+
+# Scratch lives under the compose target's own tmp/, because that is the rule every
+# role here follows - write scratch in ./tmp/, never /tmp - and because a compose
+# that failed should leave something a person can look at. It is a fresh directory
+# per run, so nothing stale is ever read back, and it is removed only when the run
+# succeeded.
+tmp_dir="$PWD/tmp/swarmforge-compose-$(date +%Y%m%dT%H%M%S)-$$"
+mkdir -p "$tmp_dir" 2>/dev/null || tmp_dir="$(mktemp -d)"
 
 cleanup() {
-  rm -rf "$tmp_dir"
+  # `status` is read-only in zsh, so the code is its own name.
+  local code=$?
+  if [[ -d "$tmp_dir" ]]; then
+    if [[ $code -eq 0 ]]; then
+      rm -rf "$tmp_dir"
+    else
+      echo "get-swarm-forge: failed, and left its scratch at $tmp_dir" >&2
+    fi
+  fi
 }
 trap cleanup EXIT
 
@@ -324,12 +339,12 @@ install_forgelet_bridge() {
   local root="$PWD"
   local installed="projects/forgelet-bridge"
   local source="$tmp_dir/forgelet-bridge"
-  if [[ -d "$installed/.git" ]]; then
-    # This forge already carries the bridge as one of its projects, so its own
-    # tree is the one to build and install from.
-    source="$installed"
-  else
-    build_forgelet_bridge "$source"
+  # The kit comes from the published bridge, freshly fetched and built, and never
+  # from this forge's own projects/forgelet-bridge: that tree is a live project -
+  # its own history, its own work in it - while what a forge installs is the code
+  # the bridge runs, which is the code the bridge pushes.
+  build_forgelet_bridge "$source"
+  if [[ ! -d "$installed/.git" ]]; then
     mkdir -p "$installed"
     local part
     for part in build swarmforge rules; do
@@ -338,9 +353,6 @@ install_forgelet_bridge() {
       cp -R "$source/$part/." "$installed/$part/"
     done
   fi
-  if [[ ! -x "$installed/build/acceptance/bin/install-kit" ]]; then
-    build_forgelet_bridge "$source"
-  fi
   if [[ -f "$source/scripts/matrix-bridge.sh" ]]; then
     mkdir -p swarmforge/scripts
     cp "$source/scripts/matrix-bridge.sh" swarmforge/scripts/matrix-bridge.sh
@@ -348,10 +360,15 @@ install_forgelet_bridge() {
   fi
   local adapter="swarmforge/scripts/matrix-bridge.sh"
   [[ -x "$adapter" ]] || fail_missing "the bridge's adapter at $adapter"
-  local kit_binary="$root/$installed/build/acceptance/bin/install-kit"
-  local kit_dir="$root/$installed/swarmforge/scripts"
-  local rules_binary="$root/$installed/build/acceptance/bin/install-rules"
-  local rules_dir="$root/$installed/rules"
+  local kit_binary="$source/build/acceptance/bin/install-kit"
+  local kit_dir="$source/swarmforge/scripts"
+  local rules_binary="$source/build/acceptance/bin/install-rules"
+  local rules_dir="$source/rules"
+  local revision=""
+  if [[ -d "$source/.git" ]]; then
+    revision="$(git -C "$source" rev-parse --short HEAD 2>/dev/null || true)"
+  fi
+  echo "get-swarm-forge: installing the kit from ${bridge_ref}${revision:+ at $revision}"
   MATRIX_BRIDGE_FORGE_ROOT="$root" \
   MATRIX_BRIDGE_KIT_BINARY="$kit_binary" \
   MATRIX_BRIDGE_KIT="$kit_dir" \
