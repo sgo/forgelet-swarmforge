@@ -11,10 +11,11 @@ clarifications, and stop the swarm.
 
 ![SwarmForge dashboard](project-swarm.jpg)
 
-This repository is the Forgelet family's fork of SwarmForge. `get-swarm-forge`
-installs from it, so a forge composed here runs SwarmForge *plus* the layer this
-family operates its forges with — including the bridge that puts a forge on the
-operator's phone.
+This repository —
+[`forgelet-swarmforge`](https://github.com/sgo/forgelet-swarmforge) — is the
+Forgelet family's fork of SwarmForge. `get-swarm-forge` installs from it, so a
+forge composed here runs SwarmForge *plus* the layer this family operates its
+forges with — including the bridge that puts a forge on the operator's phone.
 
 ## The Forgelet layer
 
@@ -63,16 +64,17 @@ Set `SWARMFORGE_REPO_URL` to `https://github.com/unclebob/swarm-forge` and
 pushed.
 
 The same command composes the bridge, because a forge that cannot reach a phone
-is half a forge. It downloads this family's bridge, builds it on the machine that
-will run it — no cross-compilation and no published binaries — copies the adapter
-into the forge's own scripts, and installs the tools and the rules a bridge's
-rooms rely on, from that fresh copy rather than from anything already in the
-forge. It also lays the built bridge out under `projects/forgelet-bridge/`, where
-the adapter's own defaults look for it. A forge that already keeps the bridge
-there as a project — that directory is a checkout, with its own history and its
-own build — keeps that one instead, and it is the build the adapter then runs.
-Starting a bridge is `matrix-bridge.sh start`, once a configuration exists. See
-*Hook the forge into a bridge* below.
+is half a forge. It downloads this family's bridge,
+[`forgelet-bridge`](https://github.com/sgo/forgelet-bridge), builds it on the
+machine that will run it — no cross-compilation and no published binaries —
+copies the adapter into the forge's own scripts, and installs the tools and the
+rules a bridge's rooms rely on, from that fresh copy rather than from anything
+already in the forge. It also lays the built bridge out under
+`projects/forgelet-bridge/`, where the adapter's own defaults look for it. A
+forge that already keeps the bridge there as a project — that directory is a
+checkout, with its own history and its own build — keeps that one instead, and it
+is the build the adapter then runs. Starting a bridge is `matrix-bridge.sh
+start`, once a configuration exists. See *Hook the forge into a bridge* below.
 
 Three overrides are for development rather than for choice:
 `SWARMFORGE_BRIDGE_DIR` builds from a local checkout instead of downloading,
@@ -138,13 +140,15 @@ A bridge is what gives a forge its phone: approvals, clarifications, and chat
 travel through Matrix, and the bridge does the talking. Two cases when a forge is
 new:
 
-- **No bridge yet.** Install one — `forgelet-bridge`'s README covers the bridge
-  and its homeserver, which `swarmforge/scripts/matrix-homeserver.sh` can
-  initialise, start, stop, and create users on — then add this forge to it.
+- **No bridge yet.** Install one — [`forgelet-bridge`'s
+  README](https://github.com/sgo/forgelet-bridge#readme) covers the bridge and its
+  homeserver, which `swarmforge/scripts/matrix-homeserver.sh` can initialise,
+  start, stop, and create users on — then add this forge to it.
 - **A bridge and homeserver are already running.** Add one entry for this forge
   root to the bridge's configuration and restart it. One bridge serves every
   forge it lists, each with its own space and name, and its
-  `docs/adding-a-forge.md` is the whole runbook.
+  [`docs/adding-a-forge.md`](https://github.com/sgo/forgelet-bridge/blob/master/docs/adding-a-forge.md)
+  is the whole runbook.
 
 The forge side is deliberately small, because the bridge reads the forge rather
 than the other way round. A running dashboard, found through
