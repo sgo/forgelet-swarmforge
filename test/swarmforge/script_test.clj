@@ -1353,6 +1353,45 @@
         (fs/delete-tree packs)
         (fs/delete-tree bridge)))))
 
+(deftest get-swarm-forge-updates-its-own-copy-from-the-layer
+  ;; Given an installed helper and a layer whose branch carries a different one
+  ;; When the installed copy composes
+  ;; Then it replaces itself with the layer's copy and starts again as that - and
+  ;; the escape hatch leaves it alone, for working on the helper itself
+  (let [dir (tmp-dir)
+        installed (fs/path dir "get-swarm-forge")
+        layer (fs/path dir "layer")
+        stub "#!/usr/bin/env zsh\necho 'the newer helper ran'\n"
+        env {"SWARMFORGE_REPO_URL" "http://127.0.0.1:9/archive"
+             "SWARMFORGE_GIT_DIR" (str layer)}]
+    (try
+      (fs/copy (fs/path repo-root "get-swarm-forge") installed)
+      (write-file (fs/path layer "get-swarm-forge") stub)
+      (run {:dir layer} "chmod" "+x" "get-swarm-forge")
+      (run {:dir layer} "git" "init" "-q")
+      (run {:dir layer} "git" "config" "user.email" "test@example.com")
+      (run {:dir layer} "git" "config" "user.name" "Test User")
+      (run {:dir layer} "git" "add" "get-swarm-forge")
+      (run {:dir layer} "git" "commit" "-q" "-m" "the layer")
+      (run {:dir layer} "git" "branch" "-M" "forgelet")
+      ;; The product is fetched before the layer, so the layer repository needs a
+      ;; branch by that name for the run to reach the self-update at all.
+      (run {:dir layer} "git" "branch" "project-manager")
+
+      (let [result (run {:dir dir :env env :ok? false} (str installed) "project-manager")]
+        (is (str/includes? (:out result) "replaced itself with the helper from forgelet")
+            (:out result))
+        (is (str/includes? (:out result) "the newer helper ran") (:out result))
+        (is (= stub (slurp (str installed)))))
+
+      (fs/copy (fs/path repo-root "get-swarm-forge") installed {:replace-existing true})
+      (run {:dir dir :env (assoc env "SWARMFORGE_NO_SELF_UPDATE" "1") :ok? false}
+           (str installed) "project-manager")
+      (is (str/includes? (slurp (str installed)) "maybe-update-self")
+          "the escape hatch left the installed copy alone")
+      (finally
+        (fs/delete-tree dir)))))
+
 (deftest get-swarm-forge-seeds-this-forges-own-lieutenant-file-once
   ;; Given a layer that carries a default for the forge's own lieutenant additions
   ;; When a forge is composed twice, with the forge's own file written in between

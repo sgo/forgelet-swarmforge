@@ -36,6 +36,12 @@ esac
 
 repo_url="${SWARMFORGE_REPO_URL:-$default_repo_url}"
 
+# The arguments this run was started with, so a self-update can start it again as
+# the fetched copy rather than as itself - and this script's own path, because zsh
+# sets $0 to the function's name inside a function.
+original_args=("$@")
+script_path="${0:A}"
+
 # Scratch lives under the compose target's own tmp/, because that is the rule every
 # role here follows - write scratch in ./tmp/, never /tmp - and because a compose
 # that failed should leave something a person can look at. It is a fresh directory
@@ -56,6 +62,33 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+# The helper is installed as a copy, so a change to it only reaches a machine that
+# installs it again - and nothing on that machine says the copy has gone stale. It
+# downloads the layer it is about to compose from anyway, and that layer carries the
+# helper's own file at its root, so a difference means this copy is the older one:
+# the layer is the source. It is replaced, and the run starts again as the new copy
+# rather than carrying on half-old. A copy that cannot be replaced says so and the
+# run continues, because failing to update yourself is not a reason to fail a compose;
+# SWARMFORGE_NO_SELF_UPDATE=1 turns the whole thing off while the helper is being
+# worked on, which is exactly when a copy on PATH is the right thing to edit.
+maybe-update-self() {
+  local layer="$1"
+  [[ -n "$layer" && -d "$layer" ]] || return 0
+  [[ -z "${SWARMFORGE_NO_SELF_UPDATE:-}" ]] || return 0
+  [[ -z "${SWARMFORGE_SELF_UPDATED:-}" ]] || return 0
+  local mine="$script_path"
+  local theirs="$layer/get-swarm-forge"
+  [[ -f "$theirs" ]] || return 0
+  cmp -s "$mine" "$theirs" && return 0
+  if ! cp "$theirs" "$mine" 2>/dev/null; then
+    echo "get-swarm-forge: the layer carries a newer helper at $theirs, and this copy ($mine) cannot be replaced; install it from the README's command" >&2
+    return 0
+  fi
+  echo "get-swarm-forge: replaced itself with the helper from ${base_ref} and starting again"
+  rm -rf "$tmp_dir"
+  SWARMFORGE_SELF_UPDATED=1 exec "$mine" "${original_args[@]}"
+}
 
 local_git_dir() {
   if [[ -v SWARMFORGE_GIT_DIR ]]; then
@@ -393,6 +426,7 @@ if [[ "$product" == two-pack || "$product" == four-pack || "$product" == six-pac
     download_branch "$base_ref" "$main_dir"
     host_dir="$main_dir"
   fi
+  maybe-update-self "$main_dir"
   pack_src="$(pack_tree "$product")"
   if [[ -z "$pack_src" ]]; then
     pack_src="$tmp_dir/pack"
@@ -423,6 +457,8 @@ if [[ -z "${SWARMFORGE_BASE_DIR:-}" ]]; then
   download_branch "$product" "$host_dir"
   download_branch "$base_ref" "$main_dir"
 fi
+
+maybe-update-self "$main_dir"
 
 mkdir -p projects
 copy_host_files "$host_dir"
