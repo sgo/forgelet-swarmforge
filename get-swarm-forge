@@ -9,9 +9,19 @@ base_ref="${SWARMFORGE_BASE_REF:-forgelet}"
 pack_names=(two-pack four-pack six-pack)
 
 usage() {
+  # Where this fork documents itself, derived rather than written down, so an
+  # override that composes from another repository or branch points at that
+  # one's README instead of at a page that does not describe what just happened.
+  local doc_url="${SWARMFORGE_REPO_URL:-$default_repo_url}/blob/$base_ref/README.md"
   echo "usage: get-swarm-forge <two-pack|four-pack|six-pack|project-manager|lieutenant>" >&2
   echo "  Packs (two-pack, four-pack, six-pack) compose into the current directory." >&2
   echo "  project-manager and lieutenant are forges (projects/, dashboard, host lieutenant)." >&2
+  echo "" >&2
+  echo "  This is the Forgelet fork: the shared runtime comes from its forgelet branch," >&2
+  echo "  on top of SwarmForge. What that layer is, and where a forge's own things go -" >&2
+  echo "  swarmforge/local-scripts/, local-lieutenant.prompt, a project's language.conf -" >&2
+  echo "  is documented at:" >&2
+  echo "    $doc_url" >&2
 }
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -82,7 +92,7 @@ maybe-update-self() {
   [[ -f "$theirs" ]] || return 0
   cmp -s "$mine" "$theirs" && return 0
   if ! cp "$theirs" "$mine" 2>/dev/null; then
-    echo "get-swarm-forge: the layer carries a newer helper at $theirs, and this copy ($mine) cannot be replaced; install it from the README's command" >&2
+    echo "get-swarm-forge: the layer carries a newer helper at $theirs, and this copy ($mine) cannot be replaced; install it again with the command in ${SWARMFORGE_REPO_URL:-$default_repo_url}/blob/$base_ref/README.md" >&2
     return 0
   fi
   echo "get-swarm-forge: replaced itself with the helper from ${base_ref} and starting again"

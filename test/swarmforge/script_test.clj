@@ -1335,6 +1335,26 @@
                        "Answer with: pack_dashboard_request.sh answer req-1 ./tmp/answer.txt"))
     (is (str/includes? wake "a reply only in this pane reaches nobody"))))
 
+(deftest get-swarm-forge-help-names-the-layer-readme
+  ;; Given an operator who asks the helper what it does
+  ;; When it prints its usage
+  ;; Then the usage points at this fork's README, which is where what the layer is
+  ;; and where a forge's own things go are documented - and a composition aimed at
+  ;; another branch by override points at that branch's page, not at ours
+  (let [helper (str (fs/path repo-root "get-swarm-forge"))
+        usage (fn [result] (str (:out result) (:err result)))
+        mine (run {:dir repo-root} helper "-h")
+        other (run {:dir repo-root
+                    :env {"SWARMFORGE_REPO_URL" "https://example.test/other"
+                          "SWARMFORGE_BASE_REF" "somebranch"}}
+                   helper "-h")]
+    (is (zero? (:exit mine)) (:err mine))
+    (is (str/includes? (usage mine) "blob/forgelet/README.md") (usage mine))
+    (is (str/includes? (usage mine) "local-scripts") (usage mine))
+    (is (str/includes? (usage other)
+                       "https://example.test/other/blob/somebranch/README.md")
+        (usage other))))
+
 (deftest get-swarm-forge-keeps-its-scratch-when-it-fails
   ;; Given a bridge whose build fails
   ;; When the composition runs
