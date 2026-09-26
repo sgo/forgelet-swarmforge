@@ -571,20 +571,19 @@
                               "--minimal --rules " prompt
                               (when initial-prompt? (str " --verbatim " prompt)))))
       (= index 0)
-      ;; The cleanup is the other actor that ends a project in silence, so it
-      ;; says why before it does: which role's process ended, with what status,
-      ;; and everything it then does, into the project's own cleanup log. A
-      ;; swarm that ends with nothing written cannot be told from one killed by
-      ;; something else, which is the question the ring's lesson asked.
-      (str "; exit_code=$?; printf '%s the %s process exited (status %s) - stopping this project\\n'"
-           " \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" " (sq (:role row)) " \"$exit_code\" >> "
-           (sq (str (fs/path (:state-dir ctx) "cleanup.log")))
-           "; SWARMFORGE_TERMINAL_BACKEND=" (sq (:terminal-backend ctx))
+      ;; The cleanup is the other actor that ends a project in silence, and it
+      ;; now says why - but the reason travels as two words rather than as a
+      ;; line of its own. This command is *typed into a terminal*, and a
+      ;; terminal's input line holds about a thousand characters: the form of
+      ;; this suffix that wrote its own line of prose pushed the first role's
+      ;; command past that, and the role never started. The script does the
+      ;; writing, where length costs nothing.
+      (str "; exit_code=$?; SWARMFORGE_TERMINAL_BACKEND=" (sq (:terminal-backend ctx))
            " nohup " (sq (str (fs/path (:script-dir ctx) "swarm-cleanup.sh")))
            " " (sq (:tmux-socket ctx))
            " " (sq (str (:window-ids-file ctx)))
            (apply str (map #(str " " (sq (:session %))) (:roles ctx)))
-           " >> " (sq (str (fs/path (:state-dir ctx) "cleanup.log"))) " 2>&1 &!; exit $exit_code"))))
+           " --because " (sq (:role row)) " \"$exit_code\" >/dev/null 2>&1 &!; exit $exit_code"))))
 
 (defn codex-home []
   (or (not-empty (System/getenv "CODEX_HOME"))
@@ -1103,6 +1102,12 @@
   (create-role-session! (cond-> {:tmux-socket tmux-socket}
                           (some? working-dir) (assoc :working-dir working-dir))
                         session "Specifier")
+  ;; A session created without a command runs the login shell, and a shell that
+  ;; reads its own startup and leaves - under load, or on a machine whose shell
+  ;; is configured to exit - takes the session with it before a reader can ask
+  ;; it anything. What the caller is testing is the session's options, so it is
+  ;; given something to hold it open.
+  (sh "tmux" "-S" tmux-socket "send-keys" "-t" session "sleep 300" "Enter")
   (println (sh-out "tmux" "-S" tmux-socket "show-options" "-t" session "-qv" "history-limit")))
 
 (defn test-launch-command! [root agent & [extra-args]]

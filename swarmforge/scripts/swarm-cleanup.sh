@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
-  echo "Usage: swarm-cleanup.sh <tmux-socket> <window-ids-file> [session ...]" >&2
+  echo "Usage: swarm-cleanup.sh <tmux-socket> <window-ids-file> [session ...] [--because <role> <status>]" >&2
   exit 1
 fi
 
@@ -13,6 +13,37 @@ WORKING_DIR="$(cd "$(dirname "$WINDOW_IDS_FILE")/.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 shift
 shift
+
+# Why this ran, when the launcher can say: which role's process ended and with
+# what status. It is the only actor that ends a project without the watchdog
+# being involved, and until this it said nothing at all - so a swarm that ended
+# silently could not be told from one killed by something else.
+because_role=""
+because_status=""
+sessions=()
+while (( $# )); do
+  case "$1" in
+    --because)
+      because_role="${2:-}"
+      because_status="${3:-}"
+      shift 3
+      ;;
+    *)
+      sessions+=("$1")
+      shift
+      ;;
+  esac
+done
+
+# Everything this cleanup says - its own reason first - goes to the project's
+# own log rather than nowhere.
+cleanup_log="$WORKING_DIR/.swarmforge/cleanup.log"
+mkdir -p "$(dirname "$cleanup_log")"
+if [[ -n "$because_role" ]]; then
+  printf '%s the %s process exited (status %s) - stopping this project\n' \
+    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$because_role" "$because_status" >> "$cleanup_log"
+fi
+exec >> "$cleanup_log" 2>&1
 
 has_command() {
   command -v "$1" &>/dev/null
@@ -38,7 +69,7 @@ else
   fi
 fi
 
-for session in "$@"; do
+for session in "${sessions[@]}"; do
   tmux -S "$TMUX_SOCKET" kill-session -t "$session" 2>/dev/null || true
 done
 
