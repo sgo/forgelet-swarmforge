@@ -11,11 +11,11 @@ clarifications, and stop the swarm.
 
 ![SwarmForge dashboard](project-swarm.jpg)
 
-This repository —
-[`forgelet-swarmforge`](https://github.com/sgo/forgelet-swarmforge) — is the
-Forgelet family's fork of SwarmForge. `get-swarm-forge` installs from it, so a
-forge composed here runs SwarmForge *plus* the layer this family operates its
-forges with — including the bridge that puts a forge on the operator's phone.
+This repository is
+[`forgelet-swarmforge`](https://github.com/sgo/forgelet-swarmforge), the Forgelet
+family's fork of SwarmForge. `get-swarm-forge` installs from it, so a forge
+composed here runs SwarmForge *plus* the layer this family operates its forges
+with — including the bridge that puts a forge on the operator's phone.
 
 ## The Forgelet layer
 
