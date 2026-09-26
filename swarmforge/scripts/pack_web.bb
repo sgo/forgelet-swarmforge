@@ -106,6 +106,14 @@
         (when-not (zero? (:exit result))
           (throw (ex-info "tmux send-keys failed" result)))))))
 
+(defn tmux! [socket & args]
+  (let [argv (into ["tmux" "-S" socket] args)]
+    (if-let [stub (tmux-stub)]
+      (record-argv! stub argv)
+      (let [result (apply sh argv)]
+        (when-not (zero? (:exit result))
+          (throw (ex-info "tmux failed" result)))))))
+
 (defn role-rows [root]
   (let [file (fs/path root ".swarmforge" "roles.tsv")]
     (if (fs/exists? file)
@@ -126,15 +134,24 @@
     (when (fs/exists? file)
       (not-empty (str/trim (slurp (str file)))))))
 
+;; The wake goes in as one paste and then one Enter. A chat request runs to lines -
+;; the operator's own, the answering command, the gate when it holds one - and a
+;; terminal still taking that text swallows the Enter that follows it. The whole
+;; wake then sits in the composer reading as nothing having read it, and the
+;; operator deletes words they did not type. One paste is what keeps the body's own
+;; newlines from submitting the request piecemeal, and one Enter is the one turn
+;; the pane takes.
+;;
+;; The doorbell is what proves a request was read: it rings whatever the dashboard
+;; still holds, and it now judges whether its own ring landed. So the wake does not
+;; have to prove itself - it has to leave nothing behind that nobody sent.
+(def wake-buffer "swarmforge-wake")
+
 (defn inject-target! [socket target text]
   (when (and socket target (not (str/blank? text)))
-    (send-keys! socket target "-l" text)
-    (when-not (tmux-stub)
-      (Thread/sleep 150))
-    (send-keys! socket target "C-m")
-    (when-not (tmux-stub)
-      (Thread/sleep 50))
-    (send-keys! socket target "C-j")))
+    (tmux! socket "set-buffer" "-b" wake-buffer text)
+    (tmux! socket "paste-buffer" "-d" "-p" "-b" wake-buffer "-t" target)
+    (tmux! socket "send-keys" "-t" target "C-m")))
 
 (defn inject-role! [root role text]
   (try

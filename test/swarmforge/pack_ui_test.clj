@@ -876,10 +876,12 @@
       (is (str/includes? (str (:err result)) "inject failed"))
       (is (str/includes? (str (:err result)) "coder")))))
 
-(deftest inject-master-records-send-keys-argv
+(deftest inject-master-records-the-wake-argv
   ;; Given master session swarmforge-specifier in roles.tsv
   ;; When --test-inject-argv records the would-be tmux argv
-  ;; Then it send-keys -l the text to that session, then C-m
+  ;; Then the wake goes in as one paste of that text, then one Enter, and it is
+  ;; never typed - a typed wake is what a terminal still reading it swallows the
+  ;; Enter of, which leaves the whole request in the composer unsent
   (let [root (tmp-dir)
         argv-file (str (fs/path root "tmux.argv"))
         sock (str (fs/path root "tmux.sock"))
@@ -891,12 +893,15 @@
     (let [result (pack-web root false "--test-inject-argv" (str root) argv-file text)
           argv (read-argv argv-file)]
       (is (zero? (:exit result)))
-      (is (= ["tmux" "-S" sock "send-keys" "-t" "swarmforge-specifier:Specifier.0" "-l" text]
+      (is (= ["tmux" "-S" sock "set-buffer" "-b" "swarmforge-wake" text]
              (first argv)))
-      (is (= ["tmux" "-S" sock "send-keys" "-t" "swarmforge-specifier:Specifier.0" "C-m"]
+      (is (= ["tmux" "-S" sock "paste-buffer" "-d" "-p" "-b" "swarmforge-wake"
+              "-t" "swarmforge-specifier:Specifier.0"]
              (second argv)))
-      (is (= ["tmux" "-S" sock "send-keys" "-t" "swarmforge-specifier:Specifier.0" "C-j"]
-             (nth argv 2))))))
+      (is (= ["tmux" "-S" sock "send-keys" "-t" "swarmforge-specifier:Specifier.0" "C-m"]
+             (nth argv 2)))
+      (is (= 3 (count argv)))
+      (is (empty? (filter #(some #{"-l"} %) argv))))))
 
 (deftest pack-web-post-task-queues-a-note-for-master
   ;; Given a specifier pack and a tmux argv stub
@@ -940,8 +945,10 @@
       (is (str/includes? (str (last (first argv))) text))
       (is (re-find #"\[req-" (str (last (first argv)))))
       (is (not (str/starts-with? (str (last (first argv))) "Task:")))
-      (is (= "C-m" (last (second argv))))
-      (is (= "C-j" (last (nth argv 2)))))))
+      (is (= "set-buffer" (nth (first argv) 3)))
+      (is (= "paste-buffer" (nth (second argv) 3)))
+      (is (= "C-m" (last (nth argv 2))))
+      (is (= 3 (count argv))))))
 
 (deftest attention-reject-injects-a-message-to-master
   ;; Given a pending approval and a tmux argv stub
@@ -975,8 +982,10 @@
         (is (not (fs/exists? (fs/path root ".swarmforge/notify/reject-htw-console-app"))))
         (is (str/includes? (str (last (first argv))) "use an RNG"))
         (is (empty? (filter #(str/includes? (fs/file-name %) "New_Task") notes)))
-        (is (= "C-m" (last (second argv))))
-        (is (= "C-j" (last (nth argv 2))))))))
+        (is (= "set-buffer" (nth (first argv) 3)))
+        (is (= "paste-buffer" (nth (second argv) 3)))
+        (is (= "C-m" (last (nth argv 2))))
+        (is (= 3 (count argv)))))))
 
 (deftest pack-web-lists-every-role-in-the-work-queue
   ;; Given a six-pack with no in_process mail
