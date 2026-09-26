@@ -732,6 +732,20 @@
         (fs/delete-tree root)
         (fs/delete-tree home)))))
 
+(deftest the-tool-registry-knows-each-languages-recipe
+  ;; Given the shared tool registry
+  ;; When it is read
+  ;; Then every language our projects are written in has the recipe its tools need -
+  ;; a Go tool built from its package, and Kotlin's slopguard built through Gradle -
+  ;; so a refresh from upstream cannot quietly leave a language without one
+  (let [registry (slurp (str (fs/path repo-root "swarmforge" "scripts" "swarm_tool.bb")))]
+    (is (str/includes? registry ":go-package \"github.com/unclebob/crap4go/cmd/crap4go\""))
+    (is (str/includes? registry ":go-package \"github.com/unclebob/dry4go/cmd/dry4go\""))
+    (is (str/includes? registry ":go-package \"github.com/unclebob/mutate4go/cmd/mutate4go\""))
+    (is (str/includes? registry
+                       "\"slopguard\" {:source \"github.com/JeevanThandi/slopguard-kotlin\""))
+    (is (str/includes? registry ":gradle-install \"app:installDist\""))))
+
 (deftest swarm-tool-knows-constitution-tool-names
   ;; Given a pack project
   ;; When require runs for clj-mutate
