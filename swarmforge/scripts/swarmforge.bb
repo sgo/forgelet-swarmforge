@@ -571,12 +571,20 @@
                               "--minimal --rules " prompt
                               (when initial-prompt? (str " --verbatim " prompt)))))
       (= index 0)
-      (str "; exit_code=$?; SWARMFORGE_TERMINAL_BACKEND=" (sq (:terminal-backend ctx))
+      ;; The cleanup is the other actor that ends a project in silence, so it
+      ;; says why before it does: which role's process ended, with what status,
+      ;; and everything it then does, into the project's own cleanup log. A
+      ;; swarm that ends with nothing written cannot be told from one killed by
+      ;; something else, which is the question the ring's lesson asked.
+      (str "; exit_code=$?; printf '%s the %s process exited (status %s) - stopping this project\\n'"
+           " \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\" " (sq (:role row)) " \"$exit_code\" >> "
+           (sq (str (fs/path (:state-dir ctx) "cleanup.log")))
+           "; SWARMFORGE_TERMINAL_BACKEND=" (sq (:terminal-backend ctx))
            " nohup " (sq (str (fs/path (:script-dir ctx) "swarm-cleanup.sh")))
            " " (sq (:tmux-socket ctx))
            " " (sq (str (:window-ids-file ctx)))
            (apply str (map #(str " " (sq (:session %))) (:roles ctx)))
-           " >/dev/null 2>&1 &!; exit $exit_code"))))
+           " >> " (sq (str (fs/path (:state-dir ctx) "cleanup.log"))) " 2>&1 &!; exit $exit_code"))))
 
 (defn codex-home []
   (or (not-empty (System/getenv "CODEX_HOME"))
