@@ -643,6 +643,36 @@
         (finally
           (fs/delete-tree root))))))
 
+(deftest launch-command-puts-this-forges-own-helpers-on-path
+  ;; Given a launched role in a project that may keep helpers of its own
+  ;; When the start command is built
+  ;; Then swarmforge/local-scripts comes before the shared scripts on PATH, so a
+  ;; project's own helper is found and is not the one an update replaces
+  (let [root (tmp-dir)]
+    (try
+      (let [command (:out (run {:dir root}
+                               (script "swarmforge.bb")
+                               "--test-launch-command"
+                               (str root)
+                               "codex"))]
+        (is (str/includes? command (str "swarmforge/local-scripts'")))
+        (is (< (.indexOf command "swarmforge/local-scripts")
+               (.indexOf command "swarmforge/scripts'"))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest the-instructions-name-where-a-forges-own-helpers-live
+  ;; Given the shared engineering article and the lieutenant's instructions
+  ;; When they are read
+  ;; Then both name swarmforge/local-scripts, so a session knows where a helper of
+  ;; its own belongs rather than putting it among the shared, replaced scripts
+  (let [article (slurp (str (fs/path repo-root "swarmforge" "constitution"
+                                    "articles" "engineering.prompt")))
+        lieutenant (slurp (str (fs/path repo-root "swarmforge" "roles"
+                                       "lieutenant.prompt")))]
+    (is (str/includes? article "swarmforge/local-scripts/"))
+    (is (str/includes? lieutenant "swarmforge/local-scripts/"))))
+
 (deftest launch-command-puts-project-tool-bin-on-path
   ;; Given a launched role
   ;; When the start command is built

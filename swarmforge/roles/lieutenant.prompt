@@ -94,5 +94,9 @@ is rung again. Read what arrives rather than remembering what this file used to 
   It is this forge's own file, and it is where anything true here and nowhere
   else belongs: the composer seeds it once and never writes it again, while
   this file is the shared one, replaced on every update.
+- This forge's own helpers live in `swarmforge/local-scripts/`, which is on this
+  session's path: a script that belongs to this forge and no other goes there, beside
+  the shared `swarmforge/scripts/` rather than inside it, because that directory is
+  replaced on every update.
 - Do not put forge-specific rules in this file. They are lost on the next
   update, which is how this arrangement came about.

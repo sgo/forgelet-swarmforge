@@ -517,6 +517,11 @@
                           (fs/path role-worktree "swarmforge" "scripts"))
         prompt-file (fs/path (:prompts-dir ctx) (str role ".md"))
         tool-bin (fs/path (:working-dir ctx) ".swarmforge" "bin")
+        ;; A forge's own helpers, wherever they are the forge's: a directory the
+        ;; composition never writes, sitting beside the shared scripts rather than
+        ;; inside them, because that directory is replaced on every update. An
+        ;; absent directory on PATH costs nothing.
+        local-scripts (fs/path role-worktree "swarmforge" "local-scripts")
         prompt (str "\"$(cat " (sq (str prompt-file)) ")\"")
         ;; A lieutenant's first message names its rules instead of carrying
         ;; them: the instruction file holds the whole role prompt, which is more
@@ -527,7 +532,8 @@
         initial-prompt (if (= role "lieutenant") lieutenant-prompt prompt)
         initial-prompt? (gets-initial-prompt? role agent)
         base (str "export SWARMFORGE_ROLE=" (sq role)
-                  " && export PATH=" (sq (str tool-bin)) ":" (sq (str role-script-dir)) ":$PATH"
+                  " && export PATH=" (sq (str local-scripts)) ":" (sq (str tool-bin)) ":"
+                  (sq (str role-script-dir)) ":$PATH"
                   " && cd " (sq (str role-worktree))
                   " && ")]
     (write-agent-instruction-file! ctx role prompt-file (last-pack-role? ctx role))

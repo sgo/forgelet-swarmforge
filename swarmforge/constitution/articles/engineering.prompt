@@ -10,6 +10,10 @@
   is the template, the project is what it is. A project without that file is its
   pack's default, so read the file when it exists and the pack's line only when it
   does not.
+- A project's own helpers live in `swarmforge/local-scripts/`, which is on the path of
+  every session and is a file the composition never writes: the shared scripts sit in
+  `swarmforge/scripts/` and are replaced on every update, so a helper that belongs to
+  this project and no other goes beside them rather than inside them.
 - Language tool table:
   - Go: install with `go install`; mutation `github.com/unclebob/mutate4go`, CRAP `github.com/unclebob/crap4go`, DRY `github.com/unclebob/dry4go`.
   - Clojure: install with Clojure CLI/deps.edn; mutation `github.com/unclebob/clj-mutate`, CRAP `github.com/unclebob/crap4clj`, DRY `github.com/unclebob/dry4clj`.
