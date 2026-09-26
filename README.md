@@ -111,9 +111,12 @@ knowing exactly what that means:
 - **Kept**: everything the table above names, and everything under
   `.swarmforge/` — the dashboard address, the board, the handoffs, the sessions —
   because that is state rather than composition.
-- **Untouched**: `projects/`. A project carries its own copy of the runtime, and
-  that copy is refreshed when the dashboard opens or refreshes the project, not
-  by this helper.
+- **Untouched**: `projects/`, with the one exception named under *Start a forge* —
+  a forge that does not keep the bridge as a project of its own gets a freshly
+  built one laid out at `projects/forgelet-bridge/`, because that is where the
+  adapter's defaults look for it. A project carries its own copy of the runtime,
+  and that copy is refreshed when the dashboard opens or refreshes the project,
+  not by this helper. A directory that is a checkout is left alone.
 
 Run it while the forge is stopped, so nothing is mid-launch.
 
