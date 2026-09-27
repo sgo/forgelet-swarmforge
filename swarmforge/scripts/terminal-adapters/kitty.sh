@@ -62,6 +62,28 @@ terminal_window_exists() {
   local window_id="$1"
   [[ -n "$window_id" ]] || return 1
 
+  # Only an answer that the window is not there may count as missing - a
+  # question that gets no answer may not, because `kitten @ ls --match` exits
+  # non-zero both when nothing matches and when kitty cannot be asked at all,
+  # and the window watchdog reads three misses in a row as "the cleanup
+  # owner's surface is gone" and ends the project. On 2026-09-27 that
+  # conflation ended live swarms three times - 07:39, 10:35, 12:18 - with
+  # every window still there: kitty's process had not restarted since 19
+  # September, its whole window list came back empty for a minute or two, and
+  # then answered again with the same ids. So ask for the window list first;
+  # if that question fails, or kitty answers with no windows at all, say the
+  # window is still there and say why on stderr, which the watchdog's own log
+  # keeps.
+  local listing
+  if ! listing="$(kitty_remote_control ls 2>/dev/null)"; then
+    print -u2 "kitty did not answer; window ${window_id} cannot be called missing"
+    return 0
+  fi
+  if [[ -z "$listing" ]]; then
+    print -u2 "kitty answered with an empty window list; window ${window_id} cannot be called missing"
+    return 0
+  fi
+
   kitty_remote_control ls --match "id:$window_id" >/dev/null 2>&1
 }
 
