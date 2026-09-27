@@ -74,13 +74,22 @@ terminal_window_exists() {
   # if that question fails, or kitty answers with no windows at all, say the
   # window is still there and say why on stderr, which the watchdog's own log
   # keeps.
-  local listing
+  # How long the question took is part of the answer: a kitty that is slow is a
+  # loaded machine, and one that never answers is something else. Every failure
+  # says which it was, so the next occurrence names itself instead of looking
+  # like a window that went away.
+  zmodload zsh/datetime 2>/dev/null
+  local listing started
+  local -F elapsed
+  started=$EPOCHREALTIME
   if ! listing="$(kitty_remote_control ls 2>/dev/null)"; then
-    print -u2 "kitty did not answer; window ${window_id} cannot be called missing"
+    elapsed=$(( EPOCHREALTIME - started ))
+    print -u2 "kitty did not answer after $(printf '%.1f' "$elapsed")s; window ${window_id} cannot be called missing"
     return 0
   fi
   if [[ -z "$listing" ]]; then
-    print -u2 "kitty answered with an empty window list; window ${window_id} cannot be called missing"
+    elapsed=$(( EPOCHREALTIME - started ))
+    print -u2 "kitty answered with an empty window list after $(printf '%.1f' "$elapsed")s; window ${window_id} cannot be called missing"
     return 0
   fi
 
