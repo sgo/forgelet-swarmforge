@@ -11,6 +11,9 @@
 (defn sh [& args]
   (apply process/sh args))
 
+(defn shell-quote [value]
+  (str "'" (str/replace (str value) "'" "'\"'\"'") "'"))
+
 (defn forge? [root]
   (fs/directory? (fs/path root "projects")))
 
@@ -289,8 +292,15 @@
         script (swarmforge-bb forge)
         log (fs/path dest ".swarmforge" "start.log")]
     (fs/create-dirs (fs/parent log))
-    (process/process ["bb" script "--start-project" (str dest)]
-                     {:out (str log) :err :out})))
+    ;; Through a shell that backgrounds it and goes away, so the runtime outlives
+    ;; whoever asked for it. Spawned directly it is the caller's child, and a caller
+    ;; that exits takes the project down with it: a lieutenant running
+    ;; `--open-project` from its own command line marked the forge and left nothing
+    ;; running, because the bb process that asked was gone a moment later.
+    (process/sh {:continue true}
+                "zsh" "-c"
+                (str "nohup bb " (shell-quote (str script)) " --start-project "
+                     (shell-quote (str dest)) " > " (shell-quote (str log)) " 2>&1 &!"))))
 
 (defn stop-project-runtime! [forge name]
   (let [dest (str (project-dir forge name))
