@@ -1567,14 +1567,15 @@
         (fs/delete-tree base)
         (fs/delete-tree packs)))))
 
-(deftest six-pack-carries-the-ignore-lines-its-build-needs
-  ;; Given a pack whose language writes build output beside its source
+(deftest six-pack-carries-the-ignore-lines-a-project-needs
+  ;; Given a pack whose language writes build output beside its source, on a
+  ;; host whose file manager leaves its own metadata behind
   ;; When the layer's copy of that pack's ignore lines is read
-  ;; Then the lines a project needs before its first build are in the file
+  ;; Then the language's lines, and the host's, are in the file
   (let [file (fs/path repo-root "swarmforge" "packs" "six-pack" "gitignore")]
     (is (fs/exists? file) (str "missing " file))
     (let [lines (set (str/split-lines (slurp (str file))))]
-      (doseq [line [".idea/" "build/" ".gradle/" ".kotlin/" "local.properties" "tmp/"]]
+      (doseq [line [".idea/" "build/" ".gradle/" ".kotlin/" "local.properties" "tmp/" ".DS_Store"]]
         (is (contains? lines line) (str "six-pack gitignore lacks " line))))))
 
 (deftest the-lieutenant-is-told-where-this-forges-own-rules-live

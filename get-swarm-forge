@@ -260,13 +260,14 @@ copy_pack_template() {
   fi
 }
 
-# The lines a pack's language needs git to leave alone, so build output never
-# becomes the first commit. A pack branch stays a mirror of upstream, so a
-# Forgelet forge carries them here instead, under the pack's own name, and writes
-# them where composition reads them: the forge.bb overlay merges a pack's
-# `gitignore` into a project's .gitignore without replacing what the project put
-# there. Lines are merged rather than copied so a forge-side file that already
-# has them stays as it is.
+# The lines a project composed from a pack needs git to leave alone - the
+# language's build output, so that never becomes the first commit, and the
+# host's own noise. A pack branch stays a mirror of upstream, so a Forgelet forge
+# carries them here instead, under the pack's own name, and writes them where
+# composition reads them: the forge.bb overlay merges a pack's `gitignore` into a
+# project's .gitignore without replacing what the project put there. Lines are
+# merged rather than copied so a forge-side file that already has them stays as
+# it is.
 merge_ignore_lines() {
   local src="$1"
   local dest="$2"

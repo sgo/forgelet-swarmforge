@@ -163,10 +163,12 @@
     (when-not (contains? lines line)
       (spit (str file) (str line "\n") :append true))))
 
-;; A pack may carry a `gitignore` file: the lines its language needs ignored
-;; before the first build, so build output never becomes the first commit. They
-;; are merged into the project's .gitignore rather than copied over it - a line
-;; the project added later stays, and no line arrives twice.
+;; A pack may carry a `gitignore` file: the lines a project written in its
+;; language needs git to leave alone, before the first build and after it - its
+;; build output, so that never becomes the first commit, and the host's own
+;; noise, which is the same in every language. They are merged into the
+;; project's .gitignore rather than copied over it - a line the project added
+;; later stays, and no line arrives twice.
 (defn copy-pack-ignores! [pack-root dest]
   (let [src (fs/path pack-root "gitignore")]
     (when (fs/regular-file? src)
@@ -215,7 +217,7 @@
     (sh "git" "-C" (str dir) "branch" "-M" "master")
     (let [gitignore (fs/path dir ".gitignore")]
       (when-not (fs/exists? gitignore)
-        (spit (str gitignore) ".swarmforge/\n.worktrees/\n")))
+        (spit (str gitignore) ".swarmforge/\n.worktrees/\n.DS_Store\n")))
     (sh {:continue true} "git" "-C" (str dir) "add" ".")
     ;; Never write an identity into the project's config: the commits in this
     ;; repository are the operator's work, not the scaffolding tool's, and a
