@@ -24,7 +24,9 @@
   (str (fs/path scripts-dir name)))
 
 (defn tmp-dir []
-  (let [dir (fs/create-temp-dir {:prefix "swarmforge-pack-ui-test."})]
+  ;; A short base rather than TMPDIR: tmux refuses a socket path past the unix limit,
+  ;; and TMPDIR's /var/folders path is most of that budget (see script_test.clj).
+  (let [dir (fs/create-temp-dir {:dir "/tmp" :prefix "sf-pack-ui."})]
     (swap! temp-dirs conj dir)
     dir))
 

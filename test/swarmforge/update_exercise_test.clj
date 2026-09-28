@@ -23,7 +23,9 @@
     result))
 
 (defn tmp-dir []
-  (fs/create-temp-dir {:prefix "swarmforge-update-exercise-test."}))
+  ;; A short base rather than TMPDIR: tmux refuses a socket path past the unix limit,
+  ;; and TMPDIR's /var/folders path is most of that budget (see script_test.clj).
+  (fs/create-temp-dir {:dir "/tmp" :prefix "sf-exercise."}))
 
 (defn script [] (str (fs/path scripts-dir "update-exercise.sh")))
 

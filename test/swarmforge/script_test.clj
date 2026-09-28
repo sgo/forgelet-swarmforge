@@ -31,7 +31,13 @@
   (run {:dir root} "git" "commit" "-q" "-m" "Initial commit"))
 
 (defn tmp-dir []
-  (fs/create-temp-dir {:prefix "swarmforge-script-test."}))
+  ;; A short base rather than TMPDIR: on this machine TMPDIR is /var/folders/<...>/T,
+  ;; and a long random suffix plus a socket name runs past the unix socket path limit,
+  ;; so every tmux the fixtures start answers "File name too long" - which is how
+  ;; a-role-session-says-what-it-serves-in-the-status-bar and the role-session tests
+  ;; flaked (2 runs of 3, 2026-09-28). The name stays recognizable for a directory a
+  ;; crashing run leaves behind; each test still deletes its own in its finally.
+  (fs/create-temp-dir {:dir "/tmp" :prefix "sf-script."}))
 
 (defn script [name]
   (str (fs/path scripts-dir name)))
