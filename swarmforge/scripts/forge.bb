@@ -217,7 +217,7 @@
     (sh "git" "-C" (str dir) "branch" "-M" "master")
     (let [gitignore (fs/path dir ".gitignore")]
       (when-not (fs/exists? gitignore)
-        (spit (str gitignore) ".swarmforge/\n.worktrees/\n.DS_Store\n")))
+        (spit (str gitignore) ".swarmforge/\n.worktrees/\n")))
     (sh {:continue true} "git" "-C" (str dir) "add" ".")
     ;; Never write an identity into the project's config: the commits in this
     ;; repository are the operator's work, not the scaffolding tool's, and a

@@ -286,6 +286,13 @@ install_pack_ignores() {
     for pack_name in "${pack_names[@]}"; do
       merge_ignore_lines "$src/swarmforge/packs/$pack_name/gitignore" \
                          "packs/$pack_name/gitignore"
+      # And the lines every project needs whichever pack it is composed from -
+      # the host's own noise, which no language and no pack brings with it. They
+      # are carried once, beside the packs, and merged into each pack's list here
+      # so a pack whose language writes nothing at the root still ignores them,
+      # and a pack added later needs no reminder.
+      merge_ignore_lines "$src/swarmforge/packs/gitignore" \
+                         "packs/$pack_name/gitignore"
     done
   done
 }

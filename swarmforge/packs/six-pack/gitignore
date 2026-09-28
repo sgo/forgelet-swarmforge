@@ -4,4 +4,3 @@ build/
 .kotlin/
 local.properties
 tmp/
-.DS_Store

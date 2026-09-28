@@ -1567,15 +1567,14 @@
         (fs/delete-tree base)
         (fs/delete-tree packs)))))
 
-(deftest six-pack-carries-the-ignore-lines-a-project-needs
-  ;; Given a pack whose language writes build output beside its source, on a
-  ;; host whose file manager leaves its own metadata behind
+(deftest six-pack-carries-the-ignore-lines-its-build-needs
+  ;; Given a pack whose language writes build output beside its source
   ;; When the layer's copy of that pack's ignore lines is read
-  ;; Then the language's lines, and the host's, are in the file
+  ;; Then the lines a project needs before its first build are in the file
   (let [file (fs/path repo-root "swarmforge" "packs" "six-pack" "gitignore")]
     (is (fs/exists? file) (str "missing " file))
     (let [lines (set (str/split-lines (slurp (str file))))]
-      (doseq [line [".idea/" "build/" ".gradle/" ".kotlin/" "local.properties" "tmp/" ".DS_Store"]]
+      (doseq [line [".idea/" "build/" ".gradle/" ".kotlin/" "local.properties" "tmp/"]]
         (is (contains? lines line) (str "six-pack gitignore lacks " line))))))
 
 (deftest the-lieutenant-is-told-where-this-forges-own-rules-live
@@ -1679,6 +1678,7 @@
       (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"]]
         (write-file (fs/path base "swarmforge/scripts" name) (str name "\n")))
       (write-file (fs/path base "swarmforge/packs/six-pack/gitignore") "build/\n.idea/\n")
+      (write-file (fs/path base "swarmforge/packs/gitignore") ".DS_Store\n")
       (write-file (fs/path base "swarmforge/packs/six-pack/language.conf") "Kotlin\n")
       (write-file (fs/path base "swarm") "#!/bin/sh\necho swarm\n")
       (write-file (fs/path base "swarmforge/constitution.prompt") "MAIN-CONSTITUTION\n")
@@ -1728,9 +1728,15 @@
         (is (= "PACK-LOCAL-WORKFLOW\n" (slurp (str (fs/path host "packs/four-pack/swarmforge/constitution/articles/local-workflow.prompt")))))
         (is (fs/directory? (fs/path host "projects")))
         (is (fs/exists? (fs/path host "packs/six-pack/swarmforge/swarmforge.conf")))
-        (is (= "build/\n.idea/\n" (slurp (str (fs/path host "packs/six-pack/gitignore")))))
+        ;; A pack's own lines come first, then the ones every pack's projects
+        ;; get; a pack that carries no list of its own still gets the second.
+        (is (= "build/\n.idea/\n.DS_Store\n"
+               (slurp (str (fs/path host "packs/six-pack/gitignore")))))
+        (is (= ".DS_Store\n"
+               (slurp (str (fs/path host "packs/two-pack/gitignore")))))
+        (is (= ".DS_Store\n"
+               (slurp (str (fs/path host "packs/four-pack/gitignore")))))
         (is (= "Kotlin\n" (slurp (str (fs/path host "packs/six-pack/language.conf")))))
-        (is (not (fs/exists? (fs/path host "packs/two-pack/gitignore"))))
         (is (not (fs/exists? (fs/path host "packs/two-pack/language.conf"))))
         (is (fs/exists? (fs/path host "swarm"))))
       (finally

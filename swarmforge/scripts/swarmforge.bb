@@ -108,11 +108,10 @@
 (defn ensure-initial-gitignore! [ctx]
   (let [gitignore (fs/path (:working-dir ctx) ".gitignore")]
     (if-not (fs/exists? gitignore)
-      (spit (str gitignore) ".swarmforge/\n.worktrees/\n.DS_Store\n")
+      (spit (str gitignore) ".swarmforge/\n.worktrees/\n")
       (do
         (ensure-in-file! gitignore ".swarmforge/")
-        (ensure-in-file! gitignore ".worktrees/")
-        (ensure-in-file! gitignore ".DS_Store")))))
+        (ensure-in-file! gitignore ".worktrees/")))))
 
 (defn ensure-runtime-git-excludes! [ctx]
   (let [exclude-file (fs/path (sh-out "git" "-C" (str (:working-dir ctx)) "rev-parse" "--git-path" "info/exclude"))]
