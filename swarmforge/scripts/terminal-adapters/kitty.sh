@@ -105,10 +105,19 @@ terminal_open_session() {
   local theme_file=""
 
   if [[ -n "$sibling_id" ]]; then
-    # Split next to an existing panel from this same batch; kitty resolves
-    # --next-to by window id, so this lands in whichever OS window that
-    # sibling opened in rather than wherever the caller's focus is.
-    placement_args=(--type=window --location=split --next-to "id:$sibling_id")
+    # Split next to an existing panel from this same batch, in that panel's own
+    # tab: --next-to alone is not enough. Over remote control kitty ignores
+    # --next-to unless the window it names is in the tab the launch was told to
+    # use, and that tab defaults to whichever tab is active - so the rest of a
+    # batch landed in the caller's own window (the lieutenant's) whenever the
+    # OS window the first panel opened did not take focus. Measured 2026-09-28,
+    # two launches with the focus held elsewhere: --next-to id:<sibling> put the
+    # second panel in the lieutenant's tab, and adding --match window_id:<sibling>
+    # put it beside its sibling in the batch's own tab. The match is what makes
+    # "all of this project's panels together" hold instead of depending on
+    # which window happened to be focused.
+    placement_args=(--match "window_id:$sibling_id"
+                    --type=window --location=split --next-to "id:$sibling_id")
   else
     # First panel of a batch: open a brand-new OS window instead of
     # splitting into whatever kitty window currently has focus.

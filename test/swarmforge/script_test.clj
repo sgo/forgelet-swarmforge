@@ -1567,6 +1567,22 @@
         (fs/delete-tree base)
         (fs/delete-tree packs)))))
 
+(deftest a-batch-of-panels-names-the-tab-it-splits-into
+  ;; Given kitty's remote control, where --next-to is ignored unless the window
+  ;; it names is in the tab the launch was told to use, and that tab defaults to
+  ;; the active one rather than to the OS window a batch's first panel opened
+  ;; When the layer's kitty adapter places a panel beside a sibling of its own
+  ;; batch
+  ;; Then it names the sibling's tab as well as the sibling, so a project's
+  ;; panels land together instead of in whichever window was focused - which is
+  ;; how the rest of a batch ended up in the lieutenant's window, measured
+  ;; 2026-09-28
+  (let [adapter (slurp (str (fs/path scripts-dir "terminal-adapters" "kitty.sh")))]
+    (is (str/includes? adapter "--match \"window_id:$sibling_id\"")
+        "kitty ignores --next-to outside the launch's tab; the sibling's tab must be named")
+    (is (str/includes? adapter "--next-to \"id:$sibling_id\"")
+        "the panel must still split beside its sibling, not merely in its tab")))
+
 (deftest six-pack-carries-the-ignore-lines-its-build-needs
   ;; Given a pack whose language writes build output beside its source
   ;; When the layer's copy of that pack's ignore lines is read
