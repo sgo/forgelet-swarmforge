@@ -108,6 +108,20 @@
         (is (str/includes? (:out non-convergent)
                            "FAIL  an upgrade of an upgraded forge is not a no-op")
             (:out non-convergent)))
+
+      ;; A forge already in step has nothing for the upgrade to commit, and the
+      ;; exercise still runs its second compose and passes. It failed here before:
+      ;; the commit with nothing staged gave up under `set -e`, on the one forge
+      ;; that should pass most easily.
+      ;;
+      ;; The stub appends to one.sh on its first ask, so the counter is put past
+      ;; that: a composition that changes nothing, twice.
+      (write-file (fs/path (:state fixture) "count") "2\n")
+      (fs/delete-if-exists (fs/path root "swarmforge/update-exercise.baseline"))
+      (let [already-in-step (exercise fixture)]
+        (is (zero? (:exit already-in-step)) (:err already-in-step))
+        (is (str/includes? (:out already-in-step) "an upgrade is a no-op on this forge")
+            (:out already-in-step)))
       (finally
         (fs/delete-tree root)
         (fs/delete-tree (:bare fixture))

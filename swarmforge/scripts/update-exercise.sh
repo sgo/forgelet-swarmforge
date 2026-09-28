@@ -121,10 +121,18 @@ for file in "${allowed[@]}"; do
 done
 
 # The second compose: an upgrade of an upgraded forge should change nothing.
-git -C "$clone" -c user.name="Update exercise" -c user.email="update-exercise@localhost" \
-    add -A >/dev/null
-git -C "$clone" -c user.name="Update exercise" -c user.email="update-exercise@localhost" \
-    commit -q -m "the upgrade, as it would be committed" >/dev/null
+if [[ -n "$(git -C "$clone" status --porcelain)" ]]; then
+  git -C "$clone" -c user.name="Update exercise" -c user.email="update-exercise@localhost" \
+      add -A >/dev/null
+  git -C "$clone" -c user.name="Update exercise" -c user.email="update-exercise@localhost" \
+      commit -q -m "the upgrade, as it would be committed" >/dev/null
+else
+  # A forge already in step has nothing for the upgrade to commit, and a commit
+  # with nothing staged fails - which failed the exercise on the one forge it
+  # should pass most easily. The second compose is the point of the step, so it
+  # runs either way; only the commit is skipped.
+  echo "=== nothing for the upgrade to commit: the second compose follows"
+fi
 compose "$scratch/compose-second.log"
 second="$(git -C "$clone" status --porcelain)"
 if [[ -n "$second" ]]; then
