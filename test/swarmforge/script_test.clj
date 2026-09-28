@@ -1161,6 +1161,52 @@
       (finally
         (fs/delete-tree root)))))
 
+(deftest the-handoff-daemon-runs-in-the-projects-own-tmux-session
+  ;; Given a project with a tmux socket of its own
+  ;; When SwarmForge starts that project's handoff daemon
+  ;; Then the daemon runs in a session on that socket rather than as a child of
+  ;; whoever asked for the start - because the runtime exits as soon as the swarm
+  ;; is up, and a caller can take its process group with it, which on 2026-09-28
+  ;; twice left a project running with a daemon that had already died and its
+  ;; handoffs stuck in the outbox
+  (let [root (tmp-dir)
+        sock (str (fs/path root "swarm.sock"))
+        daemon-dir (fs/path root ".swarmforge" "daemon")
+        pid-file (fs/path daemon-dir "handoffd.pid")
+        ctx {:script-dir scripts-dir
+             :working-dir root
+             :tmux-socket sock
+             :daemon-dir daemon-dir
+             :handoff-daemon-log (fs/path daemon-dir "handoffd.log")}]
+    (try
+      (write-file (fs/path root ".swarmforge/tmux-socket") (str sock "\n"))
+      (write-file (fs/path root ".swarmforge/roles.tsv")
+                  (format "specifier\tmaster\t%s\tsession\tSpecifier\tcodex\ttask\n" root))
+      (require 'swarmforge)
+      ((resolve 'swarmforge/start-handoff-daemon!) ctx)
+      (let [deadline (+ (System/currentTimeMillis) 5000)]
+        (while (and (not (fs/exists? pid-file)) (< (System/currentTimeMillis) deadline))
+          (Thread/sleep 50)))
+      (is (fs/exists? pid-file) "the daemon did not write its pid file")
+      (is (= 0 (:exit (run {:dir root :ok? false}
+                           "tmux" "-S" sock "has-session" "-t" "swarmforge-handoffd")))
+          "the daemon must run in a session of the project's own")
+      (let [pid (Long/parseLong (str/trim (slurp (str pid-file))))
+            handle (java.lang.ProcessHandle/of pid)]
+        (is (.isPresent handle) "the daemon recorded a pid that is not running")
+        (let [parent (.parent (.get handle))]
+          (is (not= (.pid (java.lang.ProcessHandle/current))
+                    (when (.isPresent parent) (.pid (.get parent))))
+              "the daemon must not be a child of the process that started it")))
+      (run {:dir root} (script "stop_handoff_daemon.sh") (str root))
+      (is (not (fs/exists? pid-file)) "stopping must clear the pid file")
+      (is (not= 0 (:exit (run {:dir root :ok? false}
+                              "tmux" "-S" sock "has-session" "-t" "swarmforge-handoffd")))
+          "stopping must end the session too")
+      (finally
+        (run {:dir root :ok? false} "tmux" "-S" sock "kill-server")
+        (fs/delete-tree root)))))
+
 (deftest close-swarm-kills-tmux-sessions-and-stops-daemon
   (let [root (tmp-dir)
         sock (str (fs/path root "swarm.sock"))

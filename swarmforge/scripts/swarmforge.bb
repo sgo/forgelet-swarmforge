@@ -649,13 +649,29 @@
       nil)))
 
 (defn start-handoff-daemon! [ctx]
+  (fs/create-dirs (:daemon-dir ctx))
   (fs/delete-if-exists (fs/path (:daemon-dir ctx) "stop"))
   (let [command (into (vec (sleep-inhibitor-prefix))
                       [(str (fs/path (:script-dir ctx) "handoffd.bb"))
-                       (str (:working-dir ctx))])]
-    (process/process command
-                     {:out (str (:handoff-daemon-log ctx))
-                      :err :out})
+                       (str (:working-dir ctx))])
+        line (str/join " " (map sq command))]
+    ;; In a session on the project's own tmux socket, not as this process's child.
+    ;; The runtime exits as soon as the swarm is up, and a caller that asked for
+    ;; the start can take its whole process group with it, which left projects
+    ;; running with a daemon that had already died: handoffs sat in the outbox and
+    ;; an approval went undelivered while the project looked healthy. Observed
+    ;; twice on 2026-09-28, both on a command-line open (the daemon logged
+    ;; "started" and never another line, with no "stopped" to say it was asked to
+    ;; go). This is the same reason the runtime itself is spawned disowned
+    ;; (7169011); tmux is already a dependency and already hosts the sessions the
+    ;; daemon serves, so the daemon outlives whatever started it. Stopping still
+    ;; ends it: stop_handoff_daemon.bb's stop file makes the command exit, and the
+    ;; session with it.
+    (process/sh {:continue true} "tmux" "-S" (:tmux-socket ctx)
+                "kill-session" "-t" "swarmforge-handoffd")
+    (process/sh "tmux" "-S" (:tmux-socket ctx)
+                "new-session" "-d" "-s" "swarmforge-handoffd"
+                (str line " >> " (sq (str (:handoff-daemon-log ctx))) " 2>&1"))
     (println (str green "Started handoff daemon"
                   (when (> (count command) 2) " with OS sleep prevention")
                   "."
