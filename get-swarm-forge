@@ -2,11 +2,29 @@
 set -euo pipefail
 
 # This fork composes a Forgelet forge: the shared runtime and shared articles come
-# from its own branch, and the packs come from the same repository. Both are
-# overridable, so the helper still installs Uncle Bob's products when asked to.
+# from its own branch, and a pack that the family carries its own copy of comes
+# from that pack's own fork, on the branch below. Everything is overridable, so
+# the helper still installs Uncle Bob's products when asked to.
 default_repo_url="https://github.com/sgo/forgelet-swarmforge"
 base_ref="${SWARMFORGE_BASE_REF:-forgelet}"
 pack_names=(two-pack four-pack six-pack)
+
+# The packs the family carries its own copy of. Each is a repository of its own,
+# forked the way this layer is: `main` mirrors the upstream pack branch
+# (unclebob/swarm-forge), and this branch holds ours - one rule of the family's
+# beside everything upstream's, so an upstream change merges into main and lands
+# here beside it. A pack with no repository named here comes from this layer's
+# own branch, as it always has. Both the branch and each repository are
+# overridable, for a forge that wants Uncle Bob's packs untouched.
+pack_ref="${SWARMFORGE_PACK_REF:-forgelet}"
+
+pack_repo() {
+  local name="$1"
+  case "$name" in
+    six-pack) echo "${SWARMFORGE_SIX_PACK_REPO:-https://github.com/sgo/forgelet-six-pack}" ;;
+    four-pack) echo "${SWARMFORGE_FOUR_PACK_REPO:-https://github.com/sgo/forgelet-four-pack}" ;;
+  esac
+}
 
 usage() {
   # Where this fork documents itself, derived rather than written down, so an
@@ -111,7 +129,10 @@ local_git_dir() {
 try_download_branch() {
   local ref="$1"
   local dest="$2"
-  local url="${repo_url}/archive/refs/heads/${ref}.tar.gz"
+  # The third argument is the repository to ask, for a pack that lives in its own
+  # fork rather than in this layer.
+  local from="${3:-$repo_url}"
+  local url="${from}/archive/refs/heads/${ref}.tar.gz"
   local tar_path="$tmp_dir/${ref}.tgz"
   local git_dir
   mkdir -p "$dest"
@@ -132,10 +153,11 @@ try_download_branch() {
 download_branch() {
   local ref="$1"
   local dest="$2"
-  if try_download_branch "$ref" "$dest"; then
+  local from="${3:-$repo_url}"
+  if try_download_branch "$ref" "$dest" "$from"; then
     return
   fi
-  echo "get-swarm-forge: branch '$ref' was not found at ${repo_url}/archive/refs/heads/${ref}.tar.gz" >&2
+  echo "get-swarm-forge: branch '$ref' was not found at ${from}/archive/refs/heads/${ref}.tar.gz" >&2
   echo "Push the branch, or set SWARMFORGE_GIT_DIR to a local checkout that has it." >&2
   exit 1
 }
@@ -317,12 +339,19 @@ install_project_pack() {
 
 install_named_packs() {
   mkdir -p packs
-  local pack_name pack_src
+  local pack_name pack_src pack_from
   for pack_name in "${pack_names[@]}"; do
     pack_src="$(pack_tree "$pack_name")"
     if [[ -z "$pack_src" ]]; then
       pack_src="$tmp_dir/packs/$pack_name"
-      download_branch "$pack_name" "$pack_src"
+      # A pack the family carries its own copy of comes from its own fork, on
+      # pack_ref; anything else comes from this layer's branch of the same name.
+      pack_from="$(pack_repo "$pack_name")"
+      if [[ -n "$pack_from" ]]; then
+        download_branch "$pack_ref" "$pack_src" "$pack_from"
+      else
+        download_branch "$pack_name" "$pack_src"
+      fi
     fi
     [[ -n "$pack_src" && -d "$pack_src" ]] || fail_missing "pack $pack_name"
     copy_pack_template "$pack_src" "packs/$pack_name"
@@ -440,7 +469,12 @@ if [[ "$product" == two-pack || "$product" == four-pack || "$product" == six-pac
   pack_src="$(pack_tree "$product")"
   if [[ -z "$pack_src" ]]; then
     pack_src="$tmp_dir/pack"
-    download_branch "$product" "$pack_src"
+    pack_from="$(pack_repo "$product")"
+    if [[ -n "$pack_from" ]]; then
+      download_branch "$pack_ref" "$pack_src" "$pack_from"
+    else
+      download_branch "$product" "$pack_src"
+    fi
   fi
   [[ -n "$pack_src" && -d "$pack_src" ]] || fail_missing "pack $product"
   copy_shared_scripts_and_articles "$host_dir"

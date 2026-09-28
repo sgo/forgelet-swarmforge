@@ -30,12 +30,19 @@ dashboard that keeps its address across restarts, a `kitty` terminal adapter, th
 language and tool registry, and the homeserver helper
 (`matrix-homeserver.sh`) that gives a bridge's rooms a Synapse to run on.
 
-The packs come from this same repository, so the helper installs everything a
-Forgelet forge needs from one branch. Anything upstream should have for its own
-sake is offered there first as a pull request; `forgelet` carries it until it
-lands, and both branches stay rebaseable onto upstream with no Forgelet history
-in the way. `main` is the landing page, installer source, shared runtime, and
-shared engineering law — it is not itself a runnable SwarmForge product.
+Most of what a Forgelet forge needs comes from `forgelet`. The two packs this
+family carries its own copy of come from forks of their own, in the same shape as
+this repository: `forgelet-six-pack` and `forgelet-four-pack`, each with `main`
+mirroring the upstream pack branch and `forgelet` holding ours - one rule, that a
+finished card does not ask the operator for the next one, beside everything
+upstream's. A pack with no fork of its own comes from this repository's branch of
+the same name, as it always has, and the helper's `SWARMFORGE_*_PACK_REPO` and
+`SWARMFORGE_PACK_REF` overrides point it elsewhere if a forge wants Uncle Bob's
+packs untouched. Anything upstream should have for its own sake is offered there
+first as a pull request; the branches here carry it until it lands, and both
+`main` and `forgelet` stay rebaseable onto upstream with no Forgelet history in
+the way. `main` is the landing page, installer source, shared runtime, and shared
+engineering law — it is not itself a runnable SwarmForge product.
 
 ### Install the helper
 
