@@ -14,6 +14,12 @@
   every session and is a file the composition never writes: the shared scripts sit in
   `swarmforge/scripts/` and are replaced on every update, so a helper that belongs to
   this project and no other goes beside them rather than inside them.
+- A project opens and closes through the forge that owns it: the dashboard's Open and
+  Close, or `<forge>/swarmforge/scripts/swarmforge.sh --open-project <forge-root>
+  <project>` beside it. Never start a project's own `./swarm` to open it, and never
+  run a bare `./swarm` on a forge root: the first leaves the forge's list of open
+  projects wrong - the dashboard, the phone and the Close guard all read it - and the
+  second restarts the whole forge, stopping every project that list holds.
 - Language tool table:
   - Go: install with `go install`; mutation `github.com/unclebob/mutate4go`, CRAP `github.com/unclebob/crap4go`, DRY `github.com/unclebob/dry4go`.
   - Clojure: install with Clojure CLI/deps.edn; mutation `github.com/unclebob/clj-mutate`, CRAP `github.com/unclebob/crap4clj`, DRY `github.com/unclebob/dry4clj`.

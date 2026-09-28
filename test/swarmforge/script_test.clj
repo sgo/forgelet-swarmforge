@@ -36,6 +36,62 @@
 (defn script [name]
   (str (fs/path scripts-dir name)))
 
+(defn open-projects-names [forge]
+  (let [file (fs/path forge ".swarmforge" "open-projects")]
+    (if (fs/regular-file? file)
+      (->> (str/split-lines (slurp (str file)))
+           (map str/trim)
+           (remove str/blank?)
+           vec)
+      [])))
+
+(deftest a-started-project-tells-its-forge-it-is-open
+  ;; Given a forge with a project in it
+  ;; When the project's runtime starts or stops, whichever way it was started
+  ;; Then the forge's own list says so - because that file is what the dashboard,
+  ;; the phone and the Close guard read, and only the dashboard's own Open wrote
+  ;; it before this
+  (let [root (tmp-dir)]
+    (try
+      (let [forge (fs/path root "forge")
+            project (fs/path forge "projects" "thing")]
+        (write-file (fs/path forge "packs" "keep") "")
+        (fs/create-dirs project)
+        (write-file (fs/path forge ".swarmforge" "open-projects") "other\n")
+        (run {:dir root} (script "swarmforge.bb") "--test-mark-project" (str project) "open")
+        (is (= ["other" "thing"] (open-projects-names forge)))
+        (run {:dir root} (script "swarmforge.bb") "--test-mark-project" (str project) "closed")
+        (is (= ["other"] (open-projects-names forge)))
+        ;; A project composed on its own - a pack installed into a directory - has
+        ;; no forge above it, and nothing is written for one.
+        (run {:dir root} (script "swarmforge.bb") "--test-mark-project" (str root) "open")
+        (is (not (fs/exists? (fs/path root ".swarmforge" "open-projects")))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest a-forge-that-is-up-refuses-a-bare-restart
+  ;; Given a forge that is already running with a project open
+  ;; When it is started by hand with no arguments
+  ;; Then it refuses, names the command that opens one project, and stops nothing -
+  ;; a bare start stops every project in the list and empties it, which is a
+  ;; restart of the whole forge rather than the way a project opens
+  (let [root (tmp-dir)]
+    (try
+      (let [forge (fs/path root "forge")
+            sock (str root "/forge.sock")]
+        (write-file (fs/path forge "packs" "keep") "")
+        (fs/create-dirs (fs/path forge "projects"))
+        (write-file (fs/path forge ".swarmforge" "open-projects") "thing\n")
+        (write-file (fs/path forge ".swarmforge" "tmux-socket") (str sock "\n"))
+        (run {:dir root} "tmux" "-S" sock "new-session" "-d" "-s" "probe" "sleep" "120")
+        (let [result (run {:dir root :ok? false} (script "swarmforge.bb") (str forge))]
+          (is (= 1 (:exit result)))
+          (is (str/includes? (str (:out result) (:err result)) "--open-project"))
+          (is (= ["thing"] (open-projects-names forge))))
+        (run {:dir root :ok? false} "tmux" "-S" sock "kill-server"))
+      (finally
+        (fs/delete-tree root)))))
+
 (defn write-completion-hook! [root body]
   (let [hook (fs/path root "swarmforge/hooks/card-complete.sh")]
     (write-file hook (str "#!/bin/sh\n" body))

@@ -50,6 +50,12 @@ is rung again. Read what arrives rather than remembering what this file used to 
   handoff. Both take a project root, so they dispatch into any project from here.
   Each says the rest in its own usage — read that rather than this file: a tool's
   own words travel with the tool.
+- A project is opened and closed through the forge that owns it:
+  `swarmforge/scripts/swarmforge.sh --open-project <forge-root> <project>` — and
+  `--close-project` — or the dashboard, which calls the same thing. Never start a
+  project's own `./swarm` to open one, and never run a bare `./swarm` on a forge
+  root: the first leaves the forge's list of open projects wrong, and the second
+  restarts the whole forge, stopping every project that list holds.
 
 ## Card routing
 

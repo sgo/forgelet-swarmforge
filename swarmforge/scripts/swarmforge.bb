@@ -1018,6 +1018,72 @@
            vec)
       [])))
 
+;; A project started here is one the forge it belongs to should know is open.
+;; Until this, only the dashboard's own Open wrote that bookkeeping, so a project
+;; started any other way - a lieutenant, a stray `--start-project`, a project's own
+;; `./swarm` - read as closed: invisible in the dashboard and on the phone, and the
+;; next Open would have restarted it while it ran. The forge's own file is the one
+;; truth every surface reads, so it is written by `forge`, the same function the
+;; dashboard calls, rather than a second time here.
+(defn enclosing-forge-root
+  "The forge a project sits in, when it sits in one: <forge>/projects/<name>. A
+  project composed on its own - a pack installed into a directory - has no forge
+  above it, and then there is nothing to write."
+  [root]
+  (let [project (fs/absolutize (fs/path root))
+        projects (fs/parent project)
+        forge (when projects (fs/parent projects))]
+    (when (and forge
+               projects
+               (= "projects" (str (fs/file-name projects)))
+               (fs/directory? (fs/path forge "packs")))
+      (str forge))))
+
+(defn mark-project!
+  "Tell the forge its project is open, or that it closed, through forge.bb, which
+  owns that file's shape."
+  [ctx open?]
+  (when-let [forge (enclosing-forge-root (:working-dir ctx))]
+    (let [api (fs/path (:script-dir ctx) "forge.bb")]
+      (when (fs/regular-file? api)
+        (load-file (str api))
+        ((requiring-resolve (if open? 'forge/mark-open! 'forge/mark-closed!))
+         forge (str (fs/file-name (:working-dir ctx))))))))
+
+(defn forge-up?
+  "Whether a forge is already running, by its own tmux server answering."
+  [root]
+  (let [socket-file (fs/path root ".swarmforge" "tmux-socket")]
+    (and (fs/regular-file? socket-file)
+         (let [socket (str/trim (slurp (str socket-file)))]
+           (and (not (str/blank? socket))
+                (zero? (:exit (process/sh {:continue true}
+                                          "tmux" "-S" socket "list-sessions"))))))))
+
+(defn swarmforge-command [root]
+  (str (fs/path root "swarmforge" "scripts" "swarmforge.sh")))
+
+(defn refuse-bare-forge-restart! [root]
+  (println (str yellow "This forge is already up, and a bare start here is a restart of the whole forge:" reset))
+  (println (str "  it would stop every project listed in "
+                (fs/path root ".swarmforge" "open-projects") " and empty that list."))
+  (println)
+  (println (str "  Open one project:   " (swarmforge-command root) " --open-project " root " <project>"))
+  (println (str "  Close one project:  " (swarmforge-command root) " --close-project " root " <project>"))
+  (println (str "  Restart the forge:  " (swarmforge-command root) " --restart-forge " root))
+  (System/exit 1))
+
+(defn run-forge-project! [root name open?]
+  (let [flag (if open? "--open-project" "--close-project")]
+    (when (or (str/blank? (str root)) (str/blank? (str name)))
+      (fail! (str "usage: swarmforge.sh " flag " <forge-root> <project>")))
+    (let [api (fs/path root "swarmforge" "scripts" "forge.bb")]
+      (when-not (fs/regular-file? api)
+        (fail! (str "No forge at " root ": " api " is missing.")))
+      (load-file (str api))
+      ((requiring-resolve (if open? 'forge/open-project! 'forge/close-project!)) root name)
+      (println (str green (if open? "Opened " "Closed ") name " in " root reset)))))
+
 (defn run-stop-project! [root]
   (let [ctx (context root)
         socket (when (fs/regular-file? (:tmux-socket-file ctx))
@@ -1027,7 +1093,9 @@
     (stop-handoff-daemon! ctx)
     (when socket
       (apply process/sh {:continue true}
-             (into [script socket (str (:window-ids-file ctx))] sessions)))))
+             (into [script socket (str (:window-ids-file ctx))] sessions)))
+    ;; And learns it closed, whichever way it was stopped.
+    (mark-project! ctx false)))
 
 (defn run-host! [root]
   (check-dependency! "tmux")
@@ -1085,7 +1153,9 @@
         (announce-ready! ctx)
         ;; A project opened from the dashboard is a project whose surfaces open,
         ;; the same way starting the forge opens the host's.
-        (open-terminal-surfaces! ctx)))))
+        (open-terminal-surfaces! ctx)
+        ;; Whichever way it was started, the forge learns its project is open.
+        (mark-project! ctx true)))))
 
 (defn test-terminal-bridge! [root backend]
   (let [local-script-dir (fs/path root "swarmforge" "scripts")
@@ -1170,11 +1240,21 @@
     "--test-tmux-base-indexes" (test-tmux-base-indexes! (second args))
     "--test-dashboard-address" (test-dashboard-address! (second args) (nth args 2))
     "--test-create-role-session" (test-create-role-session! (second args) (nth args 2) (nth args 3 nil))
+    "--test-enclosing-forge" (println (str (or (enclosing-forge-root (second args)) "none")))
+    "--test-mark-project" (do
+                            (mark-project! (context (second args)) (= "open" (nth args 2)))
+                            (println "marked"))
+    "--test-forge-up" (println (str (forge-up? (second args))))
+    "--open-project" (run-forge-project! (second args) (nth args 2 nil) true)
+    "--close-project" (run-forge-project! (second args) (nth args 2 nil) false)
     "--start-project" (run-project! (second args))
     "--stop-project" (run-stop-project! (second args))
+    "--restart-forge" (run-host! (or (second args) (System/getProperty "user.dir")))
     (let [root (or (first args) (System/getProperty "user.dir"))]
       (if (forge-root? root)
-        (run-host! root)
+        (if (forge-up? root)
+          (refuse-bare-forge-restart! root)
+          (run-host! root))
         (run-main! root)))))
 
 (when (= (str *file*) (System/getProperty "babashka.file"))
