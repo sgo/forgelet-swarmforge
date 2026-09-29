@@ -2420,10 +2420,11 @@
         (is (= 1 (count (filter #{".idea/"} lines))))
         (is (= 1 (count (filter #{"build/"} lines))))))))
 
-(deftest forge-new-project-takes-the-packs-language-once
-  ;; Given a pack whose projects are written in one language
-  ;; When a project is composed from it, re-languaged by hand, and opened again
-  ;; Then the project declares the language, and its own answer survives the refresh
+(deftest a-projects-language-is-its-own-not-its-packs
+  ;; Given a pack carrying a language.conf of its own
+  ;; When a project is composed from it and later says what it is written in
+  ;; Then the pack decides nothing: a project that has not said has no language yet, and
+  ;; the answer it does write is its own and survives every refresh
   (let [root (tmp-dir)]
     (seed-mini-forge! root)
     (write-file (fs/path root "packs/six-pack/language.conf") "Kotlin\n")
@@ -2431,15 +2432,15 @@
                                "--test-new-project" (str root) "cave" "six-pack" "m")
           language (fs/path root "projects/cave/swarmforge/language.conf")]
       (is (zero? (:exit result)) (:err result))
-      (is (fs/exists? language))
-      (is (= "Kotlin\n" (slurp (str language))))
-      ;; The project's own answer wins: a refresh seeds nothing over it.
-      (spit (str language) "Go\n")
+      (is (not (fs/exists? language))
+          "a pack's language.conf must not decide what a project is written in")
+      (write-file language "Go\n")
       (pack-web-env root {"SWARMFORGE_SKIP_START" "1"}
                     "--test-close-project" (str root) "cave")
       (pack-web-env root {"SWARMFORGE_SKIP_START" "1"}
                     "--test-open-project" (str root) "cave")
-      (is (= "Go\n" (slurp (str language)))))))
+      (is (= "Go\n" (slurp (str language)))
+          "the project's own answer survives the refresh"))))
 
 (deftest forge-new-project-writes-no-identity-of-its-own
   ;; Given a machine with an identity of its own, and a machine with none

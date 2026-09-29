@@ -1815,10 +1815,9 @@
                (slurp (str (fs/path host "packs/two-pack/gitignore")))))
         (is (= ".DS_Store\n"
                (slurp (str (fs/path host "packs/four-pack/gitignore")))))
-        ;; The pack's own answer travels with the pack; the layer carries none of its
-        ;; own, so a forge's packs say what that family's packs say and nothing more.
-        (is (= "Kotlin\n" (slurp (str (fs/path host "packs/six-pack/language.conf")))))
-        (is (= "Go\n" (slurp (str (fs/path host "packs/four-pack/language.conf")))))
+        ;; A language is the project's to declare: a pack carrying one of its own does
+        ;; not put it in the forge's packs either, where a project could be seeded from it.
+        (is (not (fs/exists? (fs/path host "packs/six-pack/language.conf"))))
         (is (not (fs/exists? (fs/path host "packs/two-pack/language.conf"))))
         (is (fs/exists? (fs/path host "swarm"))))
       (finally

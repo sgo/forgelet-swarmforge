@@ -99,7 +99,7 @@ session — and the next forge of the family — can see it is ours.
 |---|---|
 | A helper script for this forge | `swarmforge/local-scripts/`, which is on every session's `PATH` |
 | Rules for this forge's lieutenant | `swarmforge/roles/local-lieutenant.prompt`, read after the shared lieutenant prompt |
-| A project's language | the project's `swarmforge/language.conf`, which wins over its pack's default |
+| A project's language | the project's own `swarmforge/language.conf`, and nothing else decides it |
 | Rules for one project | that project's `local-*.prompt` articles, beside the shared articles |
 | What runs when one of its cards lands | that project's `swarmforge/hooks/card-complete.sh` |
 | How this forge is configured | the forge's `swarmforge/swarmforge.conf` |
