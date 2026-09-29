@@ -1826,6 +1826,8 @@
   (let [article (slurp (str (fs/path scripts-dir ".." "constitution" "articles"
                                    "engineering.prompt")))]
     (is (str/includes? article "## Java Gate Tasks"))
+    (is (str/includes? article "## Java Releases"))
+    (is (str/includes? article "release_preflight.sh"))
     (is (str/includes? article "`-Pwith-mutation-tests`"))
     (is (str/includes? article "PIT through the project's Maven profiles"))
     (is (not (str/includes? article "mutation `github.com/unclebob/mutate4java`")))
@@ -1833,3 +1835,59 @@
     ;; Java stays a choice, not a mandate: the article still carries every language.
     (doseq [row ["  - Go:" "  - Clojure:" "  - Java:" "  - Kotlin:"]]
       (is (str/includes? article row) (str "the tool table lost " row)))))
+
+(deftest release-preflight-refuses-what-a-release-must-not-start-with
+  ;; Given a Maven project that is ready to release, and the ways one is not
+  ;; When the preflight runs
+  ;; Then it says READY with the numbers the card gave it, and refuses - naming the
+  ;; reason - for a dirty tree, a taken tag, a release version the pom disagrees with,
+  ;; a next development version that is not a snapshot, and a dependency on a
+  ;; SNAPSHOT this project does not build. The last is the one that shipped once:
+  ;; versions:set does not look at the dependency graph, so nothing else would say.
+  (let [root (tmp-dir)
+        pom (fs/path root "pom.xml")
+        preflight (str (fs/path scripts-dir "release_preflight.sh"))
+        with-dep (str "<project>\n<modelVersion>4.0.0</modelVersion>\n"
+                      "<groupId>com.example</groupId><artifactId>demo</artifactId>\n"
+                      "<version>1.1.0-SNAPSHOT</version>\n<dependencies>\n"
+                      "<dependency><groupId>com.saibill</groupId><artifactId>saibill-api</artifactId>"
+                      "<version>1.1.0-SNAPSHOT</version></dependency>\n</dependencies>\n</project>\n")
+        without-dep (str "<project>\n<modelVersion>4.0.0</modelVersion>\n"
+                         "<groupId>com.example</groupId><artifactId>demo</artifactId>\n"
+                         "<version>1.1.0-SNAPSHOT</version>\n</project>\n")
+        text (fn [result] (str (:out result) (:err result)))]
+    (try
+      (init-repo! root)
+      (write-file pom with-dep)
+      (run {:dir root} "git" "add" "-A")
+      (run {:dir root} "git" "commit" "-q" "-m" "the project")
+      (let [result (run {:dir root :ok? false} preflight "--no-maven" "1.1.0" "1.1.1-SNAPSHOT")]
+        (is (not= 0 (:exit result)))
+        (is (str/includes? (text result) "com.saibill:saibill-api:1.1.0-SNAPSHOT")
+            "the project's own snapshot dependency has to be named"))
+      (write-file pom without-dep)
+      (run {:dir root} "git" "add" "-A")
+      (run {:dir root} "git" "commit" "-q" "-m" "a released dependency")
+      (let [result (run {:dir root :ok? false} preflight "--no-maven" "1.1.0" "1.1.1-SNAPSHOT")]
+        (is (zero? (:exit result)) (text result))
+        (is (str/includes? (text result) "READY"))
+        (is (str/includes? (text result) "-DreleaseVersion=1.1.0"))
+        (is (str/includes? (text result) "-DdevelopmentVersion=1.1.1-SNAPSHOT")))
+      (let [result (run {:dir root :ok? false} preflight "--no-maven" "2.0.0" "2.0.1-SNAPSHOT")]
+        (is (not= 0 (:exit result)))
+        (is (str/includes? (text result) "the two must be the same version")))
+      (let [result (run {:dir root :ok? false} preflight "--no-maven" "1.1.0" "1.1.1")]
+        (is (not= 0 (:exit result)))
+        (is (str/includes? (text result) "does not end in -SNAPSHOT")))
+      (run {:dir root} "git" "tag" "v1.1.0")
+      (let [result (run {:dir root :ok? false} preflight "--no-maven" "1.1.0" "1.1.1-SNAPSHOT")]
+        (is (not= 0 (:exit result)))
+        (is (str/includes? (text result) "tag v1.1.0 already exists")))
+      (run {:dir root} "git" "tag" "-d" "v1.1.0")
+      (spit (str pom) (str (slurp (str pom)) "<!-- uncommitted -->\n"))
+      (let [result (run {:dir root :ok? false} preflight "--no-maven" "1.1.0" "1.1.1-SNAPSHOT")]
+        (is (not= 0 (:exit result)))
+        (is (str/includes? (text result) "not clean")))
+      (run {:dir root} "git" "checkout" "--" "pom.xml")
+      (finally
+        (fs/delete-tree root)))))

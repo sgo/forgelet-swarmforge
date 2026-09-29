@@ -62,6 +62,26 @@
 - A project's scripts name the profile for each suite; run a gate the way the script for it does, and
   leave the gates off otherwise. No gate is a homegrown substitute for the tool the table names.
 
+## Java Releases
+- A Java project's release is `mvn release:prepare` and then `mvn release:perform`, with the exact
+  release version and the exact next development version the task names - never derived, never
+  guessed. Never cut one with `versions:set`: it rewrites this project's own version and reads
+  nothing else, so a release has shipped here depending on a SNAPSHOT of a published producer
+  without a word from either command.
+- Run `release_preflight.sh <release-version> <next-development-version>` first, and stop if it
+  refuses. It checks what a release must not start without - a clean tree, a version still at
+  `-SNAPSHOT` at HEAD, a release tag nobody has taken, and no dependency on a SNAPSHOT this
+  project does not build itself - and, when it passes, prints the two commands with the numbers
+  the task named. The same two questions are the enforcer's `requireReleaseDeps` and
+  `requireReleaseVersion` if a project wants its build to refuse on its own; the parent-snapshot
+  half of that rule has to be configured off in the pom, since a module's SNAPSHOT parent is the
+  normal state before a release.
+- Pass `-DpushChanges=false` and push the branch and the tag as the release steps say, so the work
+  travels the way every other card's does.
+- Deploy only when `swarmforge/deploy.conf` names a target, through the project's own token
+  helper, the way the deploy step does everywhere. A deploy that fails means no tag and no next
+  development version: report it instead of continuing.
+
 ## Kotlin Gate Tasks
 - A Kotlin project's build provides these tasks through its own wrapper, and these names are the
   contract every role uses:
