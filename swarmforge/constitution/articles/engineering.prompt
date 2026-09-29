@@ -9,7 +9,10 @@
   projects composed from that pack, and the project's own file wins over it: the pack
   is the template, the project is what it is. A project without that file is its
   pack's default, so read the file when it exists and the pack's line only when it
-  does not.
+  does not - and if it has neither, ask the operator rather than assuming a language.
+  No default comes from the layer: the choice is the project's, one layer feeds forges
+  in several languages, and a shared default is how a Java project would end up reading
+  the Kotlin or Go rules without anyone choosing that.
 - A project's own helpers live in `swarmforge/local-scripts/`, which is on the path of
   every session and is a file the composition never writes: the shared scripts sit in
   `swarmforge/scripts/` and are replaced on every update, so a helper that belongs to

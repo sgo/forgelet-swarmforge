@@ -1810,7 +1810,10 @@
                (slurp (str (fs/path host "packs/two-pack/gitignore")))))
         (is (= ".DS_Store\n"
                (slurp (str (fs/path host "packs/four-pack/gitignore")))))
-        (is (= "Kotlin\n" (slurp (str (fs/path host "packs/six-pack/language.conf")))))
+        ;; The layer installs no language default with the packs: what a project is
+        ;; written in is the project's decision, so a language.conf in the layer is
+        ;; ignored rather than spread to every forge and every project under them.
+        (is (not (fs/exists? (fs/path host "packs/six-pack/language.conf"))))
         (is (not (fs/exists? (fs/path host "packs/two-pack/language.conf"))))
         (is (fs/exists? (fs/path host "swarm"))))
       (finally
