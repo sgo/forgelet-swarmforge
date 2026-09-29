@@ -1875,3 +1875,20 @@
         (fs/delete-tree host)
         (fs/delete-tree base)
         (fs/delete-tree packrepo)))))
+
+(deftest the-java-row-names-the-method-java-projects-run
+  ;; Given the shared engineering article, which every forge takes from this layer
+  ;; When its Java rules are read
+  ;; Then they name the Maven profiles and PIT through Maven, and send nobody to
+  ;; mutate4java or away from Maven for tests - the two statements that had come to
+  ;; contradict what this family's Java projects actually run
+  (let [article (slurp (str (fs/path scripts-dir ".." "constitution" "articles"
+                                   "engineering.prompt")))]
+    (is (str/includes? article "## Java Gate Tasks"))
+    (is (str/includes? article "`-Pwith-mutation-tests`"))
+    (is (str/includes? article "PIT through the project's Maven profiles"))
+    (is (not (str/includes? article "mutation `github.com/unclebob/mutate4java`")))
+    (is (not (str/includes? article "avoid using Maven to run tests")))
+    ;; Java stays a choice, not a mandate: the article still carries every language.
+    (doseq [row ["  - Go:" "  - Clojure:" "  - Java:" "  - Kotlin:"]]
+      (is (str/includes? article row) (str "the tool table lost " row)))))

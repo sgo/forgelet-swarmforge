@@ -23,7 +23,9 @@
 - Language tool table:
   - Go: install with `go install`; mutation `github.com/unclebob/mutate4go`, CRAP `github.com/unclebob/crap4go`, DRY `github.com/unclebob/dry4go`.
   - Clojure: install with Clojure CLI/deps.edn; mutation `github.com/unclebob/clj-mutate`, CRAP `github.com/unclebob/crap4clj`, DRY `github.com/unclebob/dry4clj`.
-  - Java: install with Maven (`mvn`); mutation `github.com/unclebob/mutate4java`, CRAP `github.com/unclebob/crap4java`, DRY `github.com/unclebob/dry4java`.
+  - Java: build with Maven (`mvn`); mutation is PIT through the project's Maven profiles - the
+    `mutate4java` repository is not used for Java/Maven projects, the way it is not used for Kotlin -
+    CRAP is `github.com/unclebob/crap4java`, DRY is `github.com/unclebob/dry4java`.
   - Kotlin: build with the project's own Gradle wrapper (`./gradlew`), never a Gradle from PATH.
     Mutation is PIT through its Gradle plugin — the `mutate4java` repository is not used, as it is not
     used for Java — CRAP is `github.com/JeevanThandi/slopguard-kotlin`, built from source by the tool
@@ -39,10 +41,26 @@
 - For Clojure or Babashka projects, write Speclj specs, not `clojure.test`.
 - Install Speclj with `swarm_tool.sh require speclj`. If missing, `swarm_tool.sh ensure speclj`.
 - If a Speclj spec file changed, run `swarm_tool.sh require speclj-structure-check` (ensure if missing) and check the spec file before running tests.
-- For Java projects, avoid using Maven to run tests; build dedicated test runners and run those instead.
+- For Java projects, the Maven profiles are the contract: `swarm-mode` is the default and runs no gate,
+  each gate has a profile of its own, and `human-mode` runs them together. Run a suite through the
+  project's own script for that suite rather than a plain `mvn test`, and never treat a plain Maven
+  invocation as a gate.
 - For Kotlin projects, the wrapper is the build: run `./gradlew <task>`, never a Gradle from PATH, and
   never treat `./gradlew build` as a gate. Each suite has its own named task so a role runs only the
   suite it owns, and the gates stay off unless the role that owns one invokes it.
+
+## Java Gate Tasks
+- A Java project provides its gates as Maven profiles, and the profiles are the contract every role uses:
+  - `swarm-mode` - the default, with every gate off, so a plain `mvn` invocation runs no suite.
+  - `-Pwith-unit-tests` - the unit suite.
+  - `-Pwith-mutation-tests` - PIT, differential, with its history file kept.
+  - `-Pwith-property-tests` - property tests, where the project has them, and never part of the unit
+    suite.
+  - the project's own acceptance profile - `with-acceptance-tests` or `acceptance`, whichever its
+    scripts name - for the Gherkin acceptance suite.
+  - `human-mode` - the gates together, for a person running the build by hand.
+- A project's scripts name the profile for each suite; run a gate the way the script for it does, and
+  leave the gates off otherwise. No gate is a homegrown substitute for the tool the table names.
 
 ## Kotlin Gate Tasks
 - A Kotlin project's build provides these tasks through its own wrapper, and these names are the
