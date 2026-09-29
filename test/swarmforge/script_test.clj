@@ -1811,3 +1811,67 @@
         (fs/delete-tree host)
         (fs/delete-tree base)
         (fs/delete-tree packs)))))
+
+(deftest a-forge-names-where-its-own-packs-come-from
+  ;; Given a forge whose packs carry rules its family maintains, and a file in
+  ;; the forge naming where those packs live
+  ;; When the composition installs the packs
+  ;; Then they come from the repository and branch that file names, so a compose
+  ;; cannot quietly replace them with this layer's defaults - which is how a
+  ;; family's local law survived in one forge and was lost in another
+  (let [host (tmp-dir)
+        base (tmp-dir)
+        packrepo (tmp-dir)]
+    (try
+      (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"]]
+        (write-file (fs/path base "swarmforge/scripts" name) (str name "\n")))
+      (write-file (fs/path base "swarm") "#!/bin/sh\necho swarm\n")
+      (write-file (fs/path base "swarmforge/constitution.prompt") "MAIN-CONSTITUTION\n")
+      (write-file (fs/path base "swarmforge/roles/lieutenant.prompt") "LAYER-LIEUTENANT\n")
+      (write-file (fs/path base "swarmforge/swarmforge.conf") "# Lieutenant grok\n")
+      (doseq [name ["engineering.prompt" "workflow.prompt" "handoffs.prompt"]]
+        (write-file (fs/path base "swarmforge/constitution/articles" name)
+                    (str "MAIN-" name "\n")))
+      ;; The family's packs as a repository of their own: one branch per pack, the
+      ;; shape this layer's own pack branches already use, plus the default branch
+      ;; a forge would get if nothing named anything else.
+      (run {:dir packrepo} "git" "init" "-q")
+      (run {:dir packrepo} "git" "config" "user.email" "test@example.com")
+      (run {:dir packrepo} "git" "config" "user.name" "Test User")
+      (doseq [pack-name ["six-pack" "four-pack" "two-pack" "forgelet"]]
+        (run {:dir packrepo} "git" "checkout" "-q" "--orphan" pack-name)
+        (run {:dir packrepo :ok? false} "git" "rm" "-rq" "--cached" ".")
+        (doseq [file (map str (fs/glob packrepo "**/*"))]
+          (when (fs/regular-file? file) (fs/delete file)))
+        (write-file (fs/path packrepo "swarm") "#!/bin/sh\necho swarm\n")
+        (write-file (fs/path packrepo "swarmforge/swarmforge.conf")
+                    "window specifier grok master\n")
+        (write-file (fs/path packrepo "swarmforge/constitution.prompt") "PACK\n")
+        (write-file (fs/path packrepo "swarmforge/roles/specifier.prompt") "specifier\n")
+        (write-file (fs/path packrepo
+                            "swarmforge/constitution/articles/local-engineering.prompt")
+                    (str "FAMILY-" pack-name "\n"))
+        (run {:dir packrepo} "git" "add" "-A")
+        (run {:dir packrepo} "git" "commit" "-q" "-m" (str "the pack on branch " pack-name)))
+      (write-file (fs/path host "swarmforge/pack-sources.conf")
+                  (str "# this forge's packs are its family's, not this layer's\n"
+                       "six-pack http://127.0.0.1:9/family-packs six-pack\n"
+                       "four-pack http://127.0.0.1:9/family-packs four-pack\n"
+                       "two-pack http://127.0.0.1:9/family-packs two-pack\n"))
+      (let [result (run {:dir host
+                         :env {"SWARMFORGE_BASE_DIR" (str base)
+                               "SWARMFORGE_GIT_DIR" (str packrepo)
+                               "SWARMFORGE_SKIP_BRIDGE" "1"}}
+                        (str (fs/path repo-root "get-swarm-forge"))
+                        "project-manager")]
+        (is (zero? (:exit result)) (:err result))
+        (doseq [pack-name ["six-pack" "four-pack" "two-pack"]]
+          (is (= (str "FAMILY-" pack-name "\n")
+                 (slurp (str (fs/path host "packs" pack-name
+                                      "swarmforge" "constitution" "articles"
+                                      "local-engineering.prompt"))))
+              (str pack-name " did not come from the branch the forge named"))))
+      (finally
+        (fs/delete-tree host)
+        (fs/delete-tree base)
+        (fs/delete-tree packrepo)))))

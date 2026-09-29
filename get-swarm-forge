@@ -18,12 +18,44 @@ pack_names=(two-pack four-pack six-pack)
 # overridable, for a forge that wants Uncle Bob's packs untouched.
 pack_ref="${SWARMFORGE_PACK_REF:-forgelet}"
 
+# A forge may name where its own packs come from, in a file the composition never
+# writes: swarmforge/pack-sources.conf, one line per pack,
+#     <pack> <repository-url> [ref]
+# A forge whose packs carry rules its family maintains - Java/Maven-only law, say
+# - keeps them in their own repository and names it here, so a compose cannot
+# silently replace them with this layer's defaults. The environment still wins
+# over the file, and the file wins over the defaults below.
+pack_sources_file="swarmforge/pack-sources.conf"
+
+pack_source_field() {
+  local name="$1" want="$2" line pack repo ref
+  [[ -f "$pack_sources_file" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    read -r pack repo ref <<<"$line" || true
+    [[ "$pack" == "$name" && -n "$repo" ]] || continue
+    case "$want" in
+      repo) print -r -- "$repo" ;;
+      ref) print -r -- "$ref" ;;
+    esac
+    return 0
+  done <"$pack_sources_file"
+}
+
 pack_repo() {
-  local name="$1"
+  local name="$1" named
+  named="$(pack_source_field "$name" repo)"
   case "$name" in
-    six-pack) echo "${SWARMFORGE_SIX_PACK_REPO:-https://github.com/sgo/forgelet-six-pack}" ;;
-    four-pack) echo "${SWARMFORGE_FOUR_PACK_REPO:-https://github.com/sgo/forgelet-four-pack}" ;;
+    six-pack) echo "${SWARMFORGE_SIX_PACK_REPO:-${named:-https://github.com/sgo/forgelet-six-pack}}" ;;
+    four-pack) echo "${SWARMFORGE_FOUR_PACK_REPO:-${named:-https://github.com/sgo/forgelet-four-pack}}" ;;
+    *) echo "${named:-}" ;;
   esac
+}
+
+pack_ref_for() {
+  local name="$1" named
+  named="$(pack_source_field "$name" ref)"
+  print -r -- "${SWARMFORGE_PACK_REF:-${named:-$pack_ref}}"
 }
 
 usage() {
@@ -352,11 +384,12 @@ install_named_packs() {
     pack_src="$(pack_tree "$pack_name")"
     if [[ -z "$pack_src" ]]; then
       pack_src="$tmp_dir/packs/$pack_name"
-      # A pack the family carries its own copy of comes from its own fork, on
-      # pack_ref; anything else comes from this layer's branch of the same name.
+      # A pack the family carries its own copy of comes from its own fork, on the
+      # ref that forge names for it (pack-sources.conf) or pack_ref; anything else
+      # comes from this layer's branch of the same name.
       pack_from="$(pack_repo "$pack_name")"
       if [[ -n "$pack_from" ]]; then
-        download_branch "$pack_ref" "$pack_src" "$pack_from"
+        download_branch "$(pack_ref_for "$pack_name")" "$pack_src" "$pack_from"
       else
         download_branch "$pack_name" "$pack_src"
       fi
@@ -479,7 +512,7 @@ if [[ "$product" == two-pack || "$product" == four-pack || "$product" == six-pac
     pack_src="$tmp_dir/pack"
     pack_from="$(pack_repo "$product")"
     if [[ -n "$pack_from" ]]; then
-      download_branch "$pack_ref" "$pack_src" "$pack_from"
+      download_branch "$(pack_ref_for "$product")" "$pack_src" "$pack_from"
     else
       download_branch "$product" "$pack_src"
     fi
