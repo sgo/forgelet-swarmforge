@@ -1760,6 +1760,11 @@
       (doseq [pack-name ["two-pack" "four-pack" "six-pack"]]
         (let [pack (fs/path packs pack-name)]
           (write-file (fs/path pack "swarm") "#!/bin/sh\necho swarm\n")
+          ;; A pack that carries the answer, and one that does not: two-pack keeps
+          ;; none, so the assertion below still says something.
+          (when (not= pack-name "two-pack")
+            (write-file (fs/path pack "language.conf")
+                        (if (= pack-name "six-pack") "Kotlin\n" "Go\n")))
           (write-file (fs/path pack "README.md") "pack-readme\n")
           (write-file (fs/path pack "bb.edn") "pack-bb\n")
           (write-file (fs/path pack "swarmforge/swarmforge.conf")
@@ -1810,10 +1815,10 @@
                (slurp (str (fs/path host "packs/two-pack/gitignore")))))
         (is (= ".DS_Store\n"
                (slurp (str (fs/path host "packs/four-pack/gitignore")))))
-        ;; The layer installs no language default with the packs: what a project is
-        ;; written in is the project's decision, so a language.conf in the layer is
-        ;; ignored rather than spread to every forge and every project under them.
-        (is (not (fs/exists? (fs/path host "packs/six-pack/language.conf"))))
+        ;; The pack's own answer travels with the pack; the layer carries none of its
+        ;; own, so a forge's packs say what that family's packs say and nothing more.
+        (is (= "Kotlin\n" (slurp (str (fs/path host "packs/six-pack/language.conf")))))
+        (is (= "Go\n" (slurp (str (fs/path host "packs/four-pack/language.conf")))))
         (is (not (fs/exists? (fs/path host "packs/two-pack/language.conf"))))
         (is (fs/exists? (fs/path host "swarm"))))
       (finally
