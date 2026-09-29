@@ -17,6 +17,32 @@ family's fork of SwarmForge. `get-swarm-forge` installs from it, so a forge
 composed here runs SwarmForge *plus* the layer this family operates its forges
 with — including the bridge that puts a forge on the operator's phone.
 
+## Contents
+
+- [The Forgelet layer](#the-forgelet-layer)
+  - [Install the helper](#install-the-helper)
+  - [Start a forge](#start-a-forge)
+  - [Where your own things go](#where-your-own-things-go)
+  - [Update a forge](#update-a-forge)
+  - [Hook the forge into a bridge](#hook-the-forge-into-a-bridge)
+- [Products](#products)
+- [Prerequisites](#prerequisites)
+- [For the rest of SwarmForge](#for-the-rest-of-swarmforge)
+
+**Manuals.** A manual lives with whatever owns the thing it describes: the family's own are
+in this repository's `docs/`, a project's are in that project's `docs/`, and a forge's are in
+that forge's — so the reading copy comes with the values filled in.
+
+- [What a project owns](docs/what-a-project-owns.md) — the files a project provides rather
+  than receives: `swarmforge/language.conf`, `swarmforge/deploy.conf`,
+  `swarmforge/hooks/card-complete.sh`, its local articles and helpers, and what reads each of
+  them.
+- [Adding a forge](https://github.com/sgo/forgelet-bridge/blob/master/docs/adding-a-forge.md)
+  — the bridge's runbook for putting a forge on the operator's phone.
+- [`docs/adding-saibill.md`](https://github.com/sgo/forgelet-forge/blob/master/docs/adding-saibill.md)
+  — that runbook filled in for one forge, in that forge's own `docs/`, with its values,
+  checks and decisions.
+
 ## The Forgelet layer
 
 | Branch | What it is |
@@ -107,6 +133,10 @@ session — and the next forge of the family — can see it is ours.
 What is *not* yours is the shared runtime: `swarmforge/scripts/` is replaced
 wholesale on every update, which is why a helper looks like a sibling of it
 rather than a file inside it.
+
+The project-facing half of that table has a manual of its own:
+[what a project owns](docs/what-a-project-owns.md) — what each file is for, what reads it,
+and what to do when it is missing.
 
 ### Update a forge
 
