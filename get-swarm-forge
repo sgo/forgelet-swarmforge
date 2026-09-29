@@ -176,7 +176,7 @@ copy_shared_scripts_and_articles() {
   rm -rf swarmforge/scripts
   cp -R "$src/swarmforge/scripts" swarmforge/scripts
   local shared_article
-  for shared_article in engineering.prompt workflow.prompt handoffs.prompt; do
+  for shared_article in engineering.prompt workflow.prompt handoffs.prompt privacy.prompt; do
     [[ -f "$src/swarmforge/constitution/articles/$shared_article" ]] \
       && cp "$src/swarmforge/constitution/articles/$shared_article" \
            "swarmforge/constitution/articles/$shared_article"
@@ -253,7 +253,7 @@ copy_pack_template() {
       [[ -f "$pack_article" ]] || continue
       article_name="${pack_article:t}"
       case "$article_name" in
-        engineering.prompt|workflow.prompt|handoffs.prompt) continue ;;
+        engineering.prompt|workflow.prompt|handoffs.prompt|privacy.prompt) continue ;;
       esac
       cp "$pack_article" "$dest/swarmforge/constitution/articles/$article_name"
     done

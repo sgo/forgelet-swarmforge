@@ -2635,3 +2635,22 @@
 (defn -main [& _]
   (let [{:keys [fail error]} (run-tests 'swarmforge.pack-ui-test)]
     (System/exit (+ fail error))))
+
+(deftest forge-new-project-takes-the-forges-own-articles
+  ;; Given a forge carrying the family's privacy article, and a pack carrying one
+  ;; of its own
+  ;; When a project is composed from that pack
+  ;; Then the project reads the forge's copy - so a rule that applies to every
+  ;; project arrives whichever pack it was composed from, and a stale copy in a
+  ;; pack does not shadow it
+  (let [root (tmp-dir)]
+    (seed-mini-forge! root)
+    (write-file (fs/path root "swarmforge/constitution/articles/privacy.prompt") "FORGE-PRIVACY\n")
+    (write-file (fs/path root "packs/six-pack/swarmforge/constitution/articles/privacy.prompt")
+                "PACK-PRIVACY\n")
+    (let [result (pack-web-env root {"SWARMFORGE_SKIP_START" "1"}
+                               "--test-new-project" (str root) "cave" "six-pack" "m")
+          article (fs/path root "projects/cave/swarmforge/constitution/articles/privacy.prompt")]
+      (is (zero? (:exit result)) (:err result))
+      (is (fs/exists? article))
+      (is (= "FORGE-PRIVACY\n" (slurp (str article)))))))

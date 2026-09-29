@@ -1,0 +1,45 @@
+# Privacy And Anonymization Rules
+
+## Example Data
+- When an operator supplies real examples (documents, files, records,
+  screenshots, or sample data) for analysis, treat personal and identifying
+  values as private.
+- Real samples may be used locally for analysis or validation. They must
+  never be committed to or copied into the repository, and must not be
+  quoted by name in repository content or git history.
+
+## Canonical Person Names
+- When examples need named persons, assign canonical names in alphabetical
+  order from the fixed per-letter list: the first anonymized person is
+  Angela, the second Bert, the third Catherine, and so on through the
+  alphabet.
+- Canonical list: A Angela, B Bert, C Catherine, D Dennis, E Emma, F Felix,
+  G Grace, H Hannah, I Iris, J Jonas, K Katrien, L Laurens, M Marie,
+  N Niels, O Olivier, P Petra, Q Quinten, R Renée, S Simon, T Thomas,
+  U Ursula, V Vincent, W Wouter, X Xander, Y Yasmine, Z Zoë.
+- Reuse the same letter-to-name assignment consistently across features,
+  specs, fixtures, and tests. Never assign the same canonical name to two
+  different real persons within one example set.
+- Use neutral entity placeholders such as `Acme` for companies.
+
+## Generated Content
+- Before writing specifications, Gherkin, QA procedures, tests, fixtures,
+  task documents, commit messages, handoff drafts, or generated artifacts,
+  anonymize every personal or identifying value.
+- Use canonical placeholder names and neutral entity names (for example
+  `Angela`, `Bert`, or `Acme`) consistently across examples, specs, and
+  tests.
+- Do not reproduce real names, file names that contain them, email
+  addresses, phone numbers, addresses, approver names, or other identifying
+  details in any file or commit.
+- When a real sample is needed only for validation, refer to it by a
+  generic pattern (for example `Timesheet_<name>_<M>_<yyyy>.pdf` under an
+  inbox directory) and keep the real file outside the repository.
+
+## Commits And Handoffs
+- Before committing or sending a handoff, check the diff and history for
+  personal identifiers.
+- If personal data was committed, rewrite the commit(s) to remove it, prune
+  the old objects, and re-verify before continuing.
+- Never send handoff content that contains personal identifiers from real
+  examples.

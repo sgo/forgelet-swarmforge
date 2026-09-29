@@ -1756,6 +1756,7 @@
       (write-file (fs/path base "swarmforge/constitution/articles/engineering.prompt") "MAIN-ENGINEERING\n")
       (write-file (fs/path base "swarmforge/constitution/articles/workflow.prompt") "MAIN-WORKFLOW\n")
       (write-file (fs/path base "swarmforge/constitution/articles/handoffs.prompt") "MAIN-HANDOFFS\n")
+      (write-file (fs/path base "swarmforge/constitution/articles/privacy.prompt") "MAIN-PRIVACY\n")
       (doseq [pack-name ["two-pack" "four-pack" "six-pack"]]
         (let [pack (fs/path packs pack-name)]
           (write-file (fs/path pack "swarm") "#!/bin/sh\necho swarm\n")
@@ -1766,6 +1767,7 @@
           (write-file (fs/path pack "swarmforge/constitution.prompt") "PACK-CONSTITUTION\n")
           (write-file (fs/path pack "swarmforge/roles/specifier.prompt") "specifier\n")
           (write-file (fs/path pack "swarmforge/constitution/articles/engineering.prompt") "PACK-STALE-ENGINEERING\n")
+          (write-file (fs/path pack "swarmforge/constitution/articles/privacy.prompt") "PACK-STALE-PRIVACY\n")
           (write-file (fs/path pack "swarmforge/constitution/articles/project.prompt") "PACK-PROJECT\n")
           (write-file (fs/path pack "swarmforge/constitution/articles/local-workflow.prompt") "PACK-LOCAL-WORKFLOW\n")))
       (let [result (run {:dir host
@@ -1783,6 +1785,7 @@
         (is (= "MAIN-ENGINEERING\n" (slurp (str (fs/path host "swarmforge/constitution/articles/engineering.prompt")))))
         (is (= "MAIN-WORKFLOW\n" (slurp (str (fs/path host "swarmforge/constitution/articles/workflow.prompt")))))
         (is (= "MAIN-HANDOFFS\n" (slurp (str (fs/path host "swarmforge/constitution/articles/handoffs.prompt")))))
+        (is (= "MAIN-PRIVACY\n" (slurp (str (fs/path host "swarmforge/constitution/articles/privacy.prompt")))))
         (is (= "MAIN-CONSTITUTION\n" (slurp (str (fs/path host "swarmforge/constitution.prompt")))))
         (is (fs/exists? (fs/path host "swarmforge/roles/lieutenant.prompt")))
         (is (= "LAYER-LIEUTENANT\n"
@@ -1794,6 +1797,9 @@
         (is (not (fs/exists? (fs/path host "swarmforge/constitution/articles/project.prompt"))))
         (is (= "PACK-PROJECT\n" (slurp (str (fs/path host "packs/two-pack/swarmforge/constitution/articles/project.prompt")))))
         (is (= "PACK-LOCAL-WORKFLOW\n" (slurp (str (fs/path host "packs/four-pack/swarmforge/constitution/articles/local-workflow.prompt")))))
+        ;; The shared articles are the layer's, so a pack that carries one of its
+        ;; own does not put it in the packs tree either.
+        (is (not (fs/exists? (fs/path host "packs/six-pack/swarmforge/constitution/articles/privacy.prompt"))))
         (is (fs/directory? (fs/path host "projects")))
         (is (fs/exists? (fs/path host "packs/six-pack/swarmforge/swarmforge.conf")))
         ;; A pack's own lines come first, then the ones every pack's projects

@@ -6,7 +6,7 @@
             [clojure.string :as str]))
 
 (def pack-names ["two-pack" "four-pack" "six-pack"])
-(def shared-articles ["engineering.prompt" "workflow.prompt" "handoffs.prompt"])
+(def shared-articles ["engineering.prompt" "workflow.prompt" "handoffs.prompt" "privacy.prompt"])
 
 (defn sh [& args]
   (apply process/sh args))
