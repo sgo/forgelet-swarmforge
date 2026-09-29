@@ -39,9 +39,8 @@ that forge's — so the reading copy comes with the values filled in.
   them.
 - [Adding a forge](https://github.com/sgo/forgelet-bridge/blob/master/docs/adding-a-forge.md)
   — the bridge's runbook for putting a forge on the operator's phone.
-- [`docs/adding-saibill.md`](https://github.com/sgo/forgelet-forge/blob/master/docs/adding-saibill.md)
-  — that runbook filled in for one forge, in that forge's own `docs/`, with its values,
-  checks and decisions.
+- that runbook filled in for one forge lives in that forge's own `docs/`, with its values,
+  checks and decisions — filled-in copies stay with the forge they are about.
 
 ## The Forgelet layer
 

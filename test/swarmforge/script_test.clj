@@ -1857,7 +1857,7 @@
         with-dep (str "<project>\n<modelVersion>4.0.0</modelVersion>\n"
                       "<groupId>com.example</groupId><artifactId>demo</artifactId>\n"
                       "<version>1.1.0-SNAPSHOT</version>\n<dependencies>\n"
-                      "<dependency><groupId>com.saibill</groupId><artifactId>saibill-api</artifactId>"
+                      "<dependency><groupId>com.example</groupId><artifactId>widget</artifactId>"
                       "<version>1.1.0-SNAPSHOT</version></dependency>\n</dependencies>\n</project>\n")
         without-dep (str "<project>\n<modelVersion>4.0.0</modelVersion>\n"
                          "<groupId>com.example</groupId><artifactId>demo</artifactId>\n"
@@ -1870,7 +1870,7 @@
       (run {:dir root} "git" "commit" "-q" "-m" "the project")
       (let [result (run {:dir root :ok? false} preflight "--no-maven" "1.1.0" "1.1.1-SNAPSHOT")]
         (is (not= 0 (:exit result)))
-        (is (str/includes? (text result) "com.saibill:saibill-api:1.1.0-SNAPSHOT")
+        (is (str/includes? (text result) "com.example:widget:1.1.0-SNAPSHOT")
             "the project's own snapshot dependency has to be named"))
       (write-file pom without-dep)
       (run {:dir root} "git" "add" "-A")
