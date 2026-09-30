@@ -210,6 +210,54 @@
       (finally
         (fs/delete-tree root)))))
 
+(deftest completion-hook-fires-when-the-last-role-hands-the-card-back-unchanged
+  ;; Given a project the board calls done, a finishing step of its own, and a
+  ;; handoff from the last role in the pack carrying a commit the master worktree
+  ;; already has - which is what a role with nothing to add sends back
+  ;; When the role on master reads it
+  ;; Then the finishing step still runs, because the board says the card finished,
+  ;; not the freshness of the merge: waiting only for a fresh merge left a finished
+  ;; card unpushed (saibillx-peppol, 2026-09-30)
+  (let [root (tmp-dir)]
+    (try
+      (init-repo! root)
+      (write-file (fs/path root "work.txt") "work\n")
+      (run {:dir root} "git" "add" "work.txt")
+      (run {:dir root} "git" "commit" "-q" "-m" "work")
+      (let [commit (str/trim (:out (run {:dir root} "git" "rev-parse" "HEAD")))]
+        (write-file (fs/path root ".swarmforge/roles.tsv")
+                    (format (str "sender\tmaster\t%s\tswarmforge-sender\tSender\tcodex\ttask\tforward-only\n"
+                                 "cleaner\tcleaner\t%s/.worktrees/cleaner\tswarmforge-cleaner\tCleaner\tcodex\tbatch\tback-one\n")
+                            root root))
+        (doseq [dir [".swarmforge/handoffs/outbox/tmp"
+                     ".swarmforge/handoffs/sent"
+                     ".swarmforge/handoffs/failed"
+                     ".swarmforge/handoffs/inbox/new"
+                     ".swarmforge/handoffs/inbox/in_process"
+                     ".swarmforge/handoffs/inbox/completed"]]
+          (fs/create-dirs (fs/path root dir)))
+        (write-board-row! root "HTW" "done")
+        (write-file (fs/path root "tasks/HTW.md") "# HTW\n")
+        (write-completion-hook! root "echo \"ran for $SWARMFORGE_TASK\" > .swarmforge/hook-ran\n")
+        (write-file (fs/path root ".swarmforge/handoffs/inbox/new/00_item.handoff")
+                    (str "id: 1\n"
+                         "from: cleaner\n"
+                         "to: sender\n"
+                         "priority: 00\n"
+                         "type: git_handoff\n"
+                         "role: cleaner\n"
+                         "task: HTW\n"
+                         "commit: " commit "\n"
+                         "non-forwarding: true\n"
+                         "\n"
+                         "nothing to add\n"))
+        (let [ready (run {:dir root :env {"SWARMFORGE_ROLE" "sender"}} (script "ready_for_next.sh"))]
+          (is (zero? (:exit ready)) (:err ready))
+          (is (str/includes? (:out ready) "--- hook card-complete (card HTW) from cleaner"))
+          (is (fs/exists? (fs/path root ".swarmforge/hook-ran")))))
+      (finally
+        (fs/delete-tree root)))))
+
 (deftest handoff-lib-parses-and-prints-handoff-files
   (let [root (tmp-dir)
         handoff-file (fs/path root "task.handoff")]

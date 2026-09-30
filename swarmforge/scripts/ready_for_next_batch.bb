@@ -131,6 +131,14 @@
     (print (:err result))
     (flush)))
 
+(defn last-pack-role?
+  "The role the pack ends with. The board is marked done by the handoff that role
+  sends, so that handoff is what says the card finished - whatever commit it
+  carries, and even when it carries the same one back."
+  [role]
+  (and (not (str/blank? (or role "")))
+       (= role (last (map first (ready-for-next-guard/role-rows))))))
+
 (defn merge-git-handoff! [file]
   (when (= "git_handoff" (header-field file "type"))
     (let [from (header-field file "from")
@@ -140,10 +148,13 @@
               result (sh/sh (str (fs/path script-dir "merge_and_process.sh")) from commit)]
           (when-not (zero? (:exit result))
             (fail! 1 (str/trim (str (:err result) "\n" (:out result)))))
-          ;; The hook fires when this merge is what brought the card's work in, so
-          ;; reading a batch that is already in process does not run a project's
-          ;; finishing step again.
-          (when fresh?
+          ;; The hook fires when this merge brought the card's work in, or when the
+          ;; last role in the pack handed the card back: a role with nothing to add
+          ;; sends the same commit back, and the board - not the freshness of the
+          ;; merge - is what says the card finished (saibillx-peppol, 2026-09-30).
+          ;; Reading a batch already in process is still not a completion, because
+          ;; run_hook decides from the board row; an extra call defers at worst.
+          (when (or fresh? (last-pack-role? from))
             (run-completion-hook! file)))))))
 
 (defn merge-batch! [batch-dir]
