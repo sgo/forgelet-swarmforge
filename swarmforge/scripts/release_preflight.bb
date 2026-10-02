@@ -12,7 +12,8 @@
        "  release_preflight.sh [<release-version> [<next-development-version>]] [options]\n"
        "\n"
        "  --project <root>  the project to check (default: the current directory)\n"
-       "  --no-maven        skip the resolved-dependency check, which asks Maven\n"
+       "  --no-maven        skip what asks outside this directory: the resolved-dependency\n"
+       "                    check and the lookup of the newest release plugin\n"
        "\n"
        "It checks what a release must not start without: a clean tree, a version that is\n"
        "still a -SNAPSHOT at HEAD, a release tag nobody has taken, no dependency on a\n"
@@ -28,7 +29,12 @@
        "It changes nothing. When it passes it prints the commands to run, with the versions\n"
        "the card named - this never derives them - and the gate the release activates goes\n"
        "through -Darguments, because the plugin's own clean verify is a forked Maven that\n"
-       "does not inherit a -P from this command line.\n"))
+       "does not inherit a -P from this command line.\n"
+       "\n"
+       "It refuses nothing over the release plugin, and warns instead: a pom that pins no\n"
+       "version still runs - Maven's own super-POM supplies one - so the release runs\n"
+       "whatever version that Maven carries rather than one the project chose, and the\n"
+       "warning names the newest Maven Central has, which is what to pin.\n"))
 
 (defn usage []
   (println usage-text))
@@ -200,6 +206,30 @@
 
 (def release-gate "with-release-tests")
 
+(defn declared-plugin-version
+  "The version a pom declares for the release plugin, when it declares one. A pom
+  that names none still runs: Maven's own super-POM supplies a version, so the
+  release runs whatever that Maven installation carries rather than a version the
+  project chose."
+  [text]
+  (->> (re-seq #"(?s)<plugin>(.*?)</plugin>" (or text ""))
+       (filter (fn [[_ block]] (str/includes? block "maven-release-plugin")))
+       (keep (fn [[_ block]]
+               (some-> (re-find #"(?s)<version>\s*([^<\s]+)\s*</version>" block) second str/trim not-empty)))
+       first))
+
+(defn newest-release-plugin
+  "The newest release plugin Maven Central carries, or nil when it cannot be asked.
+  Public metadata and no token; this is the number to pin, and a release that runs
+  offline is simply not told it."
+  []
+  (try
+    (let [{:keys [out exit]} (process/sh {:continue true} "curl" "-sS" "--max-time" "5"
+                                          "https://repo1.maven.org/maven2/org/apache/maven/plugins/maven-release-plugin/maven-metadata.xml")]
+      (when (zero? exit)
+        (not-empty (some-> (re-find #"(?s)<release>\s*([^<\s]+)\s*</release>" (or out "")) second str/trim))))
+    (catch Exception _ nil)))
+
 (defn -main [& args]
   (when (or (some #{"--help" "-h"} args) (empty? args))
     (when (empty? args) (usage) (System/exit 1))
@@ -229,6 +259,14 @@
           scm (scm-connection text)
           dist (distribution-repositories text)
           helper (when target (token-helper root target))
+          pinned (declared-plugin-version text)
+          newest (when (and (not pinned) (not (some #{"--no-maven"} args))) (newest-release-plugin))
+          warnings (cond-> []
+                     (not pinned)
+                     (conj (str "the release plugin is not pinned, so mvn release:prepare runs whatever "
+                                "version Maven's own super-POM carries rather than one this project chose"
+                                (when newest (str "; Maven Central's newest is " newest
+                                                  ", which is what to pin in <build><pluginManagement>")))))
           failures (cond-> []
                      (seq dirty)
                      (conj (str "the tree is not clean; commit or drop those changes first - a release "
@@ -290,6 +328,9 @@
         (println (str "  release gate: " (if (contains? (profile-ids text) release-gate)
                                            release-gate
                                            (str "NO " release-gate " PROFILE"))))
+        (println (str "  release plugin: " (if pinned
+                                             (str pinned " (pinned in the pom)")
+                                             "UNPINNED - Maven's super-POM supplies the version")))
         (when (seq from-poms)
           (println (str "  snapshot dependencies (from the poms): " (str/join ", " from-poms))))
         (when (and resolved (:checked resolved) (seq from-maven))
@@ -304,11 +345,15 @@
               (println "")
               (println "release preflight: DO NOT RELEASE")
               (doseq [failure failures]
-                (println (str "  - " failure))))
+                (println (str "  - " failure)))
+              (doseq [warning warnings]
+                (println (str "  warning: " warning))))
             (System/exit 1))
           (do
             (println "")
             (println "release preflight: READY")
+            (doseq [warning warnings]
+              (println (str "  warning: " warning)))
             (println (str "  (the gate rides -Darguments: the plugin's clean verify forks and inherits no -P)"))
             (println (str "  mvn release:prepare -DreleaseVersion=" release-version
                           (when next-version (str " -DdevelopmentVersion=" next-version))

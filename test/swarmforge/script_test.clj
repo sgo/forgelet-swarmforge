@@ -2008,7 +2008,23 @@
         (is (str/includes? (text result) "-Darguments=\"-Pwith-release-tests\"")
             "the gate has to reach the plugin's forked clean verify, which inherits no -P")
         (is (str/includes? (text result) "release:perform -Darguments=\"-DskipTests\"")
-            "perform would run the same suite a second time; the gate belongs on the prepare half"))
+            "perform would run the same suite a second time; the gate belongs on the prepare half")
+        (is (str/includes? (text result) "UNPINNED")
+            "an unpinned release plugin is warned about rather than refused")
+        (is (str/includes? (text result) "warning: the release plugin is not pinned")))
+      ;; Pinning the plugin settles the warning and changes nothing else
+      (write-file pom (str/replace wired "</project>"
+                                   (str "<build><pluginManagement><plugins><plugin>"
+                                        "<groupId>org.apache.maven.plugins</groupId>"
+                                        "<artifactId>maven-release-plugin</artifactId>"
+                                        "<version>3.3.1</version></plugin></plugins></pluginManagement></build>"
+                                        "</project>\n")))
+      (run {:dir root} "git" "add" "-A")
+      (run {:dir root} "git" "commit" "-q" "-m" "the pin")
+      (let [result (run {:dir root :ok? false} preflight "--no-maven" "1.1.0" "1.1.1-SNAPSHOT")]
+        (is (zero? (:exit result)) (text result))
+        (is (str/includes? (text result) "3.3.1 (pinned in the pom)"))
+        (is (not (str/includes? (text result) "warning:")) "a pinned plugin warns about nothing"))
       ;; A project that ships nowhere is not asked for deploy wiring
       (fs/delete-if-exists (fs/path root "swarmforge" "deploy.conf"))
       (run {:dir root} "git" "add" "-A")
