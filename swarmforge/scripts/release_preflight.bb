@@ -34,7 +34,12 @@
        "It refuses nothing over the release plugin, and warns instead: a pom that pins no\n"
        "version still runs - Maven's own super-POM supplies one - so the release runs\n"
        "whatever version that Maven carries rather than one the project chose, and the\n"
-       "warning names the newest Maven Central has, which is what to pin.\n"))
+        "warning names the newest Maven Central has, which is what to pin.\n"
+        "\n"
+       "The perform command it prints carries -DlocalCheckout=true: a release passes\n"
+       "-DpushChanges=false, so the tag prepare made exists only in this checkout, and\n"
+       "release:perform would otherwise clone the SCM URL looking for a tag the remote has\n"
+       "not got yet.\n"))
 
 (defn usage []
   (println usage-text))
@@ -355,11 +360,12 @@
             (doseq [warning warnings]
               (println (str "  warning: " warning)))
             (println (str "  (the gate rides -Darguments: the plugin's clean verify forks and inherits no -P)"))
+            (println (str "  (localCheckout: the tag is local while -DpushChanges=false, and perform clones the SCM)"))
             (println (str "  mvn release:prepare -DreleaseVersion=" release-version
                           (when next-version (str " -DdevelopmentVersion=" next-version))
                           " -Dtag=v" release-version " -DpushChanges=false"
                           " -Darguments=\"-P" release-gate "\""))
-            (println (str "  mvn release:perform -Darguments=\"-DskipTests\""
+            (println (str "  mvn release:perform -DlocalCheckout=true -Darguments=\"-DskipTests\""
                           (when-not target
                             "   # only when swarmforge/deploy.conf names a target")))
             (println "  then push the branch and the tag, as the release steps say")

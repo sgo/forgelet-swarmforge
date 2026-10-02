@@ -82,7 +82,11 @@
   half of that rule has to be configured off in the pom, since a module's SNAPSHOT parent is the
   normal state before a release.
 - Pass `-DpushChanges=false` and push the branch and the tag as the release steps say, so the work
-  travels the way every other card's does.
+  travels the way every other card's does. That is why the perform half takes
+  `-DlocalCheckout=true`: the tag prepare made exists only in this checkout while the push is still
+  to come, and `release:perform` otherwise clones the SCM URL looking for a tag the remote has not got,
+  failing with "Could not find remote branch v<version> to clone". Pushing the tag before perform would
+  also work and would contradict pushing at the end, so the flag is what this recipe names.
 - Activate the gate through `-Darguments`, not on the command line: `release:prepare` runs its own
   `clean verify` in a forked Maven that does not inherit a `-P`, so
   `... -Darguments="-Pwith-release-tests"` is what actually gates the release. Prepare runs before
