@@ -1909,7 +1909,16 @@
                       "<version>1.1.0-SNAPSHOT</version></dependency>\n</dependencies>\n</project>\n")
         without-dep (str "<project>\n<modelVersion>4.0.0</modelVersion>\n"
                          "<groupId>com.example</groupId><artifactId>demo</artifactId>\n"
-                         "<version>1.1.0-SNAPSHOT</version>\n</project>\n")
+                         "<version>1.1.0-SNAPSHOT</version>\n"
+                         ;; A release tags what the pom's own SCM block points at,
+                         ;; and mvn release:prepare refuses before it does anything
+                         ;; without one - so a fixture called "ready to release"
+                         ;; carries it. This project ships nowhere: no deploy.conf,
+                         ;; so the deploy wiring is not asked of it.
+                         "<scm><connection>scm:git:https://github.com/example/demo.git</connection></scm>\n"
+                         "<profiles><profile><id>with-release-tests</id>"
+                         "<properties><skipTests>false</skipTests></properties></profile></profiles>\n"
+                         "</project>\n")
         text (fn [result] (str (:out result) (:err result)))]
     (try
       (init-repo! root)
@@ -1944,5 +1953,68 @@
         (is (not= 0 (:exit result)))
         (is (str/includes? (text result) "not clean")))
       (run {:dir root} "git" "checkout" "--" "pom.xml")
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest release-preflight-refuses-a-release-that-is-not-wired
+  ;; Given a project whose numbers are all in order - clean tree, a -SNAPSHOT at
+  ;; HEAD, a free tag, no foreign snapshot dependency - with a deploy target and
+  ;; nothing behind it that can reach the target
+  ;; When the preflight runs
+  ;; Then it refuses for the wiring and not for the numbers: mvn release:prepare
+  ;; cannot tag without <scm>, release:perform has nowhere to deploy without a
+  ;; distributionManagement repository, and the deploy step has no token helper
+  ;; to run. All three were silent before this: every number checked out, so the
+  ;; tool said READY and the release stopped at its own first command.
+  (let [root (tmp-dir)
+        pom (fs/path root "pom.xml")
+        preflight (str (fs/path scripts-dir "release_preflight.sh"))
+        text (fn [result] (str (:out result) (:err result)))
+        bare (str "<project>\n<modelVersion>4.0.0</modelVersion>\n"
+                  "<groupId>com.example</groupId><artifactId>demo</artifactId>\n"
+                  "<version>1.1.0-SNAPSHOT</version>\n</project>\n")
+        wired (str "<project>\n<modelVersion>4.0.0</modelVersion>\n"
+                   "<groupId>com.example</groupId><artifactId>demo</artifactId>\n"
+                   "<version>1.1.0-SNAPSHOT</version>\n"
+                   "<scm><developerConnection>scm:git:git@github.com:example/demo.git</developerConnection></scm>\n"
+                   "<distributionManagement><repository><id>github</id>"
+                   "<url>https://maven.pkg.github.com/example/demo</url></repository></distributionManagement>\n"
+                   "<profiles><profile><id>with-release-tests</id>"
+                   "<properties><skipTests>false</skipTests></properties></profile></profiles>\n"
+                   "</project>\n")]
+    (try
+      (init-repo! root)
+      (write-file pom bare)
+      (write-file (fs/path root "swarmforge" "deploy.conf") "github-packages\n")
+      (run {:dir root} "git" "add" "-A")
+      (run {:dir root} "git" "commit" "-q" "-m" "the project")
+      (let [result (run {:dir root :ok? false} preflight "--no-maven" "1.1.0" "1.1.1-SNAPSHOT")]
+        (is (not= 0 (:exit result)))
+        (is (str/includes? (text result) "NO <scm> BLOCK"))
+        (is (str/includes? (text result) "NO <distributionManagement> REPOSITORY"))
+        (is (str/includes? (text result) "no token helper"))
+        (is (str/includes? (text result) (str "NO " "with-release-tests" " PROFILE"))))
+      ;; The same project, wired, passes and says what it found
+      (write-file pom wired)
+      (write-file (fs/path root "scripts" "github-packages-token.sh") "echo token\n")
+      (run {:dir root} "git" "add" "-A")
+      (run {:dir root} "git" "commit" "-q" "-m" "the wiring")
+      (let [result (run {:dir root :ok? false} preflight "--no-maven" "1.1.0" "1.1.1-SNAPSHOT")]
+        (is (zero? (:exit result)) (text result))
+        (is (str/includes? (text result) "READY"))
+        (is (str/includes? (text result) "scm scm:git:git@github.com:example/demo.git"))
+        (is (str/includes? (text result) "github -> https://maven.pkg.github.com/example/demo"))
+        (is (str/includes? (text result) "scripts/github-packages-token.sh"))
+        (is (str/includes? (text result) "-Darguments=\"-Pwith-release-tests\"")
+            "the gate has to reach the plugin's forked clean verify, which inherits no -P")
+        (is (str/includes? (text result) "release:perform -Darguments=\"-DskipTests\"")
+            "perform would run the same suite a second time; the gate belongs on the prepare half"))
+      ;; A project that ships nowhere is not asked for deploy wiring
+      (fs/delete-if-exists (fs/path root "swarmforge" "deploy.conf"))
+      (run {:dir root} "git" "add" "-A")
+      (run {:dir root} "git" "commit" "-q" "-m" "no deploy target")
+      (let [result (run {:dir root :ok? false} preflight "--no-maven" "1.1.0" "1.1.1-SNAPSHOT")]
+        (is (zero? (:exit result)) (text result))
+        (is (str/includes? (text result) "no target in swarmforge/deploy.conf")))
       (finally
         (fs/delete-tree root)))))

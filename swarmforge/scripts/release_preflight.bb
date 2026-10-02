@@ -15,14 +15,20 @@
        "  --no-maven        skip the resolved-dependency check, which asks Maven\n"
        "\n"
        "It checks what a release must not start without: a clean tree, a version that is\n"
-       "still a -SNAPSHOT at HEAD, a release tag nobody has taken, and no dependency on a\n"
-       "-SNAPSHOT this project does not build itself. The last one is the failure this\n"
-       "exists for - mvn versions:set rewrites this project's own version and looks at\n"
-       "nothing else, so a release can ship depending on a snapshot of a published\n"
-       "producer without a word, which has happened here before.\n"
+       "still a -SNAPSHOT at HEAD, a release tag nobody has taken, no dependency on a\n"
+       "-SNAPSHOT this project does not build itself, the with-release-tests profile the\n"
+       "release activates, and the wiring the release runs through - a <scm> block, which\n"
+       "mvn release:prepare needs before it does anything, and, when swarmforge/deploy.conf\n"
+       "names a target, a <distributionManagement> repository and the project's own token\n"
+       "helper. The snapshot check is the one this exists for - mvn versions:set rewrites\n"
+       "this project's own version and looks at nothing else, so a release can ship\n"
+       "depending on a snapshot of a published producer without a word, which has happened\n"
+       "here before.\n"
        "\n"
        "It changes nothing. When it passes it prints the commands to run, with the versions\n"
-       "the card named - this never derives them.\n"))
+       "the card named - this never derives them - and the gate the release activates goes\n"
+       "through -Darguments, because the plugin's own clean verify is a forked Maven that\n"
+       "does not inherit a -P from this command line.\n"))
 
 (defn usage []
   (println usage-text))
@@ -136,6 +142,64 @@
     (when (fs/regular-file? file)
       (not-empty (str/trim (slurp (str file)))))))
 
+(defn pom-text
+  "The project's own pom, as text: the wiring checks below are about what a release
+  runs through, and the root pom is where a project declares that."
+  [root]
+  (let [pom (fs/path root "pom.xml")]
+    (when (fs/regular-file? pom) (slurp (str pom)))))
+
+(defn scm-connection
+  "The pom's SCM connection, when it has one. `mvn release:prepare` - the command
+  this preflight prints, and the one a Java release is cut with - refuses before it
+  does anything when there is none, because a release tags what the SCM block
+  points at. `-DpushChanges=false` does not lift the requirement."
+  [text]
+  (when-let [block (second (re-find #"(?s)<scm>(.*?)</scm>" (or text "")))]
+    (not-empty (str/trim (or (second (re-find #"(?s)<developerConnection>\s*([^<\s]+)\s*</developerConnection>" block))
+                             (second (re-find #"(?s)<connection>\s*([^<\s]+)\s*</connection>" block))
+                             "")))))
+
+(defn distribution-repositories
+  "The repositories the pom's distributionManagement names: what release:perform
+  deploys through. Read inside that block, so a consuming <repositories> entry is
+  never mistaken for a place this project publishes."
+  [text]
+  (let [block (second (re-find #"(?s)<distributionManagement>(.*?)</distributionManagement>" (or text "")))]
+    (->> (re-seq #"(?s)<repository>(.*?)</repository>" (or block ""))
+         (map (fn [[_ repository]]
+                (let [field (fn [name]
+                              (some-> (re-find (re-pattern (str "(?s)<" name ">\\s*([^<\\s]+)\\s*</" name ">")) repository)
+                                      second
+                                      str/trim
+                                      not-empty))]
+                  {:id (field "id") :url (field "url")})))
+         (filter (fn [{:keys [id url]}] (and id url)))
+         vec)))
+
+(defn token-helper
+  "The project's own token helper for a deploy target, when it has one. A project's
+  manual puts it under scripts/, named for the target; a forge's own helpers
+  directory counts too, because a project that has moved it there is still wired."
+  [root target]
+  (let [name (str target "-token.sh")]
+    (some (fn [dir]
+            (let [file (fs/path root dir name)]
+              (when (fs/regular-file? file) (str dir "/" name))))
+          ["scripts" "swarmforge/local-scripts"])))
+
+(defn profile-ids
+  "The profile ids a pom declares. A release activates the gate by name, and
+  `-P` for a profile that does not exist is a warning to Maven rather than an
+  error - the build runs, with no gate at all, which is the silent case this
+  check exists for."
+  [text]
+  (->> (re-seq #"(?s)<profile>(.*?)</profile>" (or text ""))
+       (keep (fn [[_ block]] (some-> (re-find #"(?s)<id>\s*([^<\s]+)\s*</id>" block) second str/trim)))
+       set))
+
+(def release-gate "with-release-tests")
+
 (defn -main [& args]
   (when (or (some #{"--help" "-h"} args) (empty? args))
     (when (empty? args) (usage) (System/exit 1))
@@ -160,7 +224,12 @@
     (println (str "  version at HEAD: " version))
     (println (str "  deploy gate: " (or (deploy-target root)
                                         "no target in swarmforge/deploy.conf - this release will not deploy")))
-    (let [failures (cond-> []
+    (let [target (deploy-target root)
+          text (pom-text root)
+          scm (scm-connection text)
+          dist (distribution-repositories text)
+          helper (when target (token-helper root target))
+          failures (cond-> []
                      (seq dirty)
                      (conj (str "the tree is not clean; commit or drop those changes first - a release "
                                 "starts from what HEAD holds"))
@@ -179,7 +248,24 @@
                      (and release-version
                           (zero? (:exit (git root "rev-parse" "-q" "--verify"
                                              (str "refs/tags/v" release-version)))))
-                     (conj (str "tag v" release-version " already exists")))]
+                     (conj (str "tag v" release-version " already exists"))
+                     (not scm)
+                     (conj (str "the pom has no <scm> block with a connection or a developerConnection, and "
+                                "mvn release:prepare - the command this preflight prints - stops before it "
+                                "does anything without one: \"Missing required setting: scm connection or "
+                                "developerConnection must be specified\""))
+                     (and target (empty? dist))
+                     (conj (str "swarmforge/deploy.conf names " target " but the pom's <distributionManagement> "
+                                "names no repository with an id and a url, so release:perform would have "
+                                "nowhere to deploy"))
+                     (and target (not helper))
+                     (conj (str "swarmforge/deploy.conf names " target " but the project has no token helper "
+                                "at scripts/" target "-token.sh (or swarmforge/local-scripts/"
+                                target "-token.sh)"))
+                     (not (contains? (profile-ids text) release-gate))
+                     (conj (str "the pom declares no " release-gate " profile, which is the gate a release "
+                                "activates; -P for a profile that does not exist is a warning to Maven and not "
+                                "an error, so the release would run no gate and publish untested artifacts")))]
       (let [release-version (or release-version (str/replace version #"-SNAPSHOT$" ""))
             own (artifact-ids (poms root))
             from-poms (snapshot-dependency-coordinates (poms root) own)
@@ -187,9 +273,23 @@
                        (maven-resolved-snapshots root own))
             from-maven (if (and resolved (:checked resolved)) (:snapshots resolved) [])
             silent-snapshots (->> (concat from-poms from-maven) distinct sort vec)
-            failures (into failures
-                           (map #(str "dependency on a SNAPSHOT this project does not build: " %)
-                                silent-snapshots))]
+             failures (into failures
+                            (map #(str "dependency on a SNAPSHOT this project does not build: " %)
+                                 silent-snapshots))]
+        (println (str "  release wiring: " (if scm
+                                             (str "scm " scm)
+                                             "NO <scm> BLOCK - mvn release:prepare would refuse")))
+        (println (str "  deploy wiring: " (if (seq dist)
+                                            (str/join ", " (map #(str (:id %) " -> " (:url %)) dist))
+                                            (if target
+                                              "NO <distributionManagement> REPOSITORY"
+                                              "none - and no deploy target, so none is needed"))))
+        (when target
+          (println (str "  token helper: " (or helper
+                                              (str "NOT FOUND - looked at scripts/" target "-token.sh")))))
+        (println (str "  release gate: " (if (contains? (profile-ids text) release-gate)
+                                           release-gate
+                                           (str "NO " release-gate " PROFILE"))))
         (when (seq from-poms)
           (println (str "  snapshot dependencies (from the poms): " (str/join ", " from-poms))))
         (when (and resolved (:checked resolved) (seq from-maven))
@@ -209,11 +309,13 @@
           (do
             (println "")
             (println "release preflight: READY")
+            (println (str "  (the gate rides -Darguments: the plugin's clean verify forks and inherits no -P)"))
             (println (str "  mvn release:prepare -DreleaseVersion=" release-version
                           (when next-version (str " -DdevelopmentVersion=" next-version))
-                          " -Dtag=v" release-version " -DpushChanges=false"))
-            (println (str "  mvn release:perform"
-                          (when-not (deploy-target root)
+                          " -Dtag=v" release-version " -DpushChanges=false"
+                          " -Darguments=\"-P" release-gate "\""))
+            (println (str "  mvn release:perform -Darguments=\"-DskipTests\""
+                          (when-not target
                             "   # only when swarmforge/deploy.conf names a target")))
             (println "  then push the branch and the tag, as the release steps say")
             (System/exit 0)))))))
