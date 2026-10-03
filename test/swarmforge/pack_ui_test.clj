@@ -123,7 +123,7 @@
 (defn increment-audit! [root task-id]
   (pack-board root true "increment-audit" "--root" (str root) "--task-id" task-id))
 
-(defn queue-handoff! [root {:keys [from to task artifacts non-forwarding priority body]}]
+(defn queue-handoff! [root {:keys [from to task task-id artifacts non-forwarding priority body]}]
   (let [priority (or priority "50")]
     (write-file
      (fs/path root ".swarmforge/handoffs/outbox"
@@ -133,6 +133,7 @@
           "priority: " priority "\n"
           "type: git_handoff\n"
           "task: " task "\n"
+          (when task-id (str "task_id: " task-id "\n"))
           (when artifacts (str "artifacts: " artifacts "\n"))
           (when non-forwarding "non-forwarding: true\n")
           "\n"
@@ -770,6 +771,54 @@
         (is (= 1 (:audit_count (task-card root "htw-console-app"))))
         (is (= [] (pending-names root)))
         (is (= [] (:approvals (web-state root)))))
+      (finally
+        (stop-tmux! sock)))))
+
+(deftest attention-resolution-is-written-down-how-it-ended
+  ;; Given a pending approval
+  ;; When the dashboard approves it away from the room
+  ;; Then the state says how it ended, worded the way the bridge words it
+  ;; (approved), because a reader that did not resolve it - the bridge's room - has
+  ;; nothing else to report from and says "resolved on the desktop" for both endings
+  (let [root (tmp-dir)
+        sock (do (setup-pack! root six-pack-roles)
+                 (create-task root "htw-console-app" "specifier")
+                 (increment-audit! root (:id (task-card root "htw-console-app")))
+                 (queue-handoff! root {:from "specifier" :to "coder" :task "htw-console-app"
+                                       :task-id (:id (task-card root "htw-console-app"))})
+                 (start-tmux! root six-pack-roles))]
+    (try
+      (handoffd-once root)
+      (is (= [] (:resolved_approvals (web-state root))))
+      (let [id (:id (first (:approvals (web-state root))))]
+        (pack-web root true "--test-approve" (str root) id)
+        (let [resolved (:resolved_approvals (web-state root))]
+          (is (= [id] (mapv :id resolved)))
+          (is (= ["htw-console-app"] (mapv :task resolved)))
+          (is (= ["approved"] (mapv :resolution resolved)))
+          (is (seq (:at (first resolved))))))
+      (finally
+        (stop-tmux! sock)))))
+
+(deftest attention-send-back-is-written-down-how-it-ended
+  ;; Given a pending approval
+  ;; When the dashboard sends it back with words
+  ;; Then the state says so, worded as the bridge words it (sent_back), so the room can
+  ;; answer with the left arrow rather than saying it was resolved on the desktop
+  (let [root (tmp-dir)
+        sock (do (setup-pack! root six-pack-roles)
+                 (create-task root "htw-console-app" "specifier")
+                 (increment-audit! root (:id (task-card root "htw-console-app")))
+                 (queue-handoff! root {:from "specifier" :to "coder" :task "htw-console-app"
+                                       :task-id (:id (task-card root "htw-console-app"))})
+                 (start-tmux! root six-pack-roles))]
+    (try
+      (handoffd-once root)
+      (let [id (:id (first (:approvals (web-state root))))]
+        (pack-web root true "--test-retry-task" (str root) id "not this way")
+        (let [resolved (:resolved_approvals (web-state root))]
+          (is (= [id] (mapv :id resolved)))
+          (is (= ["sent_back"] (mapv :resolution resolved)))))
       (finally
         (stop-tmux! sock)))))
 

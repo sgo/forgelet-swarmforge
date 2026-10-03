@@ -525,6 +525,56 @@
 (defn approvals [root]
   (mapv #(approval-entry root %) (pending-files root)))
 
+;; An approval the dashboard resolved, kept so a reader that did not resolve it can be
+;; told how it ended rather than only that it is gone. The bridge's room is that reader:
+;; an approval approved away from the room - the dashboard's Accept, or an approve the
+;; lieutenant runs on the operator's word - left the bridge nothing to report but
+;; "Resolved on the desktop", because a resolution it did not carry out leaves no
+;; resolution in its own state. Both endings write one record, keyed by the approval's
+;; own id and worded as the bridge words them, and only the newest are kept: a reader
+;; that missed one has missed it, and this is not the bridge's memory.
+(def resolved-approvals-kept 100)
+
+(defn resolved-approvals-dir [root]
+  (fs/path root ".swarmforge" "approvals" "resolved"))
+
+(defn resolved-approval-files [dir]
+  (->> (fs/list-dir dir)
+       (filter #(str/ends-with? (fs/file-name %) ".edn"))
+       (sort-by #(fs/last-modified-time %) #(compare %2 %1))))
+
+(defn resolved-approval [path]
+  (try
+    (let [record (edn/read-string (slurp (str path)))]
+      (when (:id record)
+        {:id (:id record)
+         :task (:task record)
+         :resolution (:resolution record)
+         :at (:at record)}))
+    (catch Exception _ nil)))
+
+(defn resolved-approvals [root]
+  (let [dir (resolved-approvals-dir root)]
+    (if (fs/directory? dir)
+      (->> (resolved-approval-files dir) (keep resolved-approval) vec)
+      [])))
+
+(defn record-resolution!
+  "Write down how an approval ended, before its pending file is gone: the id, the card,
+  and the resolution worded the way the bridge words it (approved, sent_back)."
+  [root id task resolution]
+  (let [dir (resolved-approvals-dir root)
+        _ (fs/create-dirs dir)
+        file (fs/path dir (str id ".edn"))]
+    (spit (str file)
+          (pr-str {:id id
+                   :task task
+                   :resolution resolution
+                   :at (.format java.time.format.DateTimeFormatter/ISO_INSTANT
+                                (java.time.Instant/now))}))
+    (doseq [old (drop resolved-approvals-kept (resolved-approval-files dir))]
+      (fs/delete-if-exists old))))
+
 (defn listed [dir pred]
   (if (fs/directory? dir)
     (->> (fs/list-dir dir)
@@ -801,6 +851,7 @@
      :lanes (lanes root)
      :tasks (tasks root)
      :approvals (approvals root)
+     :resolved_approvals (resolved-approvals root)
      :work_in_flight (work-in-flight root)
      :chat (list-chat root)
      :clarifications (list-clarifications root)}))
@@ -842,6 +893,11 @@
                                  (tagged name (approvals (open-project-root root name)))
                                  (catch Exception _ [])))
                              open))
+     :resolved_approvals (vec (mapcat (fn [name]
+                                        (try
+                                          (tagged name (resolved-approvals (open-project-root root name)))
+                                          (catch Exception _ [])))
+                                      open))
      :clarifications (vec (mapcat (fn [name]
                                     (try
                                       (tagged name (list-clarifications (open-project-root root name)))
@@ -1117,6 +1173,7 @@
     (fs/create-dirs (fs/parent dest))
     (spit (str dest) (with-approved (slurp (str src))))
     (fs/delete-if-exists src)
+    (record-resolution! root id (get headers "task") "approved")
     (drop-reviews! root id)
     (drop-task-reviews! root (or (not-empty (get headers "task_id")) (get headers "task")))))
 
@@ -1275,6 +1332,7 @@
       (snapshot-rejected! root task-id commit n)
       (restore-commit! wt commit))
     (fs/delete-if-exists src)
+    (record-resolution! root id task "sent_back")
     (drop-reviews! root id)
     (drop-task-audits! root task-id task)
     (restore-task-base! root headers)
