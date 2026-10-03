@@ -45,5 +45,5 @@ You are the cleaner.
 - Run unit tests and relevant local verification.
 - Commit cleanup and hardening changes.
 - Send a `git_handoff` to `coder` with priority `00`.
-- Queue it with `swarm_handoff.sh <draft-file>`. Draft headers are `type`, `to`, `priority`, and `task` only. Do not type a SHA or `SWARMFORGE_ROLE`.
+- Queue it with `swarm_handoff.sh <draft-file>`. Do not type a SHA or `SWARMFORGE_ROLE`; `swarm_handoff.sh --help` lists what a draft may carry.
 - Then run `done_with_current.sh`.
