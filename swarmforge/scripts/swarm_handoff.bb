@@ -22,6 +22,8 @@
        "task: <short-stable-task-name>\n\n"
        "The helper fills priority 50, commit, artifacts, and task_id from current work or the board card.\n"
        "Do not type a SHA or a hidden task_id. Extra headers (coverage, CRAP) are invalid.\n"
+       "One header beyond these is a draft's to write: non-terminal: true, which is how a\n"
+       "handback with findings is sent - the audit the helper prints says when and why.\n"
        "Extra lines after the headers are ignored.\n\n"
        "type: note\n"
        "to: <role>[,<role>...]\n"
@@ -30,7 +32,7 @@
 
 (def reserved-fields #{"id" "from" "role" "recipient" "created_at" "enqueued_at"
                        "dequeued_at" "completed_at" "task_base_commit" "non-forwarding"})
-(def allowed-fields #{"type" "to" "priority" "task_id" "task" "commit" "message"})
+(def allowed-fields #{"type" "to" "priority" "task_id" "task" "commit" "message" "non-terminal"})
 (def allowed-types #{"git_handoff" "note"})
 (def script-dir (fs/parent *file*))
 (try
@@ -447,7 +449,15 @@
   (println "and unrelated working-tree changes. Passing tools or clean formatting alone do")
   (println "not establish that the task is complete.")
   (println "Fix every finding, commit the corrections, rerun applicable checks, and repeat")
-  (println "this audit against the revised candidate before running the handoff command again."))
+  (println "this audit against the revised candidate before running the handoff command again.")
+  (println)
+  (println "A gap you cannot close in this task is not a completion. Hand it back to the role")
+  (println "that must act, with this line in the draft:")
+  (println)
+  (println "  non-terminal: true")
+  (println)
+  (println "Say in the payload what you found. The card stays open and goes to that role,")
+  (println "rather than being called done with the finding still in it."))
 
 (defn increment-audit-count! [task-id]
   (let [script (str (fs/path script-dir "pack_board.sh"))
@@ -681,7 +691,7 @@
           [nil (format "Header 'commit' must resolve to a commit; '%s' resolves to '%s'." commit object-type)])))))
 
 (def allowed-fields-by-type
-  {"git_handoff" #{"type" "to" "priority" "task_id" "task" "commit"}
+  {"git_handoff" #{"type" "to" "priority" "task_id" "task" "commit" "non-terminal"}
    "note" #{"type" "to" "priority" "message"}})
 
 (defn field-allowed? [type field]
@@ -832,6 +842,9 @@
                       (str "artifacts: " artifacts))
                 (and (= "git_handoff" type) (not (str/blank? (current-task-base))))
                 (conj (str "task_base_commit: " (current-task-base)))
+                (and (= "git_handoff" type)
+                     (= "true" (get headers "non-terminal")))
+                (conj "non-terminal: true")
                 non-forwarding?
                 (conj "non-forwarding: true")
                 (= "note" type)

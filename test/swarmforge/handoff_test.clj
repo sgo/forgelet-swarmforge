@@ -243,6 +243,37 @@
       (is (str/includes? content (str "commit: " wt-head "\n")))
       (is (not (str/includes? content (str "commit: " master-head "\n")))))))
 
+(deftest a-non-terminal-handback-is-a-draft-a-role-may-write
+  ;; Given a role whose audit found a gap it cannot close in this card
+  ;; When it hands the card back with non-terminal: true
+  ;; Then the helper takes the header and says so in the audit it prints - without
+  ;; it, a handoff from the last role in the pack finishes the card, which is the
+  ;; wrong end for a finding
+  (let [root (tmp-dir)
+        _ (init-repo! root)
+        wt (add-worktree! root "sender")
+        _ (setup-project! root {"sender" "task" "receiver" "task"})
+        _ (write-file (fs/path root ".swarmforge" "roles.tsv")
+                      (format "sender\tsender\t%s\tsession\tSender\tcodex\ttask\nreceiver\treceiver\t%s\tsession\tReceiver\tcodex\ttask\n"
+                              wt root))
+        wt-head (str/trim (:out (run {:dir wt} "git" "rev-parse" "--short=10" "HEAD")))
+        draft (fs/path wt "tmp" "handback.handoff")
+        opts {:dir wt :env {"SWARMFORGE_ROLE" "sender"}}]
+    (write-file draft (format "type: git_handoff\nto: receiver\npriority: 50\ntask: task-finding\nnon-terminal: true\ncommit: %s\n" wt-head))
+    (try
+      (let [first-call (run (assoc opts :ok? false) (script "swarm_handoff.sh") (str draft))]
+        (is (zero? (:exit first-call)) (str (:err first-call)))
+        (is (str/includes? (:out first-call) "AUDIT_REQUIRED"))
+        (is (str/includes? (:out first-call) "non-terminal: true")
+            "the audit says how a handback is sent"))
+      (let [queued (run opts (script "swarm_handoff.sh") (str draft))
+            content (read-file (queued-path (:out queued)))]
+        (is (zero? (:exit queued)) (str (:err queued)))
+        (is (str/includes? content "non-terminal: true\n")
+            "the header travels with the handoff, so the daemon can read it"))
+      (finally
+        (fs/delete-tree root)))))
+
 (deftest swarm-handoff-infers-role-and-fills-worktree-head
   ;; Given a sender worktree and no SWARMFORGE_ROLE
   ;; When swarm_handoff runs there with a draft that names master's SHA or omits commit

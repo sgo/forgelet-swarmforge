@@ -177,6 +177,14 @@
 (defn non-forwarding? [headers]
   (= "true" (get headers "non-forwarding")))
 
+(defn non-terminal?
+  "A handback: the sender found something it cannot close in this card and is
+  handing it to the role that must act. It is not a completion, whatever role
+  sent it, so the card stays open - and it goes with the finding, to the first
+  recipient, rather than being called done."
+  [headers]
+  (= "true" (get headers "non-terminal")))
+
 (defn pack-role-names []
   (->> (read-lines roles-file)
        (remove str/blank?)
@@ -267,6 +275,12 @@
              (= "git_handoff" (get headers "type"))
              (seq (recipient-list headers)))
     (cond
+      (non-terminal? headers)
+      (let [key (task-key headers)
+            task (or (board-name-for-key key) (get headers "task"))]
+        (when-not (str/blank? task)
+          (pack-board! "move" "--name" task "--lane" (first (recipient-list headers)))))
+
       (terminal-handoff? roles headers)
       (doseq [key (terminal-task-keys roles headers)
               :let [name (or (board-name-for-key key) (get headers "task"))]]

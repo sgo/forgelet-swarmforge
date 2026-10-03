@@ -32,6 +32,12 @@ task: <short-stable-task-name>
 - A reverse (`non-forwarding`) inbound `git_handoff` is merge-only. Merge it,
   then `done_with_current`. Do not send a `git_handoff` for that inbound. The
   helper refuses a `git_handoff` while inbound is `non-forwarding`.
+- A finding you cannot close in this card is a handback, not a completion: send
+  the `git_handoff` with `non-terminal: true`, name the role that must act in
+  `to`, and say in the payload what you found. The card stays open and goes to
+  that role. Without the header, a handoff from the last role in the pack marks
+  the card done, whatever it carries - so a finding sent as an ordinary handoff
+  closes the card with the finding still in it.
 - Preserve the received task name when forwarding work for the same task.
 - The master agent uses the existing New Task / board card name as `task:`. Do not invent a name.
 - For `note`, write:

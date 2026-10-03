@@ -123,7 +123,7 @@
 (defn increment-audit! [root task-id]
   (pack-board root true "increment-audit" "--root" (str root) "--task-id" task-id))
 
-(defn queue-handoff! [root {:keys [from to task task-id artifacts non-forwarding priority body]}]
+(defn queue-handoff! [root {:keys [from to task task-id artifacts non-forwarding non-terminal priority body]}]
   (let [priority (or priority "50")]
     (write-file
      (fs/path root ".swarmforge/handoffs/outbox"
@@ -136,6 +136,7 @@
           (when task-id (str "task_id: " task-id "\n"))
           (when artifacts (str "artifacts: " artifacts "\n"))
           (when non-forwarding "non-forwarding: true\n")
+          (when non-terminal "non-terminal: true\n")
           "\n"
           (or body "payload") "\n"))))
 
@@ -440,6 +441,30 @@
       (doseq [role ["specifier" "coder" "cleaner" "architect" "hardender"]]
         (is (seq (inbox-names root roles role)) role))
       (is (= "done" (task-lane root "HTW")))
+      (finally
+        (stop-tmux! sock)))))
+
+(deftest handoffd-a-non-terminal-handback-keeps-the-card-open
+  ;; Given the last role in the pack handing a card back with a finding
+  ;; When the daemon reads the handoff
+  ;; Then the card is not called done - a finding is not a completion, whatever
+  ;; role sent it - and it goes to the role that must act, so it can still take
+  ;; handoffs where the finding has to be fixed
+  (let [root (tmp-dir)
+        roles six-pack-roles
+        sock (do (setup-pack! root roles {"cleaner" "back-one"
+                                          "architect" "back-all"
+                                          "QA" "back-all"})
+                 (create-task root "HTW" "QA")
+                 (queue-handoff! root {:from "QA" :to "coder" :task "HTW"
+                                       :priority "00" :non-forwarding true
+                                       :non-terminal true})
+                 (start-tmux! root roles))]
+    (try
+      (handoffd-once root)
+      (is (seq (inbox-names root roles "coder")) "the finding still reaches the role that must act")
+      (is (= "coder" (task-lane root "HTW")) "the card goes to that role")
+      (is (not= "done" (task-lane root "HTW")) "and is not called done")
       (finally
         (stop-tmux! sock)))))
 
