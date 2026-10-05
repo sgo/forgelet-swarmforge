@@ -905,6 +905,122 @@
      :tmux-window-base-index 0
      :tmux-pane-base-index 0}))
 
+;; ---- A dead agent is not a dead session -------------------------------------
+;;
+;; A role's tmux session outlives its agent. When the agent exits - a dropped
+;; turn, a crash, an upstream that was draining - the pane falls back to a
+;; shell, and every check the forge has still passes it: the session and the
+;; pane are both there, so the role health reads a pane, the stall watch reads
+;; work, the window watchdog reads a window, and none of them asks what the pane
+;; is actually running. Saibill's coder sat that way on 2026-10-05 while the
+;; doorbell's wake text was typed into the shell as a command.
+;;
+;; So what tells the two apart is read here: a shell where a known agent should
+;; be is a dead agent, and a pane running anything else is left alone, because
+;; an agent inside a tool is working rather than gone.
+
+(def agent-shells
+  #{"zsh" "bash" "sh" "dash" "fish" "ksh" "csh" "tcsh" "login" "-zsh" "-bash"})
+
+(def restart-settle-ms
+  "How long a pane is given to stop looking like a shell. A tool that is itself
+  a shell is over in a moment, so a shell still there after this is a dead
+  agent rather than a tool."
+  1200)
+
+(defn dead-agent?
+  "Whether a pane running [pane-command] means the agent [agent] has gone: the
+  pane is at a shell, where the agent should be. The agent's own name is not a
+  dead agent, and neither is any other process - a tool the agent is running."
+  [agent pane-command]
+  (let [running (str/trim (str pane-command))]
+    (boolean (and (seq running)
+                  (not= running (str agent))
+                  (contains? agent-shells running)))))
+
+(defn role-pane-command
+  "What the role's pane is running now, as tmux names it, or nil when there is
+  no session to ask - a project that is not running is not a dead agent."
+  [ctx row]
+  (let [result (process/sh {:continue true}
+                           "tmux" "-S" (str (:tmux-socket ctx))
+                           "display-message" "-p" "-t" (:session row)
+                           "#{pane_current_command}")]
+    (when (zero? (:exit result))
+      (str/trim (:out result)))))
+
+(defn dead-agent-there?
+  "Whether the role's agent has gone, read twice rather than once: a tool that
+  is itself a shell is over in a moment, so a shell that is still there the
+  second time is a dead agent."
+  [ctx row]
+  (and (dead-agent? (:agent row) (role-pane-command ctx row))
+       (do (Thread/sleep restart-settle-ms)
+           (dead-agent? (:agent row) (role-pane-command ctx row)))))
+
+(defn restart-role!
+  "Put a role's agent back where it has died: the role's own launch command -
+  the one the forge starts a role with, from the same `launch-command` - typed
+  into the session the role still has. Returns true when it started one and
+  false when there was nothing to start."
+  [ctx index row]
+  (let [running (role-pane-command ctx row)]
+    (cond
+      (dead-agent-there? ctx row)
+      (do (println (str "  " cyan "[" (:display-name row) "]" reset
+                        " its agent is gone - the pane is at a shell - starting it again"))
+          (launch-role! ctx index row)
+          true)
+
+      (nil? running)
+      (do (println (str "  " cyan "[" (:display-name row) "]" reset
+                        " no session - a project that is not running is not a dead agent"))
+          false)
+
+      (= running (str (:agent row)))
+      (do (println (str "  " cyan "[" (:display-name row) "]" reset " working (" running ")"))
+          false)
+
+      :else
+      (do (println (str "  " cyan "[" (:display-name row) "]" reset
+                        " running " running " - not a shell, so not a dead agent"))
+          false))))
+
+(defn restart-roles!
+  "Restart the dead agents among a project's roles - all of them, or the ones
+  named. Prints what it found and what it did, and returns how many it started."
+  [root wanted]
+  (check-dependency! "tmux")
+  (let [ctx (-> (context root)
+                detect-tmux-base-indexes
+                parse-config)
+        roles (vec (:roles ctx))
+        named (set wanted)
+        chosen (if (seq named)
+                 (filterv (fn [[_ row]] (contains? named (:role row)))
+                          (map-indexed vector roles))
+                 (mapv vector (range) roles))]
+    (when (and (seq named) (empty? chosen))
+      (fail! (str red "Error:" reset " no such role in " root ": " (str/join ", " named)
+                  ". Known roles: " (str/join ", " (map :role roles)))))
+    (println (str "Agents of " (fs/file-name root) ":"))
+    (let [started (reduce (fn [count [index row]]
+                            (if (restart-role! ctx index row) (inc count) count))
+                          0
+                          chosen)]
+      (println (str "  " started " agent" (when (not= 1 started) "s") " started again."))
+      started)))
+
+(defn restart-dead-roles-command! [root]
+  (when (str/blank? root)
+    (fail! (str red "Error:" reset " --restart-dead-roles needs a project root")))
+  (restart-roles! root []))
+
+(defn restart-role-command! [root role]
+  (when (or (str/blank? root) (str/blank? role))
+    (fail! (str red "Error:" reset " --restart-role needs a project root and a role")))
+  (restart-roles! root [role]))
+
 (defn prepare-ctx [ctx]
   (-> ctx
       parse-config
@@ -1261,6 +1377,9 @@
                             (mark-project! (context (second args)) (= "open" (nth args 2)))
                             (println "marked"))
     "--test-forge-up" (println (str (forge-up? (second args))))
+    "--test-dead-agent" (println (str (dead-agent? (second args) (nth args 2 nil))))
+    "--restart-role" (restart-role-command! (second args) (nth args 2 nil))
+    "--restart-dead-roles" (restart-dead-roles-command! (second args))
     "--open-project" (run-forge-project! (second args) (nth args 2 nil) true)
     "--close-project" (run-forge-project! (second args) (nth args 2 nil) false)
     "--start-project" (run-project! (second args))

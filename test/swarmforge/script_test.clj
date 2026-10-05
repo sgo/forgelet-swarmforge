@@ -2034,3 +2034,48 @@
         (is (str/includes? (text result) "no target in swarmforge/deploy.conf")))
       (finally
         (fs/delete-tree root)))))
+
+(deftest a-pane-at-a-shell-where-an-agent-should-be-is-a-dead-agent
+  ;; A role's session outlives its agent: the agent exits, the pane falls back
+  ;; to a shell, and every check the forge had still passes the session. What
+  ;; tells the two apart is what the pane is running, so that is what is tested
+  ;; here - without a session, because the decision is about one command.
+  (let [answer (fn [agent pane]
+                 (str/trim (:out (run {:dir repo-root} (script "swarmforge.bb")
+                                      "--test-dead-agent" agent pane))))]
+    (is (= "true" (answer "codex" "zsh"))
+        "the shell a dead agent leaves behind is a dead agent")
+    (is (= "true" (answer "claude" "bash")))
+    (is (= "false" (answer "codex" "codex")) "the agent itself is working")
+    (is (= "false" (answer "codex" "java"))
+        "a tool the agent is running is work, not a death")
+    (is (= "false" (answer "codex" ""))
+        "a pane that is not there is not a dead agent")))
+
+(deftest a-project-that-is-not-running-has-no-dead-agents
+  (let [root (tmp-dir)]
+    (try
+      (write-file (fs/path root "swarmforge/constitution.prompt") "Read articles.\n")
+      (write-file (fs/path root "swarmforge/swarmforge.conf") "window coder codex master\n")
+      (write-file (fs/path root "swarmforge/roles/coder.prompt") "coder\n")
+      (let [result (run {:dir root} (script "swarmforge.bb") "--restart-dead-roles" (str root))]
+        (is (str/includes? (:out result) "Agents of"))
+        (is (str/includes? (:out result)
+                           "no session - a project that is not running is not a dead agent"))
+        (is (str/includes? (:out result) "0 agents started again.")))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest restarting-a-role-that-is-not-there-names-the-roles-there-are
+  (let [root (tmp-dir)]
+    (try
+      (write-file (fs/path root "swarmforge/constitution.prompt") "Read articles.\n")
+      (write-file (fs/path root "swarmforge/swarmforge.conf") "window coder codex master\n")
+      (write-file (fs/path root "swarmforge/roles/coder.prompt") "coder\n")
+      (let [result (run {:dir root :ok? false} (script "swarmforge.bb")
+                        "--restart-role" (str root) "nosuchrole")]
+        (is (pos? (:exit result)))
+        (is (str/includes? (:err result) "no such role"))
+        (is (str/includes? (:err result) "Known roles: coder")))
+      (finally
+        (fs/delete-tree root)))))
