@@ -525,6 +525,7 @@ copy_host_files "$host_dir"
 # configuration, roles, and scaffolding.
 if [[ -z "${SWARMFORGE_BASE_DIR:-}" ]]; then
   copy_shared_scripts_and_articles "$main_dir"
+  copy_shared_skills "$main_dir"
 fi
 
 overlay_lieutenant_prompt "$host_dir" "$main_dir"
