@@ -1791,8 +1791,13 @@
       (write-file (fs/path host "README.md") "host-readme\n")
       (write-file (fs/path host "bb.edn") "{:paths [\"test\"]}\n")
       (write-file (fs/path host "test/keep.clj") "keep\n")
+      ;; A forge's own skill, and the layer's copy of one it already has: the
+      ;; layer's files are replaced, and a skill the layer does not carry is not.
+      (write-file (fs/path host "swarmforge/skills/a-forges-own/SKILL.md") "OWN\n")
+      (write-file (fs/path host "swarmforge/skills/forge-requests-by-issue/SKILL.md") "STALE\n")
       (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"]]
         (write-file (fs/path base "swarmforge/scripts" name) (str name "\n")))
+      (write-file (fs/path base "swarmforge/skills/forge-requests-by-issue/SKILL.md") "LAYER-SKILL\n")
       (write-file (fs/path base "swarmforge/packs/six-pack/gitignore") "build/\n.idea/\n")
       (write-file (fs/path base "swarmforge/packs/gitignore") ".DS_Store\n")
       (write-file (fs/path base "swarmforge/packs/six-pack/language.conf") "Kotlin\n")
@@ -1867,6 +1872,11 @@
         ;; not put it in the forge's packs either, where a project could be seeded from it.
         (is (not (fs/exists? (fs/path host "packs/six-pack/language.conf"))))
         (is (not (fs/exists? (fs/path host "packs/two-pack/language.conf"))))
+        ;; The layer's skills arrive, replacing what a forge held of the same name,
+        ;; and a skill of the forge's own is left where it is.
+        (is (= "LAYER-SKILL\n"
+               (slurp (str (fs/path host "swarmforge/skills/forge-requests-by-issue/SKILL.md")))))
+        (is (= "OWN\n" (slurp (str (fs/path host "swarmforge/skills/a-forges-own/SKILL.md")))))
         (is (fs/exists? (fs/path host "swarm"))))
       (finally
         (fs/delete-tree host)

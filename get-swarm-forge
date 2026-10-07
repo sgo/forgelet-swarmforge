@@ -211,9 +211,28 @@ seed_local_lieutenant_prompt() {
   done
 }
 
+# The family's own skills travel with the layer, so every forge learns the same
+# conventions - how a forge asks another for work by issue, and whatever else the
+# layer carries beside it. Only the skills the layer carries are replaced: a forge
+# that has written one of its own keeps it, because the wholesale replace the
+# shared scripts get would eat it, and a forge's own tooling is not the layer's to
+# delete.
+copy_shared_skills() {
+  local src="$1" skill name
+  [[ -d "$src/swarmforge/skills" ]] || return 0
+  mkdir -p swarmforge/skills
+  for skill in "$src/swarmforge/skills"/*; do
+    [[ -d "$skill" ]] || continue
+    name="${skill:t}"
+    rm -rf "swarmforge/skills/$name"
+    cp -R "$skill" "swarmforge/skills/$name"
+  done
+}
+
 copy_host_files() {
   local src="$1"
   copy_shared_scripts_and_articles "$src"
+  copy_shared_skills "$src"
   [[ -f "$src/swarmforge/constitution.prompt" ]] \
     && cp "$src/swarmforge/constitution.prompt" swarmforge/constitution.prompt
   mkdir -p swarmforge/roles
