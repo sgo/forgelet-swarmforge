@@ -38,6 +38,13 @@ task: <short-stable-task-name>
   that role. Without the header, a handoff from the last role in the pack marks
   the card done, whatever it carries - so a finding sent as an ordinary handoff
   closes the card with the finding still in it.
+- Recording a finding in the task note and passing the card on is not raising it.
+  If the card's wording forbids the fix, or the finding contradicts what the card
+  is for, raise it before you hand the card on - as a clarification, or as the
+  `non-terminal: true` handback above - and wait for the answer. Once the operator
+  has approved a fix, new scope is still a new card unless they ruled otherwise on
+  that clarification. This is what keeps a corrected candidate from being written
+  after the first one has already closed the card.
 - Preserve the received task name when forwarding work for the same task.
 - The master agent uses the existing New Task / board card name as `task:`. Do not invent a name.
 - For `note`, write:

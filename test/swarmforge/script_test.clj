@@ -1966,6 +1966,17 @@
       (finally
         (fs/delete-tree root)))))
 
+(deftest a-finding-is-raised-before-a-card-is-handed-on
+  ;; The article every role reads: a finding the card's wording forbids fixing is raised - as a
+  ;; clarification or as a non-terminal handback - and not merely written into the task note.
+  ;; Recording it and passing the card on is what the saibill forge saw four times, the last of
+  ;; them leaving two real defects in a card that then closed (sgo/forgelet-forge#2).
+  (let [article (slurp (str (fs/path scripts-dir ".." "constitution" "articles"
+                                   "handoffs.prompt")))]
+    (is (str/includes? article "not raising it"))
+    (is (str/includes? article "`non-terminal: true` handback"))
+    (is (str/includes? article "new scope is still a new card"))))
+
 (deftest release-preflight-will-not-say-ready-with-the-snapshot-check-unchecked
   ;; Given a Maven project that is otherwise ready to release, and a Maven that cannot run the
   ;; resolved-dependency check
