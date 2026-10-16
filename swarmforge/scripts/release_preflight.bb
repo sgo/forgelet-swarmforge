@@ -15,6 +15,12 @@
        "  --no-maven        skip what asks outside this directory: the resolved-dependency\n"
        "                    check and the lookup of the newest release plugin\n"
        "\n"
+       "Exit status:\n"
+       "  0  READY - release it\n"
+       "  1  DO NOT RELEASE - the failures are listed\n"
+       "  2  NOT READY - the snapshot-dependency check did not run, so nothing here says the\n"
+       "     project is free of the dependencies that check exists to catch\n"
+       "\n"
        "It checks what a release must not start without: a clean tree, a version that is\n"
        "still a -SNAPSHOT at HEAD, a release tag nobody has taken, no dependency on a\n"
        "-SNAPSHOT this project does not build itself, the with-release-tests profile the\n"
@@ -118,6 +124,15 @@
        sort
        vec))
 
+(defn last-meaningful-line
+  "The last line of a failed command's stderr worth reading. Maven's warnings are not why a build
+  stopped, and reporting one of those is how an unchecked snapshot check came to read as a JVM
+  warning rather than as a check that never ran."
+  [text]
+  (let [lines (->> (str/split-lines (or text "")) (map str/trim) (remove str/blank?))
+        informative (remove #(str/starts-with? % "WARNING:") lines)]
+    (or (last informative) (last lines) "no message")))
+
 (defn maven-resolved-snapshots
   "The same question asked of Maven, which also sees versions held in properties. Returns
   {:checked true :snapshots [...]} or {:checked false :why \"...\"}."
@@ -140,9 +155,8 @@
                             vec)]
             {:checked true :snapshots coords})
           {:checked false
-           :why (str "mvn dependency:list did not run ("
-                     (str/trim (last (str/split-lines (str (:err result)))))
-                     ")")}))
+           :why (str "mvn dependency:list did not run (exit " (:exit result) ": "
+                     (last-meaningful-line (:err result)) ")")}))
       (catch Exception e
         {:checked false :why (str "mvn is not available here (" (.getMessage e) ")")})
       (finally
@@ -344,7 +358,8 @@
           (println (str "  snapshot dependencies: NOT CHECKED - " (:why resolved))))
         (when (and resolved (:checked resolved) (empty? from-maven) (empty? from-poms))
           (println "  snapshot dependencies: none"))
-        (if (seq failures)
+        (cond
+          (seq failures)
           (do
             (binding [*out* *err*]
               (println "")
@@ -354,6 +369,28 @@
               (doseq [warning warnings]
                 (println (str "  warning: " warning))))
             (System/exit 1))
+
+          ;; A snapshot check that did not run is not a pass. It is the check this tool exists
+          ;; for - versions:set rewrites the project's own version and looks at nothing else -
+          ;; so READY beside it claimed the project was free of foreign snapshots when nothing
+          ;; had looked. That is what happened on 2026-10-16, where READY printed together with
+          ;; "NOT CHECKED - mvn dependency:list did not run (WARNING: sun.misc.Unsafe...)".
+          ;; Distinct verdict and distinct exit status, so a card's "stop unless it says READY"
+          ;; rule covers it as well as the wording does.
+          (and resolved (not (:checked resolved)))
+          (do
+            (binding [*out* *err*]
+              (println "")
+              (println "release preflight: NOT READY - the snapshot-dependency check did not run")
+              (println (str "  " (:why resolved)))
+              (println "  nothing has looked for a dependency on a SNAPSHOT this project does not build,")
+              (println "  which is what this preflight exists to catch: release:prepare is a second")
+              (println "  line of defence, not a substitute for it")
+              (doseq [warning warnings]
+                (println (str "  warning: " warning))))
+            (System/exit 2))
+
+          :else
           (do
             (println "")
             (println "release preflight: READY")

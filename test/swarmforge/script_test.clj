@@ -1966,6 +1966,56 @@
       (finally
         (fs/delete-tree root)))))
 
+(deftest release-preflight-will-not-say-ready-with-the-snapshot-check-unchecked
+  ;; Given a Maven project that is otherwise ready to release, and a Maven that cannot run the
+  ;; resolved-dependency check
+  ;; When the preflight runs
+  ;; Then it does not print a bare READY and its exit status says so, distinct from both a pass
+  ;; and a refusal. This is the failure of 2026-10-16 in saibill-sgo, where READY printed beside
+  ;; "NOT CHECKED - mvn dependency:list did not run (WARNING: sun.misc.Unsafe...)" - the one
+  ;; check the tool exists for, reporting as passed while nothing had looked.
+  (let [root (tmp-dir)
+        pom (fs/path root "pom.xml")
+        fake-bin (tmp-dir)
+        preflight (str (fs/path scripts-dir "release_preflight.sh"))
+        text (fn [result] (str (:out result) (:err result)))]
+    (try
+      (init-repo! root)
+      ;; The release plugin is pinned so the preflight does not ask the network for the newest
+      ;; one while the check under test is failing; a pinned plugin is a state it reports.
+      (write-file pom (str "<project>\n<modelVersion>4.0.0</modelVersion>\n"
+                           "<groupId>com.example</groupId><artifactId>demo</artifactId>\n"
+                           "<version>1.1.0-SNAPSHOT</version>\n"
+                           "<scm><connection>scm:git:https://github.com/example/demo.git</connection></scm>\n"
+                           "<build><plugins><plugin><groupId>org.apache.maven.plugins</groupId>"
+                           "<artifactId>maven-release-plugin</artifactId><version>3.1.1</version>"
+                           "</plugin></plugins></build>\n"
+                           "<profiles><profile><id>with-release-tests</id>"
+                           "<properties><skipTests>false</skipTests></properties></profile></profiles>\n"
+                           "</project>\n"))
+      ;; A Maven that fails the way a real one can: the JVM warning first, the real reason after
+      ;; it. Reporting the last line is what made the failure read as a warning.
+      (let [fake-mvn (fs/path fake-bin "mvn")]
+        (write-file fake-mvn (str "#!/bin/sh\n"
+                                  "echo 'WARNING: sun.misc.Unsafe::objectFieldOffset has been called' >&2\n"
+                                  "echo '[ERROR] Failed to execute goal on project demo: Could not resolve dependencies' >&2\n"
+                                  "exit 1\n"))
+        (run {:dir fake-bin} "chmod" "+x" (str fake-mvn)))
+      (run {:dir root} "git" "add" "-A")
+      (run {:dir root} "git" "commit" "-q" "-m" "the project")
+      (let [result (run {:dir root :ok? false
+                         :env {"PATH" (str fake-bin ":" (System/getenv "PATH"))}}
+                        preflight "1.1.0" "1.1.1-SNAPSHOT")]
+        (is (= 2 (:exit result)) (text result))
+        (is (str/includes? (text result) "NOT READY"))
+        (is (str/includes? (text result) "the snapshot-dependency check did not run"))
+        (is (str/includes? (text result) "Could not resolve dependencies")
+            "the reason has to be Maven's own, not the JVM warning that followed it")
+        (is (not (str/includes? (text result) "release preflight: READY"))))
+      (finally
+        (fs/delete-tree root)
+        (fs/delete-tree fake-bin)))))
+
 (deftest release-preflight-refuses-a-release-that-is-not-wired
   ;; Given a project whose numbers are all in order - clean tree, a -SNAPSHOT at
   ;; HEAD, a free tag, no foreign snapshot dependency - with a deploy target and
