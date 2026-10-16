@@ -7,6 +7,11 @@
   (:import [java.nio.channels FileChannel]
            [java.nio.file OpenOption StandardOpenOption]))
 
+(try
+  (require 'handoff-lib)
+  (catch Exception _
+    (load-file (str (fs/path (fs/parent *file*) "handoff_lib.bb")))))
+
 (def usage-text
   (str "Usage:\n"
        "  pack_board.sh create --name <name> --lane <lane> [--root <dir>] [--text <text>]\n"
@@ -214,6 +219,17 @@
   (set-lane! opts (task-lane opts)))
 
 (defn done! [opts]
+  ;; Closing a card that still has a handoff travelling means that handoff can never be taken -
+  ;; a closed task accepts no further handoff - so the close says so. It warns rather than
+  ;; refusing, because this is also the board's own Close button and a person has to be able to
+  ;; finish a card; the handoff daemon refuses outright (sgo/forgelet-forge#2).
+  (let [travelling (handoff-lib/task-handoffs-travelling (resolve-root opts) (:name opts))]
+    (when (seq travelling)
+      (binding [*out* *err*]
+        (println (str "WARNING: " (:name opts) " is closing while handoffs of it are still travelling:"))
+        (doseq [[role file] travelling]
+          (println (str "  " role " " file)))
+        (println "  a closed task accepts no further handoff, so the candidate those carry cannot land"))))
   (set-lane! opts "done"))
 
 (defn list! [opts]

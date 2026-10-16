@@ -18,6 +18,13 @@
 (def once? false)
 (def project-root nil)
 (def script-dir (fs/parent *file*))
+
+;; The close guard below needs the shared handoff scan; the same load-file fallback the other
+;; scripts use, because the require only works when the scripts directory is on the classpath.
+(try
+  (require 'handoff-lib)
+  (catch Exception _
+    (load-file (str (fs/path script-dir "handoff_lib.bb")))))
 (def state-dir nil)
 (def daemon-dir nil)
 (def roles-file nil)
@@ -285,7 +292,19 @@
       (doseq [key (terminal-task-keys roles headers)
               :let [name (or (board-name-for-key key) (get headers "task"))]]
         (when-not (str/blank? name)
-          (pack-board! "done" "--name" name)))
+          ;; Before closing: a handoff of this task still travelling somewhere would be refused by
+          ;; the closed card afterwards, so the close itself is refused and the card stays open -
+          ;; that is what lets a revised candidate land (sgo/forgelet-forge#2). The daemon refuses
+          ;; where a person clicking the board's Close is only warned, which is the split recorded
+          ;; in this forge's backlog.
+          (let [travelling (handoff-lib/task-handoffs-travelling project-root name)]
+            (if (seq travelling)
+              (binding [*out* *err*]
+                (println (str "CLOSE REFUSED: " name " - handoffs of this task are still travelling:"))
+                (doseq [[role file] travelling]
+                  (println (str "  " role " " file)))
+                (println "  the card stays open so that candidate can travel; let it land rather than closing over it"))
+              (pack-board! "done" "--name" name)))))
 
       (non-forwarding? headers)
       nil
