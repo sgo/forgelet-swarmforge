@@ -348,13 +348,34 @@
 ;; these are plain CLI applications, and the projects they analyse are the ones written for
 ;; Java 25, not the analyser. The mutate argument rewriting still applies: it is plain argument
 ;; handling (drop --mutate-all, cap workers) rather than anything babashka-specific.
+;;
+;; The tool's source lives *inside* the project that asked for it, which is what makes the two
+;; explicit settings below necessary rather than fussy. Maven finds `.mvn/maven.config` by
+;; walking up from the build, so a project whose config says `-s .mvn/settings.xml` hands the
+;; tool's build that path relative to the tool's own directory - the build dies with "The
+;; specified user settings file does not exist" before it reads a class. Measured, not assumed:
+;; the same build succeeds when the settings file comes on the command line, because a later
+;; `-s` wins over the one in the config file. The local repository is named for the same reason
+;; and one more: the project's config would point this build at a repository under the tool
+;; directory, and being explicit means the recipe does not depend on where it was invoked from.
+(defn write-tool-build-settings! [src]
+  (let [path (fs/path src "tool-build-settings.xml")]
+    (spit (str path) (str "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                          "<settings xmlns=\"http://maven.apache.org/SETTINGS/1.0.0\"/>\n"))
+    path))
+
 (defn install-maven-jar! [root tool spec]
   (let [src (ensure-source! root spec "pom.xml")]
     (when-not (fs/which "mvn")
       (exit! 1 (str "Maven not found on PATH. Install Maven, then run: swarm_tool.sh ensure " tool)))
     (when-not (fs/which "java")
       (exit! 1 (str "No java on PATH. Install a JDK, then run: swarm_tool.sh ensure " tool)))
-    (let [result (sh/sh "mvn" "-q" "-DskipTests" "package" :dir (str src))]
+    (let [settings (write-tool-build-settings! src)
+          repo (fs/path src ".m2" "repository")
+          result (sh/sh "mvn" "-q" "-DskipTests"
+                        "-s" (str settings)
+                        (str "-Dmaven.repo.local=" repo)
+                        "package" :dir (str src))]
       (when-not (zero? (:exit result))
         (exit! 1 (str "Failed to build " (:source spec)
                       "\n" (:err result) (:out result))))))
