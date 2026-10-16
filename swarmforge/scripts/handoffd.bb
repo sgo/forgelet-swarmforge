@@ -299,11 +299,12 @@
           ;; in this forge's backlog.
           (let [travelling (handoff-lib/task-handoffs-travelling project-root name)]
             (if (seq travelling)
-              (binding [*out* *err*]
-                (println (str "CLOSE REFUSED: " name " - handoffs of this task are still travelling:"))
-                (doseq [[role file] travelling]
-                  (println (str "  " role " " file)))
-                (println "  the card stays open so that candidate can travel; let it land rather than closing over it"))
+              ;; Through the daemon's own log, not stderr: a daemon's operator looks in its log,
+              ;; and this message is the only sign that a card was deliberately left open.
+              (log! "close-refused" name
+                    (str "handoffs of this task are still travelling: "
+                         (str/join ", " (map (fn [[role file]] (str role " " file)) travelling))
+                         " - the card stays open so that candidate can travel"))
               (pack-board! "done" "--name" name)))))
 
       (non-forwarding? headers)
