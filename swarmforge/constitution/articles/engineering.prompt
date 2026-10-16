@@ -25,7 +25,11 @@
   - Clojure: install with Clojure CLI/deps.edn; mutation `github.com/unclebob/clj-mutate`, CRAP `github.com/unclebob/crap4clj`, DRY `github.com/unclebob/dry4clj`.
   - Java: build with Maven (`mvn`); mutation is PIT through the project's Maven profiles - the
     `mutate4java` repository is not used for Java/Maven projects, the way it is not used for Kotlin -
-    CRAP is `github.com/unclebob/crap4java`, DRY is `github.com/unclebob/dry4java`.
+    CRAP is `github.com/sgo/crap4java`, the family's fork of it: `main` there mirrors upstream and the
+    `forgelet` branch holds ours, which is what the tool registry's Java recipe installs, built as a
+    jar. That branch is what our projects' scripts are written for — upstream never had
+    `--test-command`, and its JaCoCo cannot read the Java 25 class files those projects compile to.
+    DRY is `github.com/unclebob/dry4java`, which has no fork and needs none.
   - Kotlin: build with the project's own Gradle wrapper (`./gradlew`), never a Gradle from PATH.
     Mutation is PIT through its Gradle plugin — the `mutate4java` repository is not used, as it is not
     used for Java — CRAP is `github.com/JeevanThandi/slopguard-kotlin`, built from source by the tool
