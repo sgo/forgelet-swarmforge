@@ -178,12 +178,37 @@
       (exit! 1 (str "Failed to clone " url (when ref (str " (branch " ref ")"))
                     "\n" (:err result) (:out result))))))
 
+;; Where a checkout came from, so a stale one can be told apart from a current one. Without it
+;; the marker file alone says "already cloned" and a directory fetched by hand - from upstream,
+;; before the catalog named a fork's branch - is built again and silently produces the old tool.
+;; That is exactly how three projects kept a crap4java without `--test-command`.
+(defn source-provenance [source ref]
+  (str source (when ref (str "@" ref))))
+
+(defn recorded-provenance [dir]
+  (let [path (fs/path dir ".swarmforge-source")]
+    (when (fs/exists? path)
+      (not-empty (str/trim (slurp (str path)))))))
+
 (defn ensure-source! [root spec marker]
-  (let [dir (source-dir root (:source spec))]
-    (when-not (fs/exists? (fs/path dir marker))
-      (when (System/getenv "SWARMFORGE_TOOL_SRC")
+  (let [dir (source-dir root (:source spec))
+        wanted (source-provenance (:source spec) (tool-ref spec))
+        override (not-empty (System/getenv "SWARMFORGE_TOOL_SRC"))]
+    (cond
+      override
+      (when-not (fs/exists? (fs/path dir marker))
         (exit! 1 (str "SWARMFORGE_TOOL_SRC is missing " marker ": " dir)))
-      (clone-source! dir (:source spec) (tool-ref spec)))
+
+      (and (fs/exists? dir) (not= wanted (recorded-provenance dir)))
+      (do (println (str "REPLACING: " dir " - it was "
+                        (or (recorded-provenance dir) "cloned before this recipe recorded where from")
+                        ", and this recipe wants " wanted))
+          (fs/delete-tree dir))
+
+      :else nil)
+    (when-not (fs/exists? (fs/path dir marker))
+      (clone-source! dir (:source spec) (tool-ref spec))
+      (spit (str (fs/path dir ".swarmforge-source")) (str wanted "\n")))
     dir))
 
 (defn mutate-rewrite-bash []
