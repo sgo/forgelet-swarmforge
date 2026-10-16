@@ -277,7 +277,7 @@
               name)))
         (read-lines (board-file))))
 
-(defn update-board! [roles headers]
+(defn update-board! [roles headers path]
   (when (and (fs/exists? (board-file))
              (= "git_handoff" (get headers "type"))
              (seq (recipient-list headers)))
@@ -297,7 +297,7 @@
           ;; that is what lets a revised candidate land (sgo/forgelet-forge#2). The daemon refuses
           ;; where a person clicking the board's Close is only warned, which is the split recorded
           ;; in this forge's backlog.
-          (let [travelling (handoff-lib/task-handoffs-travelling project-root name)]
+          (let [travelling (handoff-lib/task-handoffs-travelling project-root name path)]
             (if (seq travelling)
               ;; Through the daemon's own log, not stderr: a daemon's operator looks in its log,
               ;; and this message is the only sign that a card was deliberately left open.
@@ -389,7 +389,7 @@
     (if-not recipients
       (fail! path "missing to header")
       (do
-        (update-board! roles headers)
+        (update-board! roles headers path)
         (doseq [recipient recipients]
           (let [role-info (get roles recipient)]
             (when-not role-info

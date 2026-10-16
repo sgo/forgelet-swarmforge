@@ -174,24 +174,28 @@
   recorded on 2026-10-16, sgo/forgelet-forge#2). The scan answers \"is something of this task still
   travelling\" and says which role holds it; it deliberately does not try to work out which
   candidate is newest, which is the other design the issue weighs."
-  [root task]
-  (when-not (str/blank? task)
-    (let [roles-file (fs/path (str root) ".swarmforge" "roles.tsv")]
-      (when (fs/exists? roles-file)
-        (->> (str/split-lines (slurp (str roles-file)))
-             (map #(str/split % #"\t" -1))
-             (keep (fn [[role-name _ worktree]]
-                     (when (and (not-empty (str worktree)) (not-empty (str role-name)))
-                       (let [base (fs/path (str worktree) ".swarmforge" "handoffs")]
-                         (->> travelling-handoff-dirs
-                              (mapcat (fn [parts]
-                                        (handoff-files (apply fs/path (concat [base] parts)))))
-                              (filter (fn [file]
-                                        (= task (str/trim (str (or (header-field file "task") ""))))))
-                              (map (fn [file] [role-name (str file)])))))))
-             (apply concat)
-             (remove nil?)
-             vec)))))
+  ([root task] (task-handoffs-travelling root task nil))
+  ([root task except]
+   ;; `except` is the handoff whose own delivery is asking the question: it is still in its sender's
+   ;; outbox at that moment, so counting it would refuse every close there is.
+   (when-not (str/blank? task)
+     (let [roles-file (fs/path (str root) ".swarmforge" "roles.tsv")]
+       (when (fs/exists? roles-file)
+         (->> (str/split-lines (slurp (str roles-file)))
+              (map #(str/split % #"\t" -1))
+              (keep (fn [[role-name _ worktree]]
+                      (when (and (not-empty (str worktree)) (not-empty (str role-name)))
+                        (let [base (fs/path (str worktree) ".swarmforge" "handoffs")]
+                          (->> travelling-handoff-dirs
+                               (mapcat (fn [parts]
+                                         (handoff-files (apply fs/path (concat [base] parts)))))
+                               (filter (fn [file]
+                                         (and (not= (str file) (str except))
+                                              (= task (str/trim (str (or (header-field file "task") "")))))))
+                               (map (fn [file] [role-name (str file)])))))))
+              (apply concat)
+              (remove nil?)
+              vec))))))
 
 (defn archive-current-role! []
   (let [script (str (fs/path (fs/parent *file*) "pack_board.sh"))

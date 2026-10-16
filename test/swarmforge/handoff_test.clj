@@ -275,6 +275,65 @@
       (finally
         (fs/delete-tree root)))))
 
+(deftest a-card-does-not-close-while-a-second-candidate-of-it-is-travelling
+  ;; The scenario behind the close guard (sgo/forgelet-forge#2, #6): the last role's handoff would
+  ;; close the card, but a candidate of the same card is still travelling. The card stays open, and
+  ;; closes on a later pass once nothing of it is travelling - which is what "the second candidate
+  ;; can still travel" has to mean. A delivered handoff counts as travelling until its recipient
+  ;; has taken it, so the fixture consumes what lands in the inboxes, as a pack's roles do.
+  (let [root (tmp-dir)
+        bin (fs/path root "bin")
+        coder (fs/path root ".worktrees/coder")
+        cleaner (fs/path root ".worktrees/cleaner")
+        board (fs/path root ".swarmforge" "board" "tasks.tsv")
+        log (fs/path root ".swarmforge" "daemon" "handoffd.log")
+        daemon (fn []
+                 (run {:dir root :env {"PATH" (str bin ":" (System/getenv "PATH"))}}
+                      "bb" (script "handoffd.bb") "--once" (str root)))
+        outbox (fn [wt file from to]
+                 (write-file (fs/path wt ".swarmforge" "handoffs" "outbox" file)
+                             (str "type: git_handoff\nfrom: " from "\nto: " to "\npriority: 50\n"
+                                  "task_id: the-card\ntask: the-card\ncommit: " (head-sha root)
+                                  "\n\nbody\n")))
+        consume! (fn [wt name]
+                   (let [from (fs/path wt ".swarmforge" "handoffs" "inbox" "new" name)
+                         to (fs/path wt ".swarmforge" "handoffs" "inbox" "completed" name)]
+                     (fs/create-dirs (fs/path (str wt) ".swarmforge" "handoffs" "inbox" "completed"))
+                     (when (fs/exists? from)
+                       (fs/move from to))))
+        closed? (fn [] (str/includes? (read-file board) "the-card\tdone"))]
+    (try
+      (init-repo! root)
+      (setup-project! root)
+      (fs/create-dirs bin)
+      (write-file (fs/path bin "tmux") "#!/usr/bin/env sh\nexit 0\n")
+      (run {:dir bin} "chmod" "+x" (str (fs/path bin "tmux")))
+      ;; The daemon reads the socket path out of the project's state before it looks for mail.
+      (write-file (fs/path root ".swarmforge" "tmux-socket")
+                  (str (fs/path root ".swarmforge" "handoffd.sock") "\n"))
+      ;; coder first, cleaner last: the last row of roles.tsv is the pack's last role, and that
+      ;; role's handoff is the one that closes a card.
+      (write-file (fs/path root ".swarmforge" "roles.tsv")
+                  (format (str "coder\tmaster\t%s\tsession\tCoder\tcodex\ttask\n"
+                               "cleaner\tcleaner\t%s\tsession\tCleaner\tcodex\ttask\n")
+                          coder cleaner))
+      (run {:dir root} (script "pack_board.sh") "create" "the-card" "cleaner")
+      (outbox coder "50_candidate.handoff" "coder" "cleaner")
+      (outbox cleaner "50_terminal.handoff" "cleaner" "coder")
+      (daemon)
+      (is (str/includes? (read-file log) "close-refused")
+          "the daemon logs the refusal rather than closing quietly")
+      (is (not (closed?)) "the card stays open so the candidate it still carries can land")
+      ;; Both roles take what landed in their inboxes, as a pack does.
+      (consume! cleaner "50_candidate.handoff")
+      (consume! coder "50_terminal.handoff")
+      ;; The chain carrying the card finishes, and the card closes.
+      (outbox cleaner "51_terminal.handoff" "cleaner" "coder")
+      (daemon)
+      (is (closed?) "with nothing of the card travelling any more, the next terminal handoff closes it")
+      (finally
+        (fs/delete-tree root)))))
+
 (deftest a-non-terminal-handback-is-a-draft-a-role-may-write
   ;; Given a role whose audit found a gap it cannot close in this card
   ;; When it hands the card back with non-terminal: true
