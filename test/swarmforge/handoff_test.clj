@@ -19,6 +19,8 @@
 (defn script [name]
   (str (fs/path scripts-dir name)))
 
+(load-file (str (fs/path scripts-dir "handoff_lib.bb")))
+
 (defn tmp-dir []
   ;; A short base rather than TMPDIR: tmux refuses a socket path past the unix limit,
   ;; and TMPDIR's /var/folders path is most of that budget (see script_test.clj).
@@ -242,6 +244,36 @@
       (is (not (str/includes? queued "/.worktrees/")))
       (is (str/includes? content (str "commit: " wt-head "\n")))
       (is (not (str/includes? content (str "commit: " master-head "\n")))))))
+
+(deftest a-card-still-has-a-handoff-travelling-until-that-handoff-is-taken
+  ;; The scan behind the close guard (sgo/forgelet-forge#2): a handoff naming the card counts
+  ;; while it waits in an inbox, is being worked, is queued to leave, or is held for the
+  ;; operator's approval - and stops counting once it has been completed. A card that closed
+  ;; while one of these existed could never take the candidate it carries, which is the shape
+  ;; seen four times before the guard.
+  (let [root (tmp-dir)
+        wt (fs/path root ".worktrees" "coder")]
+    (try
+      (write-file (fs/path root ".swarmforge" "roles.tsv")
+                  (format "coder\tmaster\t%s\tsession\tCoder\tcodex\ttask\n" wt))
+      (let [queued (fs/path wt ".swarmforge" "handoffs" "outbox" "1_20261016T100000Z.handoff")]
+        (write-file queued "type: git_handoff\ntask: the-card\nto: specifier\n\nbody\n"))
+      (is (= 1 (count (handoff-lib/task-handoffs-travelling root "the-card"))))
+      (is (empty? (handoff-lib/task-handoffs-travelling root "another-card"))
+          "only handoffs naming the card count")
+      ;; Being worked counts too: an inbox that has taken the file.
+      (let [taken (fs/path wt ".swarmforge" "handoffs" "inbox" "in_process" "1_20261016T100000Z.handoff")]
+        (write-file taken "type: git_handoff\ntask: the-card\nto: specifier\n\nbody\n"))
+      (is (= 2 (count (handoff-lib/task-handoffs-travelling root "the-card"))))
+      ;; Taken and completed is not travelling any more.
+      (fs/delete-tree (fs/path wt ".swarmforge" "handoffs" "outbox"))
+      (fs/delete-tree (fs/path wt ".swarmforge" "handoffs" "inbox"))
+      (write-file (fs/path wt ".swarmforge" "handoffs" "inbox" "completed" "1_20261016T100000Z.handoff")
+                  "type: git_handoff\ntask: the-card\n\nbody\n")
+      (is (empty? (handoff-lib/task-handoffs-travelling root "the-card"))
+          "a completed handoff no longer blocks the close")
+      (finally
+        (fs/delete-tree root)))))
 
 (deftest a-non-terminal-handback-is-a-draft-a-role-may-write
   ;; Given a role whose audit found a gap it cannot close in this card
