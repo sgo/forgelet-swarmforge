@@ -214,7 +214,7 @@
           (stop! root)
           (let [agent-command (or (:agent-command options)
                                   (not-empty (System/getenv "SWARMFORGE_AGENT_COMMAND"))
-                                  "codex exec --full-auto")]
+                                  "codex exec --sandbox workspace-write")]
             (fs/create-dirs (fs/path root ".swarmforge"))
             (spit (str (pid-file root))
                   (str (.pid (java.lang.ProcessHandle/current)) "\n"))

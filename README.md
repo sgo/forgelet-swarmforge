@@ -127,7 +127,7 @@ It composes `stages.edn`, `STAGES.md`, a one-row `roles.tsv` and the
 the forge dashboard: the row is marked single-agent and links to the project's
 own `pack_web` dashboard. `./swarm` starts the runner, which takes one dashboard
 request at a time, passes it to an agent command, and appends `stage list` to the
-answer. The command defaults to `codex exec --full-auto`; set
+answer. The command defaults to `codex exec --sandbox workspace-write`; set
 `SWARMFORGE_AGENT_COMMAND` to use another agent. The runner never creates a
 worktree or a handoff.
 

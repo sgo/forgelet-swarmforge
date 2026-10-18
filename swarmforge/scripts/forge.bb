@@ -292,7 +292,7 @@
                  (str (swarmforge-bb forge)))
         log (fs/path dest ".swarmforge" "start.log")
         agent-command (or (not-empty (System/getenv "SWARMFORGE_AGENT_COMMAND"))
-                          "codex exec --full-auto")
+                          "codex exec --sandbox workspace-write")
         arguments (if (single-agent? dest)
                     (str " --root " (shell-quote (str dest))
                          " --agent-command " (shell-quote agent-command))
