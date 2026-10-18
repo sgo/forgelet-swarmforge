@@ -272,6 +272,9 @@
     (if (single-agent? dest)
       (do
         (copy-shared-scripts! forge dest)
+        (let [installer (fs/path dest "swarmforge" "scripts" "install-agent-hooks.sh")]
+          (when (fs/regular-file? installer)
+            (process/sh {:continue true} "bash" (str installer) (str dest))))
         {:name name :single-agent true})
       (do
         (when (str/blank? pack)

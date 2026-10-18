@@ -57,7 +57,8 @@
         (is (fs/regular-file? (fs/path project "stages.edn")))
         (is (fs/regular-file? (fs/path project "STAGES.md")))
         (is (fs/regular-file? (fs/path project "AGENTS.md")))
-        (is (fs/regular-file? (fs/path project ".git-hooks" "pre-commit")))
+        (is (fs/regular-file?
+             (fs/path project "swarmforge" "scripts" "agent-pre-commit.sh")))
         (is (fs/regular-file? (fs/path project ".git" "hooks" "pre-commit")))
         (is (fs/regular-file? (fs/path project ".swarmforge" "single-agent")))
         (is (fs/regular-file?
