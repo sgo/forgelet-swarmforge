@@ -139,7 +139,8 @@
                        "bb" (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
                        "--root" (str project)
                        "--once"
-                       "--agent-command" "sleep 60")]
+                       "--agent-command"
+                       "sh -c 'echo \"<<AGENT READY>>\"; sleep 60'")]
           (is (zero? (:exit run)) (:err run))
           (let [url-file (fs/path project ".swarmforge" "dashboard-url")]
             (is (fs/regular-file? url-file))

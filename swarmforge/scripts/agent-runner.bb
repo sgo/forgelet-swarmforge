@@ -188,12 +188,19 @@
     (when (zero? (:exit result))
       (:out result))))
 
+(defn visible-pane [root]
+  (let [result (tmux root "capture-pane" "-p" "-J" "-t" session-name)]
+    (when (zero? (:exit result))
+      (:out result))))
+
 (defn ready? [root]
   (str/includes? (or (pane root) "") ready-marker))
 
 (defn default-agent-command [root]
   (str "codex -C " (sq (str root))
        " --no-alt-screen --dangerously-bypass-approvals-and-sandbox"))
+
+(declare settle-agent-session!)
 
 (defn start-agent-session! [root command]
   (when-not (session? root)
@@ -208,7 +215,34 @@
                             "; exec " command))]
       (when-not (zero? (:exit result))
         (exit! 1 "Could not start the agent session: " (:err result))))
-    (Thread/sleep 1000)))
+    (settle-agent-session! root)))
+
+(defn settle-agent-session! [root]
+  (loop [waited 0]
+    (let [text (or (visible-pane root) "")]
+      (cond
+        (or (str/includes? text ready-marker)
+            (str/includes? text "Ask Codex to do anything")) true
+
+        (str/includes? text "Trust this folder?")
+        (do
+          (tmux root "send-keys" "-t" session-name "1" "C-m")
+          (Thread/sleep 500)
+          (recur (+ waited 500)))
+
+        (and (str/includes? text "Update available")
+             (str/includes? text "1. Update now"))
+        (do
+          (tmux root "send-keys" "-t" session-name "3" "C-m")
+          (Thread/sleep 500)
+          (recur (+ waited 500)))
+
+        (>= waited 30000) false
+
+        :else
+        (do
+          (Thread/sleep 250)
+          (recur (+ waited 250)))))))
 
 (defn stop-agent! [root]
   (if (session? root)
@@ -288,6 +322,7 @@
 
 (defn run-once! [root agent-command]
   (start-agent-session! root agent-command)
+  (settle-agent-session! root)
   (if-let [request (pending-request root)]
     (do
       (println "request" (:id request))
