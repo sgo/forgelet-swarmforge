@@ -6,12 +6,14 @@
                 (require 'swarmforge.handoff-test)
                 (require 'swarmforge.script-test)
                 (require 'swarmforge.stage-test)
+                (require 'swarmforge.agent-project-test)
                 (require 'swarmforge.update-exercise-test)
                 (require 'swarmforge.pack-ui-test)
                 (require 'swarmforge.coverage-in-process-test)
                 (let [{:keys [fail error]} (clojure.test/run-tests 'swarmforge.handoff-test
                                                                     'swarmforge.script-test
                                                                     'swarmforge.stage-test
+                                                                    'swarmforge.agent-project-test
                                                                     'swarmforge.update-exercise-test
                                                                     'swarmforge.pack-ui-test
                                                                     'swarmforge.coverage-in-process-test)]

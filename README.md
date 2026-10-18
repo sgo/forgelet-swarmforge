@@ -113,6 +113,27 @@ Three overrides are for development rather than for choice:
 `SWARMFORGE_BRIDGE_REPO` and `SWARMFORGE_BRIDGE_REF` name another repository or
 branch, and `SWARMFORGE_SKIP_BRIDGE=1` leaves the bridge out entirely.
 
+### Single-agent projects
+
+A forge can hold a project owned by one agent instead of a pack. From a layer
+checkout:
+
+```sh
+./get-agent-project <name> --forge <forge-root>
+```
+
+It composes `stages.edn`, `STAGES.md`, a one-row `roles.tsv` and the
+`.swarmforge/single-agent` marker into `projects/<name>`. Open the project from
+the forge dashboard: the row is marked single-agent and links to the project's
+own `pack_web` dashboard. `./swarm` starts the runner, which takes one dashboard
+request at a time, passes it to an agent command, and appends `stage list` to the
+answer. The command defaults to `codex exec --full-auto`; set
+`SWARMFORGE_AGENT_COMMAND` to use another agent. The runner never creates a
+worktree or a handoff.
+
+The per-project Matrix room is a later slice; the bridge still gives each forge
+one space with its family rooms.
+
 ### Where your own things go
 
 Composition writes the paths it names and nothing else, so everything in this

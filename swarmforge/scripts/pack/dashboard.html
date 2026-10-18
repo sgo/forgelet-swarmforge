@@ -364,7 +364,25 @@ function projectBand(proj) {
   cl.className = "btn btn-sm";
   cl.textContent = "Close";
   cl.onclick = () => closeProject(proj.name);
-  header.append(title, nt, cl);
+  header.append(title);
+  if (proj.single_agent) {
+    const pill = document.createElement("span");
+    pill.className = "pill pill-ok";
+    pill.textContent = "single-agent";
+    header.append(pill);
+    if (proj.dashboard_url) {
+      const dash = document.createElement("button");
+      dash.type = "button";
+      dash.className = "btn btn-sm";
+      dash.textContent = "Project dashboard";
+      dash.onclick = () => window.open(proj.dashboard_url,
+                                       "project-dashboard-" + proj.name);
+      header.append(dash);
+    }
+  } else {
+    header.append(nt);
+  }
+  header.append(cl);
   const cols = document.createElement("div");
   cols.className = "columns";
   const lanes = (proj.lanes || []).concat(["done"]);

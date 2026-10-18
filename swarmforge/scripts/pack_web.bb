@@ -862,17 +862,29 @@
 (defn open-project-root [forge name]
   (str (forge/project-dir forge name)))
 
+(defn single-agent-project? [root]
+  (fs/regular-file? (fs/path root ".swarmforge" "single-agent")))
+
+(defn project-dashboard-url [root]
+  (let [file (fs/path root ".swarmforge" "dashboard-url")]
+    (when (fs/regular-file? file)
+      (not-empty (str/trim (slurp (str file)))))))
+
 (defn project-slice [forge name]
   (let [root (open-project-root forge name)]
     (try
       {:name name
        :open true
+       :single_agent (single-agent-project? root)
+       :dashboard_url (project-dashboard-url root)
        :lanes (lanes root)
        :tasks (tagged name (tasks root))
        :work_in_flight (tagged name (work-in-flight root))}
       (catch Exception _
         {:name name
          :open true
+         :single_agent (single-agent-project? root)
+         :dashboard_url (project-dashboard-url root)
          :lanes []
          :tasks []
          :work_in_flight []}))))

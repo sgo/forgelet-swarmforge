@@ -2591,6 +2591,31 @@
       (is (not (zero? (:exit result))))
       (is (str/includes? (str (:err result) (:out result)) "No pack recorded")))))
 
+(deftest forge-opens-and-closes-a-single-agent-project-without-a-pack
+  ;; Given a project carrying the single-agent marker and no pack file
+  ;; When the forge opens and closes it
+  ;; Then it is accepted, refreshed with the shared scripts, and marked open
+  (let [root (tmp-dir)
+        project (fs/path root "projects/agent")]
+    (seed-mini-forge! root)
+    (write-file (fs/path root "swarmforge/scripts/agent-runner.bb")
+                "#!/usr/bin/env bb\n(println \"stop\")\n")
+    (fs/create-dirs (fs/path project ".swarmforge"))
+    (write-file (fs/path project ".swarmforge/single-agent") "agent\n")
+    (let [open (pack-web-env root {"SWARMFORGE_SKIP_START" "1"}
+                             "--test-open-project" (str root) "agent")]
+      (is (zero? (:exit open)) (:err open))
+      (is (fs/regular-file? (fs/path project "swarmforge/scripts/agent-runner.bb")))
+      (is (str/includes?
+           (slurp (str (fs/path root ".swarmforge" "open-projects")))
+           "agent")))
+    (let [close (pack-web-env root {"SWARMFORGE_SKIP_START" "1"}
+                              "--test-close-project" (str root) "agent")]
+      (is (zero? (:exit close)) (:err close))
+      (is (not (str/includes?
+                (slurp (str (fs/path root ".swarmforge" "open-projects")))
+                "agent"))))))
+
 (deftest forge-refresh-keeps-mission-and-conf
   (let [root (tmp-dir)]
     (seed-mini-forge! root)
@@ -2624,6 +2649,25 @@
       (is (= "cave" (:project approval)))
       (is (= ["cave"] (:open_projects state)))
       (is (= "cave" (:name (first (:projects state))))))))
+
+(deftest forge-state-marks-a-single-agent-project
+  ;; Given an open project carrying the single-agent marker and its own dashboard
+  ;; When the forge dashboard state is read
+  ;; Then the project row carries both the marker and the dashboard link
+  (let [root (tmp-dir)
+        project (fs/path root "projects/agent")]
+    (seed-mini-forge! root)
+    (fs/create-dirs (fs/path project ".swarmforge"))
+    (write-file (fs/path project ".swarmforge/single-agent") "agent\n")
+    (write-file (fs/path project ".swarmforge/dashboard-url")
+                "http://127.0.0.1:9999\n")
+    (write-file (fs/path root ".swarmforge/open-projects") "agent\n")
+    (let [state (json/parse-string
+                 (:out (pack-web root true "--test-state" (str root)))
+                 true)
+          project-state (first (:projects state))]
+      (is (true? (:single_agent project-state)))
+      (is (= "http://127.0.0.1:9999" (:dashboard_url project-state))))))
 
 (deftest forge-pane-capture-uses-project-root
   ;; Given a forge with an open project and a recorded specifier pane

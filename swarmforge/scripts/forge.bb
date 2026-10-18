@@ -117,6 +117,9 @@
     (fs/create-dirs (fs/parent file))
     (spit (str file) (str pack "\n"))))
 
+(defn single-agent? [project]
+  (fs/regular-file? (fs/path project ".swarmforge" "single-agent")))
+
 (defn copy-tree-replace! [src dest]
   (when (fs/exists? dest)
     (fs/delete-tree dest))
@@ -266,10 +269,15 @@
         pack (stored-pack dest)]
     (when-not (fs/directory? dest)
       (throw (ex-info (str "Unknown project: " name) {:http-status 404})))
-    (when (str/blank? pack)
-      (throw (ex-info (str "No pack recorded for " name) {:http-status 400})))
-    (overlay-pack! forge dest pack true)
-    {:name name :pack pack}))
+    (if (single-agent? dest)
+      (do
+        (copy-shared-scripts! forge dest)
+        {:name name :single-agent true})
+      (do
+        (when (str/blank? pack)
+          (throw (ex-info (str "No pack recorded for " name) {:http-status 400})))
+        (overlay-pack! forge dest pack true)
+        {:name name :pack pack}))))
 
 (defn skip-start? []
   (= "1" (System/getenv "SWARMFORGE_SKIP_START")))
@@ -279,8 +287,16 @@
 
 (defn start-project-runtime! [forge name]
   (let [dest (project-dir forge name)
-        script (swarmforge-bb forge)
-        log (fs/path dest ".swarmforge" "start.log")]
+        script (if (single-agent? dest)
+                 (str (fs/path dest "swarmforge" "scripts" "agent-runner.bb"))
+                 (str (swarmforge-bb forge)))
+        log (fs/path dest ".swarmforge" "start.log")
+        agent-command (or (not-empty (System/getenv "SWARMFORGE_AGENT_COMMAND"))
+                          "codex exec --full-auto")
+        arguments (if (single-agent? dest)
+                    (str " --root " (shell-quote (str dest))
+                         " --agent-command " (shell-quote agent-command))
+                    (str " --start-project " (shell-quote (str dest))))]
     (fs/create-dirs (fs/parent log))
     ;; Through a shell that backgrounds it and goes away, so the runtime outlives
     ;; whoever asked for it. Spawned directly it is the caller's child, and a caller
@@ -289,13 +305,18 @@
     ;; running, because the bb process that asked was gone a moment later.
     (process/sh {:continue true}
                 "zsh" "-c"
-                (str "nohup bb " (shell-quote (str script)) " --start-project "
-                     (shell-quote (str dest)) " > " (shell-quote (str log)) " 2>&1 &!"))))
+                (str "nohup bb " (shell-quote (str script)) arguments
+                     " > " (shell-quote (str log)) " 2>&1 &!"))))
 
 (defn stop-project-runtime! [forge name]
   (let [dest (str (project-dir forge name))
-        script (swarmforge-bb forge)]
-    (process/sh {:continue true} "bb" script "--stop-project" dest)))
+        project (fs/path dest)]
+    (if (single-agent? project)
+      (process/sh {:continue true} "bb"
+                  (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
+                  "--root" dest "--stop")
+      (let [script (swarmforge-bb forge)]
+        (process/sh {:continue true} "bb" script "--stop-project" dest)))))
 
 (defn open-project! [forge name]
   (when-not (fs/directory? (project-dir forge name))

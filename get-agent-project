@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: get-agent-project <project-name> [--forge <forge-root>]
+
+Compose a single-agent project into an existing forge. The forge root defaults
+to the current directory when it has projects/ and swarmforge/scripts/.
+USAGE
+}
+
+fail() {
+  printf 'get-agent-project: %s\n' "$*" >&2
+  exit 1
+}
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+template_dir="$script_dir/swarmforge/templates/agent-project"
+forge_root=""
+name=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --forge)
+      [[ $# -ge 2 ]] || fail "--forge needs a directory"
+      forge_root="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      fail "unknown option: $1"
+      ;;
+    *)
+      [[ -z "$name" ]] || fail "only one project name is allowed"
+      name="$1"
+      shift
+      ;;
+  esac
+done
+
+[[ -n "$name" ]] || { usage >&2; exit 1; }
+[[ "$name" != *[!A-Za-z0-9._-]* ]] || fail "project name must be letters, digits, dot, dash or underscore"
+[[ -d "$template_dir" ]] || fail "template not found: $template_dir"
+
+if [[ -z "$forge_root" ]]; then
+  forge_root="$(pwd)"
+fi
+forge_root="$(cd "$forge_root" && pwd)" || fail "forge root not found"
+[[ -d "$forge_root/projects" ]] || fail "not a forge root (no projects/): $forge_root"
+[[ -d "$forge_root/swarmforge/scripts" ]] || fail "not a composed forge (no swarmforge/scripts/): $forge_root"
+
+dest="$forge_root/projects/$name"
+[[ ! -e "$dest" ]] || fail "project already exists: $dest"
+
+mkdir -p "$dest"
+cp -R "$template_dir/." "$dest/"
+mkdir -p "$dest/swarmforge/scripts"
+cp -R "$forge_root/swarmforge/scripts/." "$dest/swarmforge/scripts/"
+chmod +x "$dest/swarm"
+
+mkdir -p "$dest/.swarmforge"
+printf 'agent\tmaster\t%s\tagent\tAgent\tcodex\ttask\n' "$dest" \
+  > "$dest/.swarmforge/roles.tsv"
+printf '%s\n' "$name" > "$dest/.swarmforge/single-agent"
+
+if [[ ! -d "$dest/.git" ]]; then
+  git init -q "$dest"
+  git -C "$dest" branch -M master
+  git -C "$dest" add .
+  if git -C "$dest" config --get user.name >/dev/null 2>&1 \
+     && git -C "$dest" config --get user.email >/dev/null 2>&1; then
+    git -C "$dest" commit -q -m "Initial single-agent project"
+  else
+    git -C "$dest" \
+      -c user.name="SwarmForge Scaffold" \
+      -c user.email="swarmforge@localhost" \
+      commit -q -m "Initial single-agent project"
+  fi
+fi
+
+printf 'Single-agent project created: %s\n' "$dest"
+printf 'Next: %s\n' "$dest/swarm"

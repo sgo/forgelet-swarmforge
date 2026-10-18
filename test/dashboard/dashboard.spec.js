@@ -58,7 +58,10 @@ function seedForge(root) {
   fs.mkdirSync(path.join(root, "projects"), { recursive: true });
   const project = path.join(root, "projects/htw");
   seedProject(project);
-  writeFile(path.join(root, ".swarmforge/open-projects"), "htw\n");
+  const agent = path.join(root, "projects/agent");
+  writeFile(path.join(agent, ".swarmforge/single-agent"), "agent\n");
+  writeFile(path.join(agent, ".swarmforge/dashboard-url"), "http://127.0.0.1:9999\n");
+  writeFile(path.join(root, ".swarmforge/open-projects"), "htw\nagent\n");
   writeFile(
     path.join(root, ".swarmforge/roles.tsv"),
     `lieutenant\tmaster\t${root}\tswarmforge-lieutenant\tLieutenant\tgrok\ttask\tforward-only\n`
@@ -122,6 +125,14 @@ test.describe("pack dashboard", () => {
     await expect(page.locator(".pack-actions #btn-new-task")).toHaveCount(1);
     await expect(page.locator(".project-header button", { hasText: "New Task" })).toBeVisible();
     await expect(page.locator(".board-toolbar")).toHaveCount(0);
+  });
+
+  test("marks a single-agent project and links its own dashboard", async ({ page }) => {
+    await page.goto(handle.url);
+    const band = page.locator('[data-project="agent"]');
+    await expect(band.locator(".pill")).toHaveText("single-agent");
+    await expect(band.getByRole("button", { name: "Project dashboard" })).toBeVisible();
+    await expect(band.getByRole("button", { name: "New Task" })).toHaveCount(0);
   });
 
   test("clicking the project name opens a growable mission window", async ({ page, context }) => {
@@ -403,7 +414,7 @@ test.describe("pack dashboard", () => {
       "closed-card\tdone\t2026-01-01T00:00:00Z\t2026-01-01T00:00:00Z\t20260101T000001Z-closed-card\t0\n"
     );
     await page.goto(handle.url);
-    const done = page.locator('.col[data-lane="done"]');
+    const done = page.locator('[data-project="htw"] .col[data-lane="done"]');
     await expect(done.locator("h3")).toHaveText("Done (1)");
     await expect(done.locator(".col-body")).toBeHidden();
     await done.locator("h3").click();
