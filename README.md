@@ -137,6 +137,18 @@ The project-facing half of that table has a manual of its own:
 [what a project owns](docs/what-a-project-owns.md) — what each file is for, what reads it,
 and what to do when it is missing.
 
+### Skills the layer ships
+
+The layer carries agent skills under `swarmforge/skills/`, one directory per skill holding a
+`SKILL.md`. Composition writes them into every forge it builds and replaces only the skills the
+layer carries, so a forge's own — anything it keeps in `swarmforge/skills/` that the layer does not
+ship — survives an update. The shared skills are the layer's to change; a forge's extras are the
+forge's.
+
+Codex reads skills from `~/.codex/skills`, not from the forge tree, so a composed skill reaches a
+role only once it is linked there. The dev box's provisioning does that (`devbox/skills/link.sh`,
+from `sgo/forgelet-forge`), and a running session picks a new link up the next time it starts.
+
 ### The agent's command shell, and where the helpers come from
 
 A Codex agent's command shell can be served by its app-server daemon, which hands the shell its
