@@ -132,6 +132,9 @@ tmux session, and appends `stage list` to the answer. The same session is what
 one agent rather than two. The command defaults to
 `codex -C <project> --no-alt-screen --yolo`; set `SWARMFORGE_AGENT_COMMAND` to
 use another agent. The runner never creates a worktree or a handoff.
+Closing the project stops both the relay and the `swarmforge-agent` session;
+`agent-runner.bb --stop-agent` stops only the agent, leaving the phone relay
+running.
 
 The spec stage is the specifier's work: the agent turns the operator's card
 into `tasks/<name>.md` and `features/<name>.feature`, validates the Gherkin,

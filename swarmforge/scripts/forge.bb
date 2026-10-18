@@ -311,11 +311,12 @@
 
 (defn stop-project-runtime! [forge name]
   (let [dest (str (project-dir forge name))
-        project (fs/path dest)]
+        project (fs/path dest)
+        runner (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))]
     (if (single-agent? project)
-      (process/sh {:continue true} "bb"
-                  (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
-                  "--root" dest "--stop")
+      (do
+        (process/sh {:continue true} "bb" runner "--root" dest "--stop")
+        (process/sh {:continue true} "bb" runner "--root" dest "--stop-agent"))
       (let [script (swarmforge-bb forge)]
         (process/sh {:continue true} "bb" script "--stop-project" dest)))))
 

@@ -168,3 +168,20 @@
       (finally
         (stop-agent-session! project)
         (fs/delete-tree forge)))))
+
+(deftest stop-closes-the-agent-session
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent")
+        sock (str (fs/path project ".swarmforge" "tmux-socket"))]
+    (try
+      (run repo-root composer "--forge" (str forge) "agent")
+      (sh/sh "tmux" "-S" sock "new-session" "-d" "-s" "swarmforge-agent" "sleep" "60")
+      (is (zero? (:exit (sh/sh "tmux" "-S" sock "has-session" "-t" "swarmforge-agent"))))
+      (let [stop (run project
+                      "bb" (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
+                      "--root" (str project) "--stop")]
+        (is (zero? (:exit stop)) (:err stop)))
+      (is (not (zero? (:exit (sh/sh "tmux" "-S" sock "has-session" "-t" "swarmforge-agent")))))
+      (finally
+        (stop-agent-session! project)
+        (fs/delete-tree forge)))))

@@ -12,6 +12,8 @@
        "                  [--no-serve] [--interval SECONDS]\n"
        "  agent-runner.bb --root <project> --stop\n"
        "  agent-runner.bb --root <project> --stop-agent\n\n"
+       "--stop closes the relay and the agent session; --stop-agent closes only\n"
+       "the agent session.\n\n"
        "The relay owns one persistent tmux session, swarmforge-agent. Phone\n"
        "requests are pasted into that session; forge-attach opens the same\n"
        "session. The agent must end every turn with <<AGENT READY>>."))
@@ -82,13 +84,15 @@
     (when (fs/regular-file? file)
       (not-empty (str/trim (slurp (str file)))))))
 
+(declare stop-agent!)
+
 (defn stop! [root]
-  (if-let [pid (running-pid root)]
+  (when-let [pid (running-pid root)]
     (let [result (sh/sh "kill" pid)]
       (if (zero? (:exit result))
         (println (str "Stopped agent runner " pid))
-        (exit! 1 (str "Could not stop " pid ": " (:err result)))))
-    (println "Agent runner is not running")))
+        (println (str "Agent runner " pid " is not running")))))
+  (stop-agent! root))
 
 (defn dashboard-url [root]
   (let [file (fs/path root ".swarmforge" "dashboard-url")]
