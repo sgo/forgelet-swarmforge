@@ -1300,7 +1300,10 @@
   (let [root (tmp-dir)]
     (try
       (write-echo-tool! root "clj-mutate")
-      (run {:dir root} (script "swarm_tool.sh") "ensure" "clj-mutate")
+      (run {:dir root
+            :env {"SWARMFORGE_TOOL_SRC"
+                  (str (fs/path root ".swarmforge" "tools" "clj-mutate"))}}
+           (script "swarm_tool.sh") "ensure" "clj-mutate")
       (let [out (:out (run {:dir root}
                            (str (fs/path root ".swarmforge/bin/clj-mutate"))
                            "src/htw/game.clj" "--reuse-lcov" "--mutate-all"
@@ -1317,7 +1320,10 @@
   (let [root (tmp-dir)]
     (try
       (write-echo-tool! root "clj-mutate")
-      (run {:dir root} (script "swarm_tool.sh") "ensure" "clj-mutate")
+      (run {:dir root
+            :env {"SWARMFORGE_TOOL_SRC"
+                  (str (fs/path root ".swarmforge" "tools" "clj-mutate"))}}
+           (script "swarm_tool.sh") "ensure" "clj-mutate")
       (let [out (:out (run {:dir root}
                            (str (fs/path root ".swarmforge/bin/clj-mutate"))
                            "src/htw/game.clj" "--scan"))]
