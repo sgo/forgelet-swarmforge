@@ -13,6 +13,14 @@ The project tools live in `.swarmforge/bin`. Before running a gate manually:
 export PATH="$PWD/.swarmforge/bin:$PWD/swarmforge/scripts:$PATH"
 ```
 
+## Vertical slices
+
+A task is one public behaviour through every gate, not a layer of a behaviour.
+Do not put "API", "storage", "tests", "clean", "architect", "harden" or
+"verify" on the backlog as separate items; they belong to the same slice.
+Spec-only and bootstrap tasks need an explicit waiver in the approved spec,
+not a deferred gate.
+
 ```
 spec -> code -> clean -> architect -> harden -> clean-final -> qa -> release?
 ```

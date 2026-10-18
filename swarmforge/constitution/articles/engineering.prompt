@@ -53,6 +53,19 @@
   never treat `./gradlew build` as a gate. Each suite has its own named task so a role runs only the
   suite it owns, and the gates stay off unless the role that owns one invokes it.
 
+## Vertical Slices
+- A card is one vertical slice: a public behaviour that can pass every required gate in the same
+  card. It is not a layer of a behaviour.
+- Split by behaviour, never by layer. "API", "storage", "execution", "unit tests", "property
+  tests", "cleanup", "architecture", "mutation" and "verification" are not separate backlog items
+  for one behaviour.
+- Tests, cleanup, architecture, hardening and verification belong to the same slice. Do not defer
+  a gate to a later card, and do not mark a slice complete because its code compiles.
+- A slice has its own spec/task note/Gherkin, implementation, unit/property/architecture coverage,
+  and every required gate. `stage complete` at the slice's tree is its completion.
+- A spec-only or bootstrap task is not a slice that skips gates. It needs an explicit waiver in its
+  approved spec (and a `waived` record where the tool supports one), never a deferred gate.
+
 ## Java Gate Tasks
 - A Java project provides its gates as Maven profiles, and the profiles are the contract every role uses:
   - `swarm-mode` - the default, with every gate off, so a plain `mvn` invocation runs no suite.

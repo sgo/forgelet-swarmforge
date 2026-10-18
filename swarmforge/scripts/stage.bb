@@ -380,6 +380,7 @@
   (let [tree (worktree-tree root)]
     (println (str "task: " (:task config)))
     (println (str "tree: " tree))
+    (println "Each stage is a gate on the current vertical slice; tests, cleanup and hardening are not later tasks.")
     (doseq [stage (:stages config)]
       (println (format "%-10s %-8s %s"
                        (:name stage)

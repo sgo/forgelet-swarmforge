@@ -15,6 +15,10 @@ The operator gives the card. You write the task note and Gherkin, validate
 them, and propose the bundle for approval. Do not ask the operator to fill a
 template.
 
+Work in vertical slices: one public behaviour through every gate. Tests,
+cleanup, architecture, hardening and verification are part of that slice, not
+separate backlog items and not gates deferred to a later card.
+
 End every turn with a line exactly `<<AGENT READY>>`, so the relay knows the
 turn is complete.
 
