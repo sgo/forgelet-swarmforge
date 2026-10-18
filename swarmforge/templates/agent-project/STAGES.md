@@ -15,10 +15,20 @@ The template's `stages.edn` assumes a Maven reactor with an `architecture`
 module and an acceptance script. Adjust the commands and evidence paths to the
 project before the first `stage check`.
 
-- **spec**: `spec.md` needs the operator's approval. `stage propose spec
-  spec.md` prints the proposal; `stage approve <id> --words "<their words>"`
-  records the exact answer. Approval is single-use and stale when the spec
-  changes.
+## Specifier workflow
+
+The operator gives a card or chat request with the observed problem. You are
+the specifier: read `mission.md` and the code, then write `tasks/<name>.md`
+and `features/<name>.feature`. Prune the Gherkin, run `gherkin-parser` and
+`ir-dry-checker`, and then run `stage propose spec
+features/<name>.feature`. The operator approves the exact Gherkin; they do not
+fill a template. Ask when the request is ambiguous; otherwise write the
+specification yourself and continue as the same agent.
+
+- **spec**: the approved feature file. `stage propose spec
+  features/<name>.feature` prints the proposal; `stage approve <id> --words
+  "<their words>"` records the exact answer. Approval is single-use and stale
+  when the feature changes.
 - **code**: `mvn -Pwith-unit-tests verify`.
 - **clean**: `crap4java` for CRAP and `dry4java` for duplicate pairs. The
   project's CRAP ceiling is 6; DRY and mutation are deltas against the task's

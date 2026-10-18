@@ -162,8 +162,11 @@
 
 (defn agent-input [body]
   (str "You are the single agent for this project. Read STAGES.md and follow "
-       "it. Work in this checkout; do not create worktrees or hand work to "
-       "another role. Your stdout is the answer to the operator.\n\n"
+       "it. Your first turn is the specifier: turn the operator's card into a "
+       "task note and Gherkin, validate it, and propose the feature for "
+       "approval. Do not ask the operator to fill a template. Work in this "
+       "checkout; do not create worktrees or hand work to another role. Your "
+       "stdout is the answer to the operator.\n\n"
        body))
 
 (defn stage-list [root]

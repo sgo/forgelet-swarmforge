@@ -131,6 +131,11 @@ answer. The command defaults to `codex exec --full-auto`; set
 `SWARMFORGE_AGENT_COMMAND` to use another agent. The runner never creates a
 worktree or a handoff.
 
+The spec stage is the specifier's work: the agent turns the operator's card
+into `tasks/<name>.md` and `features/<name>.feature`, validates the Gherkin,
+and proposes the feature for the operator's approval. The operator does not
+fill a template.
+
 For a library, pass `--profile library`: the template replaces the acceptance
 QA gate with an explicit `verify` stage (property tests, plus the library's API
 compatibility check). That is a deliberate profile, not an `n/a` that hides a

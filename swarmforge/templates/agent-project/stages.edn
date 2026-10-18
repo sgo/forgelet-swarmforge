@@ -2,8 +2,8 @@
  :stages
  [{:name "spec"
    :approval :operator
-   :spec "spec.md"
-   :stamp ["spec.md" "tasks"]}
+   :spec "features/example.feature"
+   :stamp ["features" "tasks"]}
   {:name "code"
    :runs [["mvn" "-q" "-Pwith-unit-tests" "verify"]]
    :evidence ["target/surefire-reports/*.xml"]

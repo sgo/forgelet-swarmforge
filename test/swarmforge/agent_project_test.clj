@@ -67,7 +67,7 @@
             (is (str/includes? (:out listing) stage)))))
 
       (testing "the code gate runs its command and records evidence"
-        (run-stage project "propose" "spec" "spec.md")
+        (run-stage project "propose" "spec" "features/example.feature")
         (let [id (-> (state project) :proposals vals first :id)
               approve (run-stage project "approve" id "--words" "approve")]
           (is (zero? (:exit approve)) (:err approve)))
