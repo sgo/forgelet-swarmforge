@@ -192,7 +192,8 @@
   (str/includes? (or (pane root) "") ready-marker))
 
 (defn default-agent-command [root]
-  (str "codex -C " (sq (str root)) " --no-alt-screen --yolo"))
+  (str "codex -C " (sq (str root))
+       " --no-alt-screen --dangerously-bypass-approvals-and-sandbox"))
 
 (defn start-agent-session! [root command]
   (when-not (session? root)

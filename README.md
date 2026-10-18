@@ -130,8 +130,9 @@ request at a time, pastes it into the project's persistent `swarmforge-agent`
 tmux session, and appends `stage list` to the answer. The same session is what
 `forge-attach <forge> <project> agent` opens, so the phone and the laptop use
 one agent rather than two. The command defaults to
-`codex -C <project> --no-alt-screen --yolo`; set `SWARMFORGE_AGENT_COMMAND` to
-use another agent. The runner never creates a worktree or a handoff.
+`codex -C <project> --no-alt-screen --dangerously-bypass-approvals-and-sandbox`;
+set `SWARMFORGE_AGENT_COMMAND` to use another agent. The runner never creates
+a worktree or a handoff.
 Closing the project stops both the relay and the `swarmforge-agent` session;
 `agent-runner.bb --stop-agent` stops only the agent, leaving the phone relay
 running.

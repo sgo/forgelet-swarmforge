@@ -293,7 +293,8 @@
         log (fs/path dest ".swarmforge" "start.log")
         agent-command (or (not-empty (System/getenv "SWARMFORGE_AGENT_COMMAND"))
                           (str "codex -C " (shell-quote (str dest))
-                               " --no-alt-screen --yolo"))
+                               " --no-alt-screen"
+                               " --dangerously-bypass-approvals-and-sandbox"))
         arguments (if (single-agent? dest)
                     (str " --root " (shell-quote (str dest))
                          " --agent-command " (shell-quote agent-command))
