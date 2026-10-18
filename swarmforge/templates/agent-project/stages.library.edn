@@ -29,9 +29,11 @@
    :evidence []
    :stamp [:sources]}
   {:name "verify"
-   :runs [["mvn" "-q" "-Pwith-property-tests" "verify"]]
-   :evidence ["target/surefire-reports/*.xml"]
-   :stamp [:sources]}
+   :runs [["mvn" "-q" "-Pwith-property-tests" "verify"]
+          ["scripts/run-acceptance-tests.sh"]]
+   :evidence ["target/surefire-reports/*.xml"
+              "target/acceptance/acceptance.log"]
+   :stamp [:features :sources "acceptance" "scripts/run-acceptance-tests.sh"]}
   {:name "release"
    :optional true
    :runs [["scripts/release_preflight.sh"]]

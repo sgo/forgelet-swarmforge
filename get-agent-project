@@ -84,6 +84,9 @@ if [[ -f "$forge_root/swarmforge/constitution/articles/engineering.prompt" ]]; t
      "$dest/swarmforge/constitution/articles/engineering.prompt"
 fi
 chmod +x "$dest/swarm"
+if [[ -f "$dest/scripts/run-acceptance-tests.sh" ]]; then
+  chmod +x "$dest/scripts/run-acceptance-tests.sh"
+fi
 
 mkdir -p "$dest/.swarmforge"
 printf 'agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n' "$dest" \

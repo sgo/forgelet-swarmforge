@@ -30,8 +30,8 @@ finished. The list is the reminder; `stage complete` refuses while any required
 stage is todo or stale.
 
 The template's `stages.edn` assumes a Maven reactor with an `architecture`
-module and an acceptance script. Adjust the commands and evidence paths to the
-project before the first `stage check`.
+module and the acceptance script under `scripts/`. Adjust the commands and
+evidence paths to the project before the first `stage check`.
 
 ## Specifier workflow
 
@@ -48,6 +48,11 @@ The template starts with no feature or task files; the specifier's first turn
 creates them. The default `:spec` bundle is `features/*.feature` plus
 `tasks/*.md`.
 
+Every approved step must be executable through the public API. The template
+ships `acceptance/src` with a runner and an empty handler list; add one
+handler per step shape and keep `scripts/run-acceptance-tests.sh` green. A
+step the harness cannot execute is not a scenario, only prose.
+
 - **spec**: the approved feature bundle. `stage propose spec <file>...` prints
   the proposal; `stage approve <id> --words
   "<their words>"` records the exact answer. Approval is single-use and stale
@@ -63,6 +68,9 @@ creates them. The default `:spec` bundle is `features/*.feature` plus
   the project records why it is equivalent.
 - **clean-final**: the same clean check on the hardened tree.
 - **qa**: property tests first, then the acceptance suite.
+  `scripts/run-acceptance-tests.sh` parses every feature and dispatches every
+  step to a handler under `acceptance/src`. A step with no handler or two
+  matching handlers fails the gate.
 - **release**: optional; `n/a` is not a pass for a release that was skipped.
 
 Do not create worktrees. Do not hand work to another role. The project root is

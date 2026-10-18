@@ -60,6 +60,16 @@
         (is (fs/regular-file?
              (fs/path project "swarmforge" "scripts" "agent-pre-commit.sh")))
         (is (fs/regular-file? (fs/path project ".git" "hooks" "pre-commit")))
+        (is (fs/regular-file?
+             (fs/path project "acceptance" "src" "test" "java" "com" "sgo"
+                      "acceptance" "AcceptanceRunner.java")))
+        (is (fs/regular-file?
+             (fs/path project "acceptance" "src" "test" "java" "com" "sgo"
+                      "acceptance" "StepHandlers.java")))
+        (is (fs/regular-file?
+             (fs/path project "scripts" "run-acceptance-tests.sh")))
+        (is (fs/executable?
+             (fs/path project "scripts" "run-acceptance-tests.sh")))
         (is (fs/regular-file? (fs/path project ".swarmforge" "single-agent")))
         (is (fs/regular-file?
              (fs/path project "swarmforge" "constitution" "articles"
@@ -68,6 +78,12 @@
         (is (str/includes?
              (slurp (str (fs/path project "stages.edn")))
              ":task \"agent\""))
+        (is (str/includes?
+             (slurp (str (fs/path project "stages.edn")))
+             "scripts/run-acceptance-tests.sh"))
+        (is (str/includes?
+             (slurp (str (fs/path project "stages.edn")))
+             "target/acceptance/acceptance.log"))
         (is (= "Java\n" (slurp (str (fs/path project "swarmforge" "language.conf")))))
         (is (str/includes?
              (slurp (str (fs/path project ".swarmforge" "roles.tsv")))
@@ -164,6 +180,8 @@
         (is (str/includes? stages ":profile :library"))
         (is (str/includes? stages ":task \"agent-lib\""))
         (is (str/includes? stages ":name \"verify\""))
+        (is (str/includes? stages "scripts/run-acceptance-tests.sh"))
+        (is (str/includes? stages "target/acceptance/acceptance.log"))
         (is (not (str/includes? stages ":name \"qa\""))))
       (let [listing (run-stage project "list")]
         (is (zero? (:exit listing)) (:err listing))

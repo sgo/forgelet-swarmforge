@@ -7,3 +7,18 @@ request at a time.
 
 The forge dashboard marks this project as single-agent and links to the
 project's own dashboard.
+
+## Acceptance
+
+The approved Gherkin is executed, not just translated into hand-written tests.
+`acceptance/src` carries the parser IR reader, the step dispatcher, and the
+per-scenario state. Add a `StepHandler` for every step shape; each handler
+calls the project's public API.
+
+```sh
+scripts/run-acceptance-tests.sh
+```
+
+The script compiles the harness separately from the Maven modules, so it works
+for a single module or a reactor. It writes `target/acceptance/acceptance.log`
+and fails on an unhandled or ambiguous step.

@@ -147,6 +147,10 @@
 - Prefer the Babashka APS tools for `gherkin-parser`, `ir-dry-checker`, `gherkin-mutator`, and related APS support commands.
 - Use Go-based APS tools only if the Babashka APS tools do not work in the current project environment.
 - Project-specific acceptance pipeline components are the acceptance entrypoint generator, acceptance runtime, project step handlers, runner adapter, and convenience scripts.
+- An approved feature is executed, not merely translated into hand-written tests. The project's
+  acceptance runner must parse every approved feature, dispatch every step to a handler that calls
+  the public behaviour, and fail on an unhandled or ambiguous step. Hand-written unit or property
+  tests are not acceptance evidence.
 - Gherkin acceptance mutation means running `gherkin-mutator` to mutate Gherkin example values.
 - Gherkin acceptance mutation runs must report periodic progress/status so agents can distinguish normal long-running work from a hang.
 

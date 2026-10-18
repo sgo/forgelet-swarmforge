@@ -19,6 +19,10 @@ Work in vertical slices: one public behaviour through every gate. Tests,
 cleanup, architecture, hardening and verification are part of that slice, not
 separate backlog items and not gates deferred to a later card.
 
+Approved Gherkin is executable. Every step has a handler under `acceptance/src`
+that calls the public API, and `scripts/run-acceptance-tests.sh` must pass.
+Hand-written JUnit is unit coverage, not acceptance evidence.
+
 End every turn with a line exactly `<<AGENT READY>>`, so the relay knows the
 turn is complete.
 

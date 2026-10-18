@@ -1,8 +1,9 @@
 # Stages — library profile
 
-This is a library project. It has no operator-facing acceptance scenarios, so
-the QA gate is replaced by an explicit **verify** stage. This is a deliberate
-profile, not an `n/a` that hides a skipped gate.
+This is a library project. Its Gherkin describes the public API's behaviour;
+there is no separate operator-facing QA gate, so those scenarios are executed
+by the explicit **verify** stage. This is a deliberate profile, not an `n/a`
+that hides a skipped gate.
 
 The shared engineering rules are in
 `swarmforge/constitution/articles/engineering.prompt`; read them before setting
@@ -29,8 +30,9 @@ spec -> code -> clean -> architect -> harden -> clean-final -> verify -> release
 Run `bb swarmforge/scripts/stage.bb list --root .` when you think the work is
 finished. `stage complete` refuses while any required stage is todo or stale.
 
-The template assumes a Maven reactor with an `architecture` module. Adjust the
-commands and evidence paths to the library before the first `stage check`.
+The template assumes a Maven reactor with an `architecture` module and the
+acceptance script under `scripts/`. Adjust the commands and evidence paths to
+the library before the first `stage check`.
 
 ## Specifier workflow
 
@@ -48,6 +50,11 @@ The template starts with no feature or task files; the specifier's first turn
 creates them. The default `:spec` bundle is `features/*.feature` plus
 `tasks/*.md`.
 
+Every approved step must be executable through the public API. The template
+ships `acceptance/src` with a runner and an empty handler list; add one
+handler per step shape and keep `scripts/run-acceptance-tests.sh` green. A
+step that can only be checked by reading source is not a scenario.
+
 - **spec**: the approved feature bundle. `stage propose spec <file>...` prints
   it; `stage approve <id> --words "<their
   words>"` records the exact answer. Approval is single-use and stale when the
@@ -59,9 +66,13 @@ creates them. The default `:spec` bundle is `features/*.feature` plus
 - **harden**: PIT with XML output; a survivor on a touched line blocks unless
   the project records why it is equivalent.
 - **clean-final**: the same clean check on the hardened tree.
-- **verify**: property tests. If the library publishes an API, add the
-  compatibility check (for example japicmp or revapi) to this stage, so a
-  binary or source incompatibility cannot pass as "no acceptance scenarios".
+- **verify**: property tests and the Gherkin acceptance suite.
+  `scripts/run-acceptance-tests.sh` parses every feature and dispatches every
+  step to a handler under `acceptance/src`; the handlers call the public API.
+  A missing handler, an ambiguous handler, or a failed assertion fails the
+  gate. If the library publishes an API, also add the compatibility check
+  (for example japicmp or revapi) to this stage, so a binary or source
+  incompatibility cannot pass unnoticed.
 - **release**: optional; `n/a` is not a pass for a release that was skipped.
 
 Do not create worktrees or hand work to another role. The project root is the
