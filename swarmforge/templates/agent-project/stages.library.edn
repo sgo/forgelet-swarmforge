@@ -1,0 +1,39 @@
+{:task "agent-project"
+ :profile :library
+ :stages
+ [{:name "spec"
+   :approval :operator
+   :spec "spec.md"
+   :stamp ["spec.md" "tasks"]}
+  {:name "code"
+   :runs [["mvn" "-q" "-Pwith-unit-tests" "verify"]]
+   :evidence ["target/surefire-reports/*.xml"]
+   :stamp [:sources]}
+  {:name "clean"
+   :runs [["crap4java" "--test-command" "mvn -q -Pwith-unit-tests test" "."]
+          ["dry4java" "--format" "edn" "src/main/java"]]
+   :evidence []
+   :stamp [:sources]}
+  {:name "architect"
+   :runs [["mvn" "-q" "-Pwith-unit-tests" "-pl" "architecture" "verify"]]
+   :evidence ["ARCHITECTURE.md"]
+   :stamp [:sources]}
+  {:name "harden"
+   :runs [["mvn" "-Pwith-mutation-tests"
+           "-DoutputFormats=XML,HTML" "verify"]]
+   :evidence ["target/pit-reports/mutations.xml"]
+   :stamp [:sources]}
+  {:name "clean-final"
+   :runs [["crap4java" "--test-command" "mvn -q -Pwith-unit-tests test" "."]
+          ["dry4java" "--format" "edn" "src/main/java"]]
+   :evidence []
+   :stamp [:sources]}
+  {:name "verify"
+   :runs [["mvn" "-q" "-Pwith-property-tests" "verify"]]
+   :evidence ["target/surefire-reports/*.xml"]
+   :stamp [:sources]}
+  {:name "release"
+   :optional true
+   :runs [["scripts/release_preflight.sh"]]
+   :evidence []
+   :stamp ["pom.xml"]}]}

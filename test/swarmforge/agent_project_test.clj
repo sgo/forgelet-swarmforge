@@ -30,7 +30,7 @@
 
 (defn state [project]
   (edn/read-string
-   (slurp (str (fs/path project ".swarmforge" "stages" "agent-project.edn")))))
+   (slurp (str (fs/path project ".swarmforge" "stages" "agent.edn")))))
 
 (defn run-stage [project & args]
   (apply run project
@@ -47,6 +47,10 @@
         (is (fs/regular-file? (fs/path project "stages.edn")))
         (is (fs/regular-file? (fs/path project "STAGES.md")))
         (is (fs/regular-file? (fs/path project ".swarmforge" "single-agent")))
+        (is (= "standard\n" (slurp (str (fs/path project ".swarmforge" "profile")))))
+        (is (str/includes?
+             (slurp (str (fs/path project "stages.edn")))
+             ":task \"agent\""))
         (is (= "Java\n" (slurp (str (fs/path project "swarmforge" "language.conf")))))
         (is (str/includes?
              (slurp (str (fs/path project ".swarmforge" "roles.tsv")))
@@ -122,5 +126,25 @@
           (let [url-file (fs/path project ".swarmforge" "dashboard-url")]
             (is (fs/regular-file? url-file))
             (is (str/starts-with? (slurp (str url-file)) "http://")))))
+      (finally
+        (fs/delete-tree forge)))))
+
+(deftest a-library-project-uses-the-verify-profile-instead-of-qa
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent-lib")]
+    (try
+      (let [run (run repo-root composer "--forge" (str forge)
+                     "--profile" "library" "agent-lib")]
+        (is (zero? (:exit run)) (:err run)))
+      (is (= "library\n" (slurp (str (fs/path project ".swarmforge" "profile")))))
+      (let [stages (slurp (str (fs/path project "stages.edn")))]
+        (is (str/includes? stages ":profile :library"))
+        (is (str/includes? stages ":task \"agent-lib\""))
+        (is (str/includes? stages ":name \"verify\""))
+        (is (not (str/includes? stages ":name \"qa\""))))
+      (let [listing (run-stage project "list")]
+        (is (zero? (:exit listing)) (:err listing))
+        (is (str/includes? (:out listing) "verify"))
+        (is (not (str/includes? (:out listing) "qa"))))
       (finally
         (fs/delete-tree forge)))))

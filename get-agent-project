@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: get-agent-project <project-name> [--forge <forge-root>]
+Usage: get-agent-project <project-name> [--forge <forge-root>] [--profile standard|library]
 
 Compose a single-agent project into an existing forge. The forge root defaults
 to the current directory when it has projects/ and swarmforge/scripts/.
@@ -19,12 +19,18 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 template_dir="$script_dir/swarmforge/templates/agent-project"
 forge_root=""
 name=""
+profile="standard"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --forge)
       [[ $# -ge 2 ]] || fail "--forge needs a directory"
       forge_root="$2"
+      shift 2
+      ;;
+    --profile)
+      [[ $# -ge 2 ]] || fail "--profile needs a name"
+      profile="$2"
       shift 2
       ;;
     -h|--help)
@@ -45,6 +51,10 @@ done
 [[ -n "$name" ]] || { usage >&2; exit 1; }
 [[ "$name" != *[!A-Za-z0-9._-]* ]] || fail "project name must be letters, digits, dot, dash or underscore"
 [[ -d "$template_dir" ]] || fail "template not found: $template_dir"
+case "$profile" in
+  standard|library) ;;
+  *) fail "unknown profile: $profile (use standard or library)" ;;
+esac
 
 if [[ -z "$forge_root" ]]; then
   forge_root="$(pwd)"
@@ -58,6 +68,14 @@ dest="$forge_root/projects/$name"
 
 mkdir -p "$dest"
 cp -R "$template_dir/." "$dest/"
+if [[ "$profile" == "library" ]]; then
+  mv "$dest/stages.library.edn" "$dest/stages.edn"
+  mv "$dest/STAGES.library.md" "$dest/STAGES.md"
+fi
+rm -f "$dest/stages.library.edn" "$dest/STAGES.library.md"
+sed "s/:task \"agent-project\"/:task \"$name\"/" "$dest/stages.edn" \
+  > "$dest/stages.edn.tmp"
+mv "$dest/stages.edn.tmp" "$dest/stages.edn"
 mkdir -p "$dest/swarmforge/scripts"
 cp -R "$forge_root/swarmforge/scripts/." "$dest/swarmforge/scripts/"
 chmod +x "$dest/swarm"
@@ -66,6 +84,7 @@ mkdir -p "$dest/.swarmforge"
 printf 'agent\tmaster\t%s\tagent\tAgent\tcodex\ttask\n' "$dest" \
   > "$dest/.swarmforge/roles.tsv"
 printf '%s\n' "$name" > "$dest/.swarmforge/single-agent"
+printf '%s\n' "$profile" > "$dest/.swarmforge/profile"
 
 if [[ ! -d "$dest/.git" ]]; then
   git init -q "$dest"
@@ -83,4 +102,5 @@ if [[ ! -d "$dest/.git" ]]; then
 fi
 
 printf 'Single-agent project created: %s\n' "$dest"
+printf 'Profile: %s\n' "$profile"
 printf 'Next: %s\n' "$dest/swarm"

@@ -131,8 +131,13 @@ answer. The command defaults to `codex exec --full-auto`; set
 `SWARMFORGE_AGENT_COMMAND` to use another agent. The runner never creates a
 worktree or a handoff.
 
-The per-project Matrix room is a later slice; the bridge still gives each forge
-one space with its family rooms.
+For a library, pass `--profile library`: the template replaces the acceptance
+QA gate with an explicit `verify` stage (property tests, plus the library's API
+compatibility check). That is a deliberate profile, not an `n/a` that hides a
+skipped gate.
+
+The bridge gives each single-agent project a room inside the forge's space. A
+forge needs a bridge build carrying that slice (`f95b54a` or later).
 
 ### Where your own things go
 
