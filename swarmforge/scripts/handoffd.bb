@@ -18,13 +18,6 @@
 (def once? false)
 (def project-root nil)
 (def script-dir (fs/parent *file*))
-
-;; The close guard below needs the shared handoff scan; the same load-file fallback the other
-;; scripts use, because the require only works when the scripts directory is on the classpath.
-(try
-  (require 'handoff-lib)
-  (catch Exception _
-    (load-file (str (fs/path script-dir "handoff_lib.bb")))))
 (def state-dir nil)
 (def daemon-dir nil)
 (def roles-file nil)
@@ -277,7 +270,7 @@
               name)))
         (read-lines (board-file))))
 
-(defn update-board! [roles headers path]
+(defn update-board! [roles headers]
   (when (and (fs/exists? (board-file))
              (= "git_handoff" (get headers "type"))
              (seq (recipient-list headers)))
@@ -292,20 +285,7 @@
       (doseq [key (terminal-task-keys roles headers)
               :let [name (or (board-name-for-key key) (get headers "task"))]]
         (when-not (str/blank? name)
-          ;; Before closing: a handoff of this task still travelling somewhere would be refused by
-          ;; the closed card afterwards, so the close itself is refused and the card stays open -
-          ;; that is what lets a revised candidate land (sgo/forgelet-forge#2). The daemon refuses
-          ;; where a person clicking the board's Close is only warned, which is the split recorded
-          ;; in this forge's backlog.
-          (let [travelling (handoff-lib/task-handoffs-travelling project-root name path)]
-            (if (seq travelling)
-              ;; Through the daemon's own log, not stderr: a daemon's operator looks in its log,
-              ;; and this message is the only sign that a card was deliberately left open.
-              (log! "close-refused" name
-                    (str "handoffs of this task are still travelling: "
-                         (str/join ", " (map (fn [[role file]] (str role " " file)) travelling))
-                         " - the card stays open so that candidate can travel"))
-              (pack-board! "done" "--name" name)))))
+          (pack-board! "done" "--name" name)))
 
       (non-forwarding? headers)
       nil
@@ -389,7 +369,7 @@
     (if-not recipients
       (fail! path "missing to header")
       (do
-        (update-board! roles headers path)
+        (update-board! roles headers)
         (doseq [recipient recipients]
           (let [role-info (get roles recipient)]
             (when-not role-info

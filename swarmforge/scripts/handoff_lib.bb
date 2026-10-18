@@ -160,43 +160,6 @@
       (println "BATCH_ITEM:" (inc index))
       (print-task file))))
 
-(def travelling-handoff-dirs
-  "Where a handoff is still travelling: waiting in an inbox, being worked, queued to leave, or
-  held for the operator's approval."
-  [["inbox" "new"] ["inbox" "in_process"] ["outbox"] ["pending_approval"]])
-
-(defn task-handoffs-travelling
-  "The handoffs naming this task that are still travelling, as [role path] pairs, across every role
-  worktree of the project whose root is given.
-
-  The reason this exists: a closed task accepts no further handoff, so a card that closes while a
-  revised candidate of the same task is still on its way can never take that candidate (the shape
-  recorded on 2026-10-16, sgo/forgelet-forge#2). The scan answers \"is something of this task still
-  travelling\" and says which role holds it; it deliberately does not try to work out which
-  candidate is newest, which is the other design the issue weighs."
-  ([root task] (task-handoffs-travelling root task nil))
-  ([root task except]
-   ;; `except` is the handoff whose own delivery is asking the question: it is still in its sender's
-   ;; outbox at that moment, so counting it would refuse every close there is.
-   (when-not (str/blank? task)
-     (let [roles-file (fs/path (str root) ".swarmforge" "roles.tsv")]
-       (when (fs/exists? roles-file)
-         (->> (str/split-lines (slurp (str roles-file)))
-              (map #(str/split % #"\t" -1))
-              (keep (fn [[role-name _ worktree]]
-                      (when (and (not-empty (str worktree)) (not-empty (str role-name)))
-                        (let [base (fs/path (str worktree) ".swarmforge" "handoffs")]
-                          (->> travelling-handoff-dirs
-                               (mapcat (fn [parts]
-                                         (handoff-files (apply fs/path (concat [base] parts)))))
-                               (filter (fn [file]
-                                         (and (not= (str file) (str except))
-                                              (= task (str/trim (str (or (header-field file "task") "")))))))
-                               (map (fn [file] [role-name (str file)])))))))
-              (apply concat)
-              (remove nil?)
-              vec))))))
-
 (defn archive-current-role! []
   (let [script (str (fs/path (fs/parent *file*) "pack_board.sh"))
         result (babashka.process/sh {:continue true}
