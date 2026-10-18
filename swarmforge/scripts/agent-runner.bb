@@ -161,12 +161,6 @@
        (filter #(= "pending" (:status %)))
        first))
 
-(defn project-env [root]
-  (assoc (into {} (System/getenv))
-         "PATH" (str (fs/path root ".swarmforge" "bin") ":"
-                     (fs/path root "swarmforge" "scripts") ":"
-                     (or (System/getenv "PATH") ""))))
-
 (def session-name "swarmforge-agent")
 (def ready-marker "<<AGENT READY>>")
 
@@ -306,19 +300,6 @@
             (Thread/sleep 250)
             (recur)))))))
 
-(defn stage-list [root]
-  (let [script (fs/path root "swarmforge" "scripts" "stage.bb")]
-    (if (fs/regular-file? script)
-      (let [result (sh/sh "bb" (str script) "list" "--root" (str root)
-                          :env (project-env root))]
-        (str (:out result) (:err result)))
-      "stage tool not found\n")))
-
-(defn answer-text [answer stage-status]
-  (str answer
-       "\n\n--- stage list ---\n"
-       stage-status))
-
 (defn answer-request! [root request text]
   (let [answer-dir (fs/path root ".swarmforge" "agent-runner")
         answer-file (fs/path answer-dir (str (:id request) ".answer"))]
@@ -340,9 +321,8 @@
       (println "request" (:id request))
       (wait-until-ready! root 5000)
       (let [marker (send-request! root request)
-            answer (wait-for-answer! root marker 600000)
-            text (answer-text answer (stage-list root))]
-        (answer-request! root request text)))
+            answer (wait-for-answer! root marker 600000)]
+        (answer-request! root request answer)))
     (println "no pending requests")))
 
 (defn -main [& args]

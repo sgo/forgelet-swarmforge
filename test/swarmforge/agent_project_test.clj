@@ -115,8 +115,7 @@
                                          "pending" "req-test.request"))))
           (let [answer (slurp (str (fs/path project ".swarmforge" "dashboard" "requests"
                                               "done" "req-test.request")))]
-            (is (str/includes? answer "Do the thing."))
-            (is (str/includes? answer "--- stage list ---")))))
+            (is (str/includes? answer "Do the thing.")))))
 
       (testing "a turn cannot complete while stages are stale"
         (write-file (fs/path project ".swarmforge" "dashboard" "requests" "pending"
@@ -131,7 +130,7 @@
           (is (zero? (:exit run)) (:err run))
           (let [answer (slurp (str (fs/path project ".swarmforge" "dashboard" "requests"
                                               "done" "req-complete.request")))]
-            (is (re-find #"clean\s+todo" answer)
+            (is (str/includes? answer "Try to complete.")
                 (str "answer was: " answer)))))
 
       (testing "the runner can own the project dashboard"
