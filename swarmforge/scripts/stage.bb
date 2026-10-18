@@ -196,6 +196,17 @@
             (for [file files]
               (str "--- " file " ---\n" (slurp (str (fs/path root file)))))))
 
+(defn spec-approved? [root config state]
+  (let [stage (some #(when (= "spec" (:name %)) %) (:stages config))
+        spec (or (:spec stage) (:file stage))
+        files (when spec (spec-files root spec))
+        hash (when (seq files) (spec-hash root files))]
+    (boolean
+     (and hash
+          (some #(and (= :approved (:status %))
+                      (= hash (:hash %)))
+                (vals (:proposals state)))))))
+
 (defn maven-modules [root]
   (let [pom (fs/path root "pom.xml")]
     (when (fs/regular-file? pom)
@@ -386,6 +397,7 @@
       :tree tree
       :head-tree head
       :clean (= tree head)
+      :spec_approved (spec-approved? root config state)
       :complete (get-in state [:complete :tree])
       :stages (mapv (fn [stage]
                       {:name (:name stage)

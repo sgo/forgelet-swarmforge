@@ -44,6 +44,7 @@ creates them. The default `:spec` bundle is `features/*.feature` plus
   it; `stage approve <id> --words "<their
   words>"` records the exact answer. Approval is single-use and stale when the
   bundle changes.
+  The pre-commit hook refuses a commit until the current bundle is approved.
 - **code**: `mvn -Pwith-unit-tests verify`.
 - **clean**: CRAP at or below 6 and DRY deltas against the task's base commit.
 - **architect**: invariant tests plus `ARCHITECTURE.md`; refactoring only.

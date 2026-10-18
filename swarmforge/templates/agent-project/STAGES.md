@@ -44,6 +44,7 @@ creates them. The default `:spec` bundle is `features/*.feature` plus
   the proposal; `stage approve <id> --words
   "<their words>"` records the exact answer. Approval is single-use and stale
   when any file in the bundle changes.
+  The pre-commit hook refuses a commit until the current bundle is approved.
 - **code**: `mvn -Pwith-unit-tests verify`.
 - **clean**: `crap4java` for CRAP and `dry4java` for duplicate pairs. The
   project's CRAP ceiling is 6; DRY and mutation are deltas against the task's

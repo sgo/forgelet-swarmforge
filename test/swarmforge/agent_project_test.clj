@@ -57,6 +57,8 @@
         (is (fs/regular-file? (fs/path project "stages.edn")))
         (is (fs/regular-file? (fs/path project "STAGES.md")))
         (is (fs/regular-file? (fs/path project "AGENTS.md")))
+        (is (fs/regular-file? (fs/path project ".git-hooks" "pre-commit")))
+        (is (fs/regular-file? (fs/path project ".git" "hooks" "pre-commit")))
         (is (fs/regular-file? (fs/path project ".swarmforge" "single-agent")))
         (is (fs/regular-file?
              (fs/path project "swarmforge" "constitution" "articles"
@@ -186,6 +188,30 @@
         (is (zero? (:exit stop)) (:err stop)))
       (is (not (zero? (:exit (sh/sh "tmux" "-S" sock "has-session" "-t" "swarmforge-agent")))))
       (is (not (fs/exists? pointer)))
+      (finally
+        (stop-agent-session! project)
+        (fs/delete-tree forge)))))
+
+(deftest a-commit-before-the-spec-is-approved-is-refused
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent")]
+    (try
+      (run repo-root composer "--forge" (str forge) "agent")
+      (write-file (fs/path project "README.md") "changed\n")
+      (sh/sh "git" "-C" (str project) "add" "README.md")
+      (let [commit (sh/sh "git" "-C" (str project) "commit" "-m" "try")]
+        (is (not (zero? (:exit commit))))
+        (is (str/includes? (str (:err commit) (:out commit)) "Commit refused")))
+      (write-file (fs/path project "features" "agent.feature")
+                  "Feature: agent\n\n  Scenario: agent\n    Given a card\n")
+      (write-file (fs/path project "tasks" "agent.md")
+                  "# agent\n\n## Operator-observed problem\n\nA card.\n")
+      (run-stage project "propose" "spec" "features/*.feature" "tasks/*.md")
+      (let [id (-> (state project) :proposals vals first :id)]
+        (is (zero? (:exit (run-stage project "approve" id "--words" "approve")))))
+      (sh/sh "git" "-C" (str project) "add" "-A")
+      (let [commit (sh/sh "git" "-C" (str project) "commit" "-m" "approved spec")]
+        (is (zero? (:exit commit)) (:err commit)))
       (finally
         (stop-agent-session! project)
         (fs/delete-tree forge)))))

@@ -106,6 +106,12 @@ if [[ ! -d "$dest/.git" ]]; then
   fi
 fi
 
+mkdir -p "$dest/.git/hooks"
+if [[ -f "$dest/.git-hooks/pre-commit" ]]; then
+  cp "$dest/.git-hooks/pre-commit" "$dest/.git/hooks/pre-commit"
+  chmod +x "$dest/.git/hooks/pre-commit"
+fi
+
 printf 'Single-agent project created: %s\n' "$dest"
 printf 'Profile: %s\n' "$profile"
 printf 'Next: %s\n' "$dest/swarm"

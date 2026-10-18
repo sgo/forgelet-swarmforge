@@ -22,5 +22,8 @@ When an operator message arrives with `[phone <id>]`, write only the
 operator-facing answer to `./tmp/answer.txt` and run the `Answer with:`
 command. Your terminal output is not sent to the phone.
 
+A pre-commit hook refuses commits until the current spec bundle is approved.
+Do not use `--no-verify`; run `stage propose spec` and `stage approve` first.
+
 Do not create worktrees or hand work to another role. The project root is the
 checkout.
