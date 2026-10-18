@@ -15,8 +15,10 @@
        "--stop closes the relay and the agent session; --stop-agent closes only\n"
        "the agent session.\n\n"
        "The relay owns one persistent tmux session, swarmforge-agent. Phone\n"
-       "requests are pasted into that session; forge-attach opens the same\n"
-       "session. The agent must end every turn with <<AGENT READY>>."))
+       "requests are pasted into that session with an Answer with instruction;\n"
+       "the agent writes ./tmp/answer.txt and answers through the dashboard\n"
+       "tool. forge-attach opens the same session. The agent must end every\n"
+       "turn with <<AGENT READY>>."))
 
 (defn usage []
   (println usage-text))
@@ -269,49 +271,31 @@
         :else (do (Thread/sleep 250) (recur))))))
 
 (defn send-request! [root request]
-  (let [marker (str "[phone " (:id request) "]")
-        text (str marker " " (:body request))]
+  (let [id (:id request)
+        text (str "[phone " id "] " (:body request) "\n\n"
+                  "Answer with: "
+                  (fs/path root "swarmforge" "scripts" "pack_dashboard_request.sh")
+                  " answer " id " ./tmp/answer.txt\n"
+                  "Write only the operator-facing answer to ./tmp/answer.txt. "
+                  "Your terminal output is not sent to the phone.")]
     (tmux root "set-buffer" "-b" "agent-request" text)
     (tmux root "paste-buffer" "-d" "-p" "-b" "agent-request"
           "-t" session-name)
     (tmux root "send-keys" "-t" session-name "C-m")
-    marker))
+    id))
 
-(defn answer-since [text marker]
-  (when-let [start (str/last-index-of text marker)]
-    (let [after (subs text (+ start (count marker)))
-          end (str/index-of after ready-marker)]
-      (when end
-        (str/trim (subs after 0 end))))))
+(defn request-done? [root id]
+  (fs/regular-file?
+   (fs/path root ".swarmforge" "dashboard" "requests" "done"
+            (str id ".request"))))
 
-(defn wait-for-answer! [root marker timeout-ms]
+(defn wait-for-done! [root id timeout-ms]
   (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
     (loop []
-      (let [text (or (pane root) "")
-            answer (answer-since text marker)]
-        (cond
-          (some? answer) answer
-          (> (System/currentTimeMillis) deadline)
-          (str "The agent did not signal " ready-marker " within "
-               (quot timeout-ms 1000) "s. Last pane lines:\n"
-               (str/join "\n" (take-last 20 (str/split-lines text))))
-          :else
-          (do
-            (Thread/sleep 250)
-            (recur)))))))
-
-(defn answer-request! [root request text]
-  (let [answer-dir (fs/path root ".swarmforge" "agent-runner")
-        answer-file (fs/path answer-dir (str (:id request) ".answer"))]
-    (fs/create-dirs answer-dir)
-    (spit (str answer-file) text)
-    (let [script (fs/path root "swarmforge" "scripts" "pack_dashboard_request.bb")
-          result (sh/sh "bb" (str script) "answer" (:id request) (str answer-file)
-                        :dir (str root))]
-      (when-not (zero? (:exit result))
-        (exit! 1 (str "Could not answer " (:id request) ": "
-                      (:err result) (:out result))))
-      (println "answered" (:id request)))))
+      (cond
+        (request-done? root id) true
+        (> (System/currentTimeMillis) deadline) false
+        :else (do (Thread/sleep 500) (recur))))))
 
 (defn run-once! [root agent-command]
   (start-agent-session! root agent-command)
@@ -320,9 +304,10 @@
     (do
       (println "request" (:id request))
       (wait-until-ready! root 5000)
-      (let [marker (send-request! root request)
-            answer (wait-for-answer! root marker 600000)]
-        (answer-request! root request answer)))
+      (send-request! root request)
+      (if (wait-for-done! root (:id request) 600000)
+        (println "answered" (:id request))
+        (println "still pending after timeout:" (:id request))))
     (println "no pending requests")))
 
 (defn -main [& args]

@@ -18,5 +18,9 @@ template.
 End every turn with a line exactly `<<AGENT READY>>`, so the relay knows the
 turn is complete.
 
+When an operator message arrives with `[phone <id>]`, write only the
+operator-facing answer to `./tmp/answer.txt` and run the `Answer with:`
+command. Your terminal output is not sent to the phone.
+
 Do not create worktrees or hand work to another role. The project root is the
 checkout.

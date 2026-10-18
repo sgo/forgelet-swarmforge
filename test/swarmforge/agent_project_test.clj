@@ -44,6 +44,9 @@
   (sh/sh "tmux" "-S" (str (fs/path project ".swarmforge" "agent-tmux.sock"))
          "kill-server"))
 
+(def fake-agent-command
+  "sh -c 'echo \"<<AGENT READY>>\"; while IFS= read -r line; do case \"$line\" in \"[phone \"*) id=${line#\\[phone }; id=${id%%]*}; mkdir -p tmp; printf \"fake answer from %s\\n\" \"$id\" > tmp/answer.txt; ./swarmforge/scripts/pack_dashboard_request.sh answer \"$id\" ./tmp/answer.txt; echo \"<<AGENT READY>>\";; esac; done'")
+
 (deftest a-single-agent-project-composes-and-walks-the-template
   (let [forge (fixture-forge)
         project (fs/path forge "projects" "agent")]
@@ -108,14 +111,13 @@
                        "bb" (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
                        "--root" (str project)
                        "--once" "--no-serve"
-                       "--agent-command"
-                       "sh -c 'echo \"<<AGENT READY>>\"; while IFS= read -r line; do printf \"answer: %s\\n<<AGENT READY>>\\n\" \"$line\"; done'")]
+                       "--agent-command" fake-agent-command)]
           (is (zero? (:exit run)) (:err run))
           (is (not (fs/exists? (fs/path project ".swarmforge" "dashboard" "requests"
                                          "pending" "req-test.request"))))
           (let [answer (slurp (str (fs/path project ".swarmforge" "dashboard" "requests"
                                               "done" "req-test.request")))]
-            (is (str/includes? answer "Do the thing.")))))
+            (is (str/includes? answer "fake answer from req-test")))))
 
       (testing "a turn cannot complete while stages are stale"
         (write-file (fs/path project ".swarmforge" "dashboard" "requests" "pending"
@@ -125,12 +127,11 @@
                        "bb" (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
                        "--root" (str project)
                        "--once" "--no-serve"
-                       "--agent-command"
-                       "sh -c 'echo \"<<AGENT READY>>\"; while IFS= read -r line; do bb swarmforge/scripts/stage.bb complete --root . 2>&1 || true; echo \"<<AGENT READY>>\"; done'")]
+                       "--agent-command" fake-agent-command)]
           (is (zero? (:exit run)) (:err run))
           (let [answer (slurp (str (fs/path project ".swarmforge" "dashboard" "requests"
                                               "done" "req-complete.request")))]
-            (is (str/includes? answer "Try to complete.")
+            (is (str/includes? answer "fake answer from req-complete")
                 (str "answer was: " answer)))))
 
       (testing "the runner can own the project dashboard"
