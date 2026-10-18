@@ -2004,12 +2004,13 @@
                            "<profiles><profile><id>with-release-tests</id>"
                            "<properties><skipTests>false</skipTests></properties></profile></profiles>\n"
                            "</project>\n"))
-      ;; A Maven that fails the way a real one can: the JVM warning first, the real reason after
-      ;; it. Reporting the last line is what made the failure read as a warning.
+      ;; A Maven that fails the way a real one does, and that is the point: its [ERROR] goes to
+      ;; **stdout** and stderr carries only the JVM warning. An earlier fixture wrote both to stderr,
+      ;; so a helper reading stderr passed the test and named a warning on the real thing (#8).
       (let [fake-mvn (fs/path fake-bin "mvn")]
         (write-file fake-mvn (str "#!/bin/sh\n"
+                                  "echo '[ERROR] Failed to execute goal on project demo: Could not resolve dependencies'\n"
                                   "echo 'WARNING: sun.misc.Unsafe::objectFieldOffset has been called' >&2\n"
-                                  "echo '[ERROR] Failed to execute goal on project demo: Could not resolve dependencies' >&2\n"
                                   "exit 1\n"))
         (run {:dir fake-bin} "chmod" "+x" (str fake-mvn)))
       (run {:dir root} "git" "add" "-A")

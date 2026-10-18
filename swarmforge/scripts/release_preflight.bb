@@ -124,14 +124,28 @@
        sort
        vec))
 
-(defn last-meaningful-line
-  "The last line of a failed command's stderr worth reading. Maven's warnings are not why a build
-  stopped, and reporting one of those is how an unchecked snapshot check came to read as a JVM
-  warning rather than as a check that never ran."
-  [text]
-  (let [lines (->> (str/split-lines (or text "")) (map str/trim) (remove str/blank?))
-        informative (remove #(str/starts-with? % "WARNING:") lines)]
-    (or (last informative) (last lines) "no message")))
+(def ^:private maven-advice
+  "Maven's `[ERROR]` lines that are advice rather than the failure: the last of these is what a
+  reader who took \"the last [ERROR] line\" literally would be handed."
+  ["[ERROR] To see the full stack trace"
+   "[ERROR] Re-run Maven using"
+   "[ERROR] For more information about the errors"
+   "[ERROR] [Help"])
+
+(defn failure-reason
+  "Why a failed command stopped, read as Maven actually writes: `[ERROR]` lines go to **stdout**,
+  and stderr carries only the JVM's warnings. Reading stderr alone reports a warning - which is how
+  a NOT READY once named `sun.misc.Unsafe` instead of the dependency that would not resolve - and a
+  fixture whose stand-in wrote its error to stderr hid that. The last informative `[ERROR]` wins, then
+  the last non-warning line of either stream."
+  [{:keys [out err]}]
+  (let [lines (fn [text] (->> (str/split-lines (or text "")) (map str/trim) (remove str/blank?)))
+        out-lines (lines out)
+        err-lines (lines err)
+        errors (remove (fn [line] (some #(str/starts-with? line %) maven-advice))
+                       (filter #(str/starts-with? % "[ERROR]") out-lines))
+        non-warnings (remove #(str/starts-with? % "WARNING:") (concat out-lines err-lines))]
+    (or (last errors) (last non-warnings) (last err-lines) (last out-lines) "no message")))
 
 (defn maven-resolved-snapshots
   "The same question asked of Maven, which also sees versions held in properties. Returns
@@ -156,7 +170,7 @@
             {:checked true :snapshots coords})
           {:checked false
            :why (str "mvn dependency:list did not run (exit " (:exit result) ": "
-                     (last-meaningful-line (:err result)) ")")}))
+                     (failure-reason result) ")")}))
       (catch Exception e
         {:checked false :why (str "mvn is not available here (" (.getMessage e) ")")})
       (finally
