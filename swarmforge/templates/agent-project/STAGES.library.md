@@ -4,6 +4,10 @@ This is a library project. It has no operator-facing acceptance scenarios, so
 the QA gate is replaced by an explicit **verify** stage. This is a deliberate
 profile, not an `n/a` that hides a skipped gate.
 
+The shared engineering rules are in
+`swarmforge/constitution/articles/engineering.prompt`; read them before setting
+up or changing the build.
+
 ```
 spec -> code -> clean -> architect -> harden -> clean-final -> verify -> release?
 ```

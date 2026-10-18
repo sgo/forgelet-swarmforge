@@ -78,6 +78,11 @@ sed "s/:task \"agent-project\"/:task \"$name\"/" "$dest/stages.edn" \
 mv "$dest/stages.edn.tmp" "$dest/stages.edn"
 mkdir -p "$dest/swarmforge/scripts"
 cp -R "$forge_root/swarmforge/scripts/." "$dest/swarmforge/scripts/"
+mkdir -p "$dest/swarmforge/constitution/articles"
+if [[ -f "$forge_root/swarmforge/constitution/articles/engineering.prompt" ]]; then
+  cp "$forge_root/swarmforge/constitution/articles/engineering.prompt" \
+     "$dest/swarmforge/constitution/articles/engineering.prompt"
+fi
 chmod +x "$dest/swarm"
 
 mkdir -p "$dest/.swarmforge"

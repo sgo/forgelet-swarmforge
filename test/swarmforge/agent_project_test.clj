@@ -26,6 +26,9 @@
     (fs/copy-tree (fs/path repo-root "swarmforge" "scripts")
                   (fs/path forge "swarmforge" "scripts")
                   {:replace-existing true})
+    (write-file (fs/path forge "swarmforge" "constitution" "articles"
+                          "engineering.prompt")
+                "engineering\n")
     forge))
 
 (defn state [project]
@@ -46,7 +49,11 @@
           (is (zero? (:exit first-run)) (:err first-run)))
         (is (fs/regular-file? (fs/path project "stages.edn")))
         (is (fs/regular-file? (fs/path project "STAGES.md")))
+        (is (fs/regular-file? (fs/path project "AGENTS.md")))
         (is (fs/regular-file? (fs/path project ".swarmforge" "single-agent")))
+        (is (fs/regular-file?
+             (fs/path project "swarmforge" "constitution" "articles"
+                      "engineering.prompt")))
         (is (= "standard\n" (slurp (str (fs/path project ".swarmforge" "profile")))))
         (is (str/includes?
              (slurp (str (fs/path project "stages.edn")))

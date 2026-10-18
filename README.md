@@ -136,6 +136,11 @@ into `tasks/<name>.md` and `features/<name>.feature`, validates the Gherkin,
 and proposes the feature for the operator's approval. The operator does not
 fill a template.
 
+The project carries an `AGENTS.md` that points at `STAGES.md` and the forge's
+copied `swarmforge/constitution/articles/engineering.prompt`, so the build,
+quality, release and deployment rules travel with the project rather than
+being repeated in every operator request.
+
 For a library, pass `--profile library`: the template replaces the acceptance
 QA gate with an explicit `verify` stage (property tests, plus the library's API
 compatibility check). That is a deliberate profile, not an `n/a` that hides a

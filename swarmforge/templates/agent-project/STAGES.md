@@ -3,6 +3,10 @@
 This project is run by one agent. The stages are gates in tooling, not
 handoffs: the next one refuses while an earlier one is stale.
 
+The shared engineering rules are in
+`swarmforge/constitution/articles/engineering.prompt`; read them before setting
+up or changing the build.
+
 ```
 spec -> code -> clean -> architect -> harden -> clean-final -> qa -> release?
 ```
