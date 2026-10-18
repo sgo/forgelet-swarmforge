@@ -276,14 +276,11 @@
 
 (defn send-request! [root request]
   (let [marker (str "[phone " (:id request) "]")
-        file (fs/create-temp-file {:prefix "agent-request."})]
-    (spit (str file) (str marker " " (:body request)))
-    (try
-      (tmux root "load-buffer" "-b" "agent-request" (str file))
-      (tmux root "paste-buffer" "-b" "agent-request" "-t" session-name)
-      (tmux root "send-keys" "-t" session-name "C-m")
-      (finally
-        (fs/delete-if-exists file)))
+        text (str marker " " (:body request))]
+    (tmux root "set-buffer" "-b" "agent-request" text)
+    (tmux root "paste-buffer" "-d" "-p" "-b" "agent-request"
+          "-t" session-name)
+    (tmux root "send-keys" "-t" session-name "C-m")
     marker))
 
 (defn answer-since [text marker]

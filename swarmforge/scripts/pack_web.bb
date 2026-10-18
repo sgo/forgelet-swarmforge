@@ -1121,7 +1121,8 @@
         text (or text "")]
     (when-not (str/blank? text)
       (let [id (write-chat-request! root text)]
-        (inject-master! root (chat-wake id text))))
+        (when-not (single-agent-project? root)
+          (inject-master! root (chat-wake id text)))))
     (json-ok)))
 
 (defn clar-pending-file [root id]
