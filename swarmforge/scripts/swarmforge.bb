@@ -435,6 +435,7 @@
          "- Receive with `ready_for_next.sh`. Send with `swarm_handoff.sh ./tmp/<draft>`.\n"
          "- Do not search the tree or `$HOME` for those scripts.\n"
          "- Do not invoke helpers as `./swarmforge/scripts/...`. They are already on PATH.\n"
+         "- First, run `command -v ready_for_next.sh`. If it is not found, report that in this pane and do not guess a path: a Codex command shell can be served by an environment that never saw the role's PATH, and the operator needs to know that rather than have the workaround invented quietly.\n"
          "- Board cards live in `.swarmforge/board/tasks.tsv`. Use that card name as `task:`.\n"
          "- Operator task documents live in `tasks/<task-name>.md`. Re-read that file as operator intent. The master agent commits it with the task's first git work.\n"
          "- A retry audit may include remedial comments on named documents. Read those comments as findings.\n"

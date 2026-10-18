@@ -137,6 +137,30 @@ The project-facing half of that table has a manual of its own:
 [what a project owns](docs/what-a-project-owns.md) — what each file is for, what reads it,
 and what to do when it is missing.
 
+### The agent's command shell, and where the helpers come from
+
+A Codex agent's command shell can be served by its app-server daemon, which hands the shell its
+*own* environment rather than the role's. The symptom is specific and misleading: the agent process
+has the forge's helper directories on `PATH` (visible with `ps eww`), while the shell answers
+`ready_for_next.sh: command not found`, and a role that works around it by prepending the path to
+every command is hiding the fact rather than reporting it. The daemon outlives the role, so a
+machine that worked at one session can fail at the next with nothing changed in the tree.
+
+Two mechanisms in this layer make a tree's helpers reachable whichever process spawns the shell,
+and both derive the tree from the working directory rather than from anything inherited:
+
+- the shell profile adds `$PWD/swarmforge/local-scripts`, `$PWD/.swarmforge/bin` and
+  `$PWD/swarmforge/scripts` when the working directory is a forge tree, for shells that read the
+  profile at all;
+- small dispatchers linked into `~/.local/bin` — a directory the daemon's environment does carry —
+  resolve the named helper from the shell's current directory, and say so plainly when a shell is
+  not in a forge tree. They are installed by `devbox/forge-helpers/install.sh` from `sgo/forgelet-forge`,
+  which the dev box's bootstrap runs and checks. A shell already holding its tree's directories on
+  `PATH` finds the real script first; the dispatchers are the fallback for shells that do not.
+
+Because both are per-directory, a worktree, a project root and a forge root each reach their own
+scripts, and no session can reach another forge's.
+
 ### Update a forge
 
 Run the same command in the forge again. It updates in place, and it is worth
