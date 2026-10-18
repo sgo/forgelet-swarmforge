@@ -173,11 +173,21 @@
 (defn sq [value]
   (str "'" (str/replace (str value) "'" "'\"'\"'") "'"))
 
-(defn tmux-socket [root]
+(defn agent-socket [root]
+  (fs/path root ".swarmforge" "agent-tmux.sock"))
+
+(defn socket-file [root]
   (fs/path root ".swarmforge" "tmux-socket"))
 
+(defn delete-socket-file! [root]
+  (let [file (socket-file root)]
+    (when (fs/exists? file)
+      (if (fs/regular-file? file)
+        (fs/delete-if-exists file)
+        (sh/sh "unlink" (str file))))))
+
 (defn tmux [root & args]
-  (apply sh/sh "tmux" "-S" (str (tmux-socket root)) args))
+  (apply sh/sh "tmux" "-S" (str (agent-socket root)) args))
 
 (defn session? [root]
   (zero? (:exit (tmux root "has-session" "-t" session-name))))
@@ -205,6 +215,10 @@
 (defn start-agent-session! [root command]
   (when-not (session? root)
     (fs/create-dirs (fs/path root ".swarmforge"))
+    (when (and (fs/exists? (socket-file root))
+               (not (fs/regular-file? (socket-file root))))
+      (delete-socket-file! root))
+    (spit (str (socket-file root)) (str (agent-socket root) "\n"))
     (let [result (tmux root "new-session" "-d" "-s" session-name
                        "-c" (str root)
                        (str "export PATH=" (sq (str (fs/path root ".swarmforge" "bin")
@@ -249,7 +263,8 @@
     (do
       (tmux root "kill-session" "-t" session-name)
       (println "Stopped agent session" session-name))
-    (println "Agent session is not running")))
+    (println "Agent session is not running"))
+  (delete-socket-file! root))
 
 (defn wait-until-ready! [root timeout-ms]
   (let [deadline (+ (System/currentTimeMillis) timeout-ms)]

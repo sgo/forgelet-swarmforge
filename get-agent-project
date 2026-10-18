@@ -86,7 +86,7 @@ fi
 chmod +x "$dest/swarm"
 
 mkdir -p "$dest/.swarmforge"
-printf 'agent\tmaster\t%s\tagent\tAgent\tcodex\ttask\n' "$dest" \
+printf 'agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n' "$dest" \
   > "$dest/.swarmforge/roles.tsv"
 printf '%s\n' "$name" > "$dest/.swarmforge/single-agent"
 printf '%s\n' "$profile" > "$dest/.swarmforge/profile"

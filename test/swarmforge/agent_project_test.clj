@@ -41,7 +41,7 @@
          (concat args ["--root" (str project)])))
 
 (defn stop-agent-session! [project]
-  (sh/sh "tmux" "-S" (str (fs/path project ".swarmforge" "tmux-socket"))
+  (sh/sh "tmux" "-S" (str (fs/path project ".swarmforge" "agent-tmux.sock"))
          "kill-server"))
 
 (deftest a-single-agent-project-composes-and-walks-the-template
@@ -65,7 +65,7 @@
         (is (= "Java\n" (slurp (str (fs/path project "swarmforge" "language.conf")))))
         (is (str/includes?
              (slurp (str (fs/path project ".swarmforge" "roles.tsv")))
-             (str "agent\tmaster\t" project)))
+             (str "agent\tmaster\t" project "\tswarmforge-agent")))
         (let [second-run (run repo-root composer "--forge" (str forge) "agent")]
           (is (not (zero? (:exit second-run))))
           (is (str/includes? (:err second-run) "already exists"))))
@@ -173,9 +173,11 @@
 (deftest stop-closes-the-agent-session
   (let [forge (fixture-forge)
         project (fs/path forge "projects" "agent")
-        sock (str (fs/path project ".swarmforge" "tmux-socket"))]
+        sock (str (fs/path project ".swarmforge" "agent-tmux.sock"))
+        pointer (fs/path project ".swarmforge" "tmux-socket")]
     (try
       (run repo-root composer "--forge" (str forge) "agent")
+      (spit (str pointer) (str sock "\n"))
       (sh/sh "tmux" "-S" sock "new-session" "-d" "-s" "swarmforge-agent" "sleep" "60")
       (is (zero? (:exit (sh/sh "tmux" "-S" sock "has-session" "-t" "swarmforge-agent"))))
       (let [stop (run project
@@ -183,6 +185,7 @@
                       "--root" (str project) "--stop")]
         (is (zero? (:exit stop)) (:err stop)))
       (is (not (zero? (:exit (sh/sh "tmux" "-S" sock "has-session" "-t" "swarmforge-agent")))))
+      (is (not (fs/exists? pointer)))
       (finally
         (stop-agent-session! project)
         (fs/delete-tree forge)))))
