@@ -14,8 +14,8 @@
    :stages
    [{:name "spec"
      :approval :operator
-     :spec "spec.md"
-     :stamp ["spec.md"]}
+     :spec ["spec.md" "features/extra.feature"]
+     :stamp ["spec.md" "features"]}
     {:name "code"
      :runs [["sh" "-c" "mkdir -p target && echo code > target/code.txt"]]
      :evidence ["target/code.txt"]
@@ -72,6 +72,8 @@
     (write-file (fs/path root "core" "src" "test" "MainTest.java")
                 "class MainTest {}\n")
     (write-file (fs/path root "spec.md") "# Fixture spec\n\nA fixture.\n")
+    (write-file (fs/path root "features" "extra.feature")
+                "Feature: extra\n\n  Scenario: extra\n    Given a fixture\n")
     (write-file (fs/path root "stages.edn") (pr-str stage-config))
     (sh/sh "git" "add" "-A" :dir (str root))
     (sh/sh "git" "commit" "-q" "-m" "fixture" :dir (str root))
@@ -81,7 +83,8 @@
   (let [root (fixture)]
     (try
       (testing "the spec is proposed and approved"
-        (let [propose (run-stage root "propose" "spec" "spec.md")]
+        (let [propose (run-stage root "propose" "spec"
+                                 "spec.md" "features/extra.feature")]
           (is (zero? (:exit propose)) (:err propose))
           (is (str/includes? (:out propose) "spec proposal")))
         (let [approve (run-stage root "approve" (latest-proposal-id root)
@@ -131,7 +134,7 @@
 (deftest approval-is-single-use-and-tied-to-the-spec
   (let [root (fixture)]
     (try
-      (run-stage root "propose" "spec" "spec.md")
+      (run-stage root "propose" "spec" "spec.md" "features/extra.feature")
       (let [id (latest-proposal-id root)]
         (is (zero? (:exit (run-stage root "approve" id "--words" "approve"))))
         (let [again (run-stage root "approve" id "--words" "approve")]
@@ -147,7 +150,7 @@
           (is (str/includes? (:err result) "spec"))))
 
       (testing "a changed spec cannot be approved from the old proposal"
-        (run-stage root "propose" "spec" "spec.md")
+        (run-stage root "propose" "spec" "spec.md" "features/extra.feature")
         (let [pending (latest-proposal-id root)]
           (write-file (fs/path root "spec.md") "# Changed again\n")
           (let [result (run-stage root "approve" pending "--words" "approve")]

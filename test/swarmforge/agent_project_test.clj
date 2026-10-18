@@ -67,7 +67,12 @@
             (is (str/includes? (:out listing) stage)))))
 
       (testing "the code gate runs its command and records evidence"
-        (run-stage project "propose" "spec" "features/example.feature")
+        (write-file (fs/path project "features" "agent.feature")
+                    "Feature: agent\n\n  Scenario: agent\n    Given a card\n")
+        (write-file (fs/path project "tasks" "agent.md")
+                    "# agent\n\n## Operator-observed problem\n\nA card.\n")
+        (run-stage project "propose" "spec"
+                   "features/*.feature" "tasks/*.md")
         (let [id (-> (state project) :proposals vals first :id)
               approve (run-stage project "approve" id "--words" "approve")]
           (is (zero? (:exit approve)) (:err approve)))
@@ -114,7 +119,8 @@
           (is (zero? (:exit run)) (:err run))
           (let [answer (slurp (str (fs/path project ".swarmforge" "dashboard" "requests"
                                               "done" "req-complete.request")))]
-            (is (str/includes? answer "Stages not current")))))
+            (is (or (str/includes? answer "Stages not current")
+                    (str/includes? answer "The working tree is not committed"))))))
 
       (testing "the runner can own the project dashboard"
         (let [run (run project

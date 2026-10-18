@@ -18,17 +18,22 @@ commands and evidence paths to the library before the first `stage check`.
 
 The operator gives a card or chat request with the observed problem. You are
 the specifier: read `mission.md` and the public API, then write
-`tasks/<name>.md` and `features/<name>.feature`. The Gherkin describes the
-library's public behaviour, not a user interface. Prune it, run
-`gherkin-parser` and `ir-dry-checker`, and then run `stage propose spec
-features/<name>.feature`. The operator approves the exact Gherkin; they do not
-fill a template. Ask when the request is ambiguous; otherwise write the
-specification yourself and continue as the same agent.
+`tasks/<name>.md` and one or more `features/<name>*.feature` files. The Gherkin
+describes the library's public behaviour, not a user interface. Prune it, run
+`gherkin-parser` and `ir-dry-checker`, list every feature file and the task
+note in `:spec`, and then run `stage propose spec <file>...`. The operator
+approves the exact bundle; they do not fill a template. Ask when the request is
+ambiguous; otherwise write the specification yourself and continue as the same
+agent.
 
-- **spec**: the approved feature file. `stage propose spec
-  features/<name>.feature` prints it; `stage approve <id> --words "<their
+The template starts with no feature or task files; the specifier's first turn
+creates them. The default `:spec` bundle is `features/*.feature` plus
+`tasks/*.md`.
+
+- **spec**: the approved feature bundle. `stage propose spec <file>...` prints
+  it; `stage approve <id> --words "<their
   words>"` records the exact answer. Approval is single-use and stale when the
-  feature changes.
+  bundle changes.
 - **code**: `mvn -Pwith-unit-tests verify`.
 - **clean**: CRAP at or below 6 and DRY deltas against the task's base commit.
 - **architect**: invariant tests plus `ARCHITECTURE.md`; refactoring only.

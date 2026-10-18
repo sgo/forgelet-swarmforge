@@ -17,7 +17,7 @@
   (str "Usage:\n"
        "  stage list [--root DIR]\n"
        "  stage check <name> [--root DIR]\n"
-       "  stage propose spec <file> [--root DIR]\n"
+       "  stage propose spec <file>... [--root DIR]\n"
        "  stage approve <proposal> --words \"<operator's words>\" [--root DIR]\n"
        "  stage complete [--root DIR]\n"
        "  stage status [--json] [--root DIR]\n"))
@@ -162,6 +162,40 @@
     (vec (fs/glob root pattern))
     [(fs/path root pattern)]))
 
+(defn spec-patterns [spec]
+  (cond
+    (string? spec) [spec]
+    (sequential? spec) (mapv str spec)
+    :else (exit! 1 "The spec stage needs :spec <path> or a vector of paths")))
+
+(defn spec-files [root spec]
+  (->> (spec-patterns spec)
+       (mapcat (fn [pattern]
+                 (cond
+                   (glob? pattern) (fs/glob root pattern)
+                   (fs/directory? (fs/path root pattern))
+                   (fs/glob root (str pattern "/**"))
+                   (fs/regular-file? (fs/path root pattern))
+                   [(fs/path root pattern)]
+                   :else [])))
+       (filter fs/regular-file?)
+       (map #(str (fs/relativize root %)))
+       distinct
+       sort
+       vec))
+
+(defn spec-hash [root files]
+  (sha256 (.getBytes
+           (str/join "\n"
+                     (map #(str % "\n" (file-hash (fs/path root %)))
+                          files))
+           "UTF-8")))
+
+(defn spec-body [root files]
+  (str/join "\n\n"
+            (for [file files]
+              (str "--- " file " ---\n" (slurp (str (fs/path root file)))))))
+
 (defn maven-modules [root]
   (let [pom (fs/path root "pom.xml")]
     (when (fs/regular-file? pom)
@@ -219,25 +253,24 @@
              :inputs (vec (distinct inputs))}))
 
 (defn check-spec [root state stage tree]
-  (let [file (or (:spec stage) (:file stage))]
-    (when-not file
-      (exit! 1 "The spec stage needs :spec <file>"))
-    (let [path (fs/path root file)]
-      (when-not (fs/regular-file? path)
-        (exit! 1 (str "Spec file not found: " file)))
-      (let [hash (file-hash path)
-            approved (->> (vals (:proposals state))
-                          (filter #(and (= :approved (:status %))
-                                        (= file (:file %))
-                                        (= hash (:hash %))))
-                          first)]
-        (when-not approved
-          (exit! 1 (str "No current approved proposal for " file
-                        " at " hash)))
-        (println "spec approved:" (:id approved))
-        (record-stage state "spec" tree
-                      [{:proposal (:id approved) :hash hash}]
-                      [file])))))
+  (let [spec (or (:spec stage) (:file stage))]
+    (when-not spec
+      (exit! 1 "The spec stage needs :spec <file> or a vector of paths"))
+    (let [files (spec-files root spec)
+          hash (when (seq files) (spec-hash root files))
+          approved (->> (vals (:proposals state))
+                        (filter #(and (= :approved (:status %))
+                                      (= hash (:hash %))))
+                        first)]
+      (when (empty? files)
+        (exit! 1 (str "No spec files found for " (pr-str spec))))
+      (when-not approved
+        (exit! 1 (str "No current approved proposal for "
+                      (str/join ", " files) " at " hash)))
+      (println "spec approved:" (:id approved))
+      (record-stage state "spec" tree
+                    [{:proposal (:id approved) :hash hash :files files}]
+                    files))))
 
 (defn check! [root config state name]
   (let [stage (stage-by-name config name)
@@ -263,21 +296,23 @@
       (save-state root (:task config) state)
       (println (str "stage " name ": done at tree " tree)))))
 
-(defn propose! [root config state file]
-  (let [path (fs/path root file)]
-    (when-not (fs/regular-file? path)
-      (exit! 1 (str "Spec file not found: " file)))
+(defn propose! [root config state patterns]
+  (let [files (spec-files root patterns)]
+    (when (empty? files)
+      (exit! 1 (str "No spec files found for " (str/join ", " patterns))))
     (let [id (str "spec-" (System/currentTimeMillis))
           proposal {:id id
-                    :file file
-                    :hash (file-hash path)
-                    :body (slurp (str path))
+                    :patterns (vec patterns)
+                    :files files
+                    :file (first files)
+                    :hash (spec-hash root files)
+                    :body (spec-body root files)
                     :at (now)
                     :status :pending}]
       (save-state root (:task config)
                   (assoc-in state [:proposals id] proposal))
       (println (str "spec proposal " id))
-      (println (str "file: " file))
+      (println (str "files: " (str/join ", " files)))
       (println (str "sha256: " (:hash proposal)))
       (println "---")
       (println (:body proposal))
@@ -291,10 +326,11 @@
       (exit! 1 (str "No proposal " id)))
     (when (= :approved (:status proposal))
       (exit! 1 (str "Proposal " id " is already approved; approval is single-use")))
-    (let [path (fs/path root (:file proposal))]
-      (when-not (fs/regular-file? path)
-        (exit! 1 (str "Spec file not found: " (:file proposal))))
-      (when-not (= (:hash proposal) (file-hash path))
+    (let [patterns (or (:patterns proposal) [(:file proposal)])
+          files (spec-files root patterns)]
+      (when (empty? files)
+        (exit! 1 (str "No spec files found for " (str/join ", " patterns))))
+      (when-not (= (:hash proposal) (spec-hash root files))
         (exit! 1 "The spec changed since it was proposed; propose it again"))
       (when (str/blank? words)
         (exit! 1 "Pass the operator's own words with --words"))
@@ -305,8 +341,9 @@
                             :words words)
             state (assoc-in state [:proposals id] approved)
             state (record-stage state "spec" tree
-                                [{:proposal id :hash (:hash proposal)}]
-                                [(:file proposal)])]
+                                [{:proposal id :hash (:hash proposal)
+                                  :files files}]
+                                files)]
         (save-state root (:task config) state)
         (println (str "approved " id " at tree " tree))))))
 
@@ -418,10 +455,10 @@
         "check" (if-let [name (second args)]
                   (check! root config state name)
                   (exit! 1 "Usage: stage check <name>"))
-        "propose" (let [[_ kind file] args]
-                    (if (and (= "spec" kind) file)
-                      (propose! root config state file)
-                      (exit! 1 "Usage: stage propose spec <file>")))
+        "propose" (let [[_ kind & files] args]
+                    (if (and (= "spec" kind) (seq files))
+                      (propose! root config state files)
+                      (exit! 1 "Usage: stage propose spec <file>...")))
         "approve" (if-let [id (second args)]
                     (approve! root config state id (:words options))
                     (exit! 1 "Usage: stage approve <proposal> --words \"<words>\""))
