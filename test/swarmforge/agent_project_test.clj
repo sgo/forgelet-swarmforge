@@ -40,6 +40,10 @@
          "bb" (str (fs/path project "swarmforge" "scripts" "stage.bb"))
          (concat args ["--root" (str project)])))
 
+(defn stop-agent-session! [project]
+  (sh/sh "tmux" "-S" (str (fs/path project ".swarmforge" "tmux-socket"))
+         "kill-server"))
+
 (deftest a-single-agent-project-composes-and-walks-the-template
   (let [forge (fixture-forge)
         project (fs/path forge "projects" "agent")]
@@ -104,7 +108,8 @@
                        "bb" (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
                        "--root" (str project)
                        "--once" "--no-serve"
-                       "--agent-command" "cat")]
+                       "--agent-command"
+                       "sh -c 'echo \"<<AGENT READY>>\"; while IFS= read -r line; do printf \"answer: %s\\n<<AGENT READY>>\\n\" \"$line\"; done'")]
           (is (zero? (:exit run)) (:err run))
           (is (not (fs/exists? (fs/path project ".swarmforge" "dashboard" "requests"
                                          "pending" "req-test.request"))))
@@ -122,24 +127,25 @@
                        "--root" (str project)
                        "--once" "--no-serve"
                        "--agent-command"
-                       "sh -c 'cat; bb swarmforge/scripts/stage.bb complete --root . 2>&1 || true'")]
+                       "sh -c 'echo \"<<AGENT READY>>\"; while IFS= read -r line; do bb swarmforge/scripts/stage.bb complete --root . 2>&1 || true; echo \"<<AGENT READY>>\"; done'")]
           (is (zero? (:exit run)) (:err run))
           (let [answer (slurp (str (fs/path project ".swarmforge" "dashboard" "requests"
                                               "done" "req-complete.request")))]
-            (is (or (str/includes? answer "Stages not current")
-                    (str/includes? answer "The working tree is not committed"))))))
+            (is (re-find #"clean\s+todo" answer)
+                (str "answer was: " answer)))))
 
       (testing "the runner can own the project dashboard"
         (let [run (run project
                        "bb" (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
                        "--root" (str project)
                        "--once"
-                       "--agent-command" "cat")]
+                       "--agent-command" "sleep 60")]
           (is (zero? (:exit run)) (:err run))
           (let [url-file (fs/path project ".swarmforge" "dashboard-url")]
             (is (fs/regular-file? url-file))
             (is (str/starts-with? (slurp (str url-file)) "http://")))))
       (finally
+        (stop-agent-session! project)
         (fs/delete-tree forge)))))
 
 (deftest a-library-project-uses-the-verify-profile-instead-of-qa
@@ -160,4 +166,5 @@
         (is (str/includes? (:out listing) "verify"))
         (is (not (str/includes? (:out listing) "qa"))))
       (finally
+        (stop-agent-session! project)
         (fs/delete-tree forge)))))

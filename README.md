@@ -126,10 +126,12 @@ It composes `stages.edn`, `STAGES.md`, a one-row `roles.tsv` and the
 `.swarmforge/single-agent` marker into `projects/<name>`. Open the project from
 the forge dashboard: the row is marked single-agent and links to the project's
 own `pack_web` dashboard. `./swarm` starts the runner, which takes one dashboard
-request at a time, passes it to an agent command, and appends `stage list` to the
-answer. The command defaults to `codex exec --sandbox workspace-write`; set
-`SWARMFORGE_AGENT_COMMAND` to use another agent. The runner never creates a
-worktree or a handoff.
+request at a time, pastes it into the project's persistent `swarmforge-agent`
+tmux session, and appends `stage list` to the answer. The same session is what
+`forge-attach <forge> <project> agent` opens, so the phone and the laptop use
+one agent rather than two. The command defaults to
+`codex -C <project> --no-alt-screen --yolo`; set `SWARMFORGE_AGENT_COMMAND` to
+use another agent. The runner never creates a worktree or a handoff.
 
 The spec stage is the specifier's work: the agent turns the operator's card
 into `tasks/<name>.md` and `features/<name>.feature`, validates the Gherkin,

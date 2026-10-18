@@ -8,9 +8,15 @@ Read `swarmforge/constitution/articles/engineering.prompt` before setting up or
 changing the build. It carries the Java tool, profile, quality, release and
 deployment rules.
 
+The runner puts `.swarmforge/bin` and `swarmforge/scripts` first on `PATH`. Do
+the same in a manual shell before running a stage.
+
 The operator gives the card. You write the task note and Gherkin, validate
 them, and propose the bundle for approval. Do not ask the operator to fill a
 template.
+
+End every turn with a line exactly `<<AGENT READY>>`, so the relay knows the
+turn is complete.
 
 Do not create worktrees or hand work to another role. The project root is the
 checkout.

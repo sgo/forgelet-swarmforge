@@ -10,10 +10,11 @@
   (str "Usage:\n"
        "  agent-runner.bb --root <project> [--agent-command CMD] [--once]\n"
        "                  [--no-serve] [--interval SECONDS]\n"
-       "  agent-runner.bb --root <project> --stop\n\n"
-       "The agent command runs in the project root with the dashboard request\n"
-       "on stdin. Its stdout is the answer. The runner then runs `stage list`\n"
-       "and answers the request with both."))
+       "  agent-runner.bb --root <project> --stop\n"
+       "  agent-runner.bb --root <project> --stop-agent\n\n"
+       "The relay owns one persistent tmux session, swarmforge-agent. Phone\n"
+       "requests are pasted into that session; forge-attach opens the same\n"
+       "session. The agent must end every turn with <<AGENT READY>>."))
 
 (defn usage []
   (println usage-text))
@@ -55,6 +56,9 @@
 
           (= argument "--stop")
           (recur (next remaining) (assoc options :stop true))
+
+          (= argument "--stop-agent")
+          (recur (next remaining) (assoc options :stop-agent true))
 
           (some #(= argument %) ["-h" "--help"])
           (assoc options :help true)
@@ -153,32 +157,114 @@
        (filter #(= "pending" (:status %)))
        first))
 
-(defn run-agent [root command body]
-  (println "$" command)
-  (let [result (sh/sh "sh" "-c" command :dir (str root) :in body)]
-    {:exit (:exit result)
-     :out (:out result)
-     :err (:err result)}))
+(defn project-env [root]
+  (assoc (into {} (System/getenv))
+         "PATH" (str (fs/path root ".swarmforge" "bin") ":"
+                     (fs/path root "swarmforge" "scripts") ":"
+                     (or (System/getenv "PATH") ""))))
 
-(defn agent-input [body]
-  (str "You are the single agent for this project. Read AGENTS.md and "
-       "STAGES.md first and follow them. Work in this checkout; do not create "
-       "worktrees or hand work to another role. Your stdout is the answer to "
-       "the operator.\n\n"
-       body))
+(def session-name "swarmforge-agent")
+(def ready-marker "<<AGENT READY>>")
+
+(defn sq [value]
+  (str "'" (str/replace (str value) "'" "'\"'\"'") "'"))
+
+(defn tmux-socket [root]
+  (fs/path root ".swarmforge" "tmux-socket"))
+
+(defn tmux [root & args]
+  (apply sh/sh "tmux" "-S" (str (tmux-socket root)) args))
+
+(defn session? [root]
+  (zero? (:exit (tmux root "has-session" "-t" session-name))))
+
+(defn pane [root]
+  (let [result (tmux root "capture-pane" "-p" "-J" "-S" "-4000"
+                     "-t" session-name)]
+    (when (zero? (:exit result))
+      (:out result))))
+
+(defn ready? [root]
+  (str/includes? (or (pane root) "") ready-marker))
+
+(defn default-agent-command [root]
+  (str "codex -C " (sq (str root)) " --no-alt-screen --yolo"))
+
+(defn start-agent-session! [root command]
+  (when-not (session? root)
+    (fs/create-dirs (fs/path root ".swarmforge"))
+    (let [result (tmux root "new-session" "-d" "-s" session-name
+                       "-c" (str root)
+                       (str "export PATH=" (sq (str (fs/path root ".swarmforge" "bin")
+                                                    ":"
+                                                    (fs/path root "swarmforge" "scripts")
+                                                    ":"
+                                                    (or (System/getenv "PATH") "")))
+                            "; exec " command))]
+      (when-not (zero? (:exit result))
+        (exit! 1 "Could not start the agent session: " (:err result))))
+    (Thread/sleep 1000)))
+
+(defn stop-agent! [root]
+  (if (session? root)
+    (do
+      (tmux root "kill-session" "-t" session-name)
+      (println "Stopped agent session" session-name))
+    (println "Agent session is not running")))
+
+(defn wait-until-ready! [root timeout-ms]
+  (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
+    (loop []
+      (cond
+        (ready? root) true
+        (> (System/currentTimeMillis) deadline) false
+        :else (do (Thread/sleep 250) (recur))))))
+
+(defn send-request! [root request]
+  (let [marker (str "[phone " (:id request) "]")
+        file (fs/create-temp-file {:prefix "agent-request."})]
+    (spit (str file) (str marker " " (:body request)))
+    (try
+      (tmux root "load-buffer" "-b" "agent-request" (str file))
+      (tmux root "paste-buffer" "-b" "agent-request" "-t" session-name)
+      (tmux root "send-keys" "-t" session-name "C-m")
+      (finally
+        (fs/delete-if-exists file)))
+    marker))
+
+(defn answer-since [text marker]
+  (when-let [start (str/last-index-of text marker)]
+    (let [after (subs text (+ start (count marker)))
+          end (str/index-of after ready-marker)]
+      (when end
+        (str/trim (subs after 0 end))))))
+
+(defn wait-for-answer! [root marker timeout-ms]
+  (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
+    (loop []
+      (let [text (or (pane root) "")
+            answer (answer-since text marker)]
+        (cond
+          (some? answer) answer
+          (> (System/currentTimeMillis) deadline)
+          (str "The agent did not signal " ready-marker " within "
+               (quot timeout-ms 1000) "s. Last pane lines:\n"
+               (str/join "\n" (take-last 20 (str/split-lines text))))
+          :else
+          (do
+            (Thread/sleep 250)
+            (recur)))))))
 
 (defn stage-list [root]
   (let [script (fs/path root "swarmforge" "scripts" "stage.bb")]
     (if (fs/regular-file? script)
-      (let [result (sh/sh "bb" (str script) "list" "--root" (str root))]
+      (let [result (sh/sh "bb" (str script) "list" "--root" (str root)
+                          :env (project-env root))]
         (str (:out result) (:err result)))
       "stage tool not found\n")))
 
-(defn answer-text [result stage-status]
-  (str (if (zero? (:exit result))
-         (:out result)
-         (str "Agent command failed with exit " (:exit result) "\n\n"
-              (:out result) "\n" (:err result)))
+(defn answer-text [answer stage-status]
+  (str answer
        "\n\n--- stage list ---\n"
        stage-status))
 
@@ -196,11 +282,14 @@
       (println "answered" (:id request)))))
 
 (defn run-once! [root agent-command]
+  (start-agent-session! root agent-command)
   (if-let [request (pending-request root)]
     (do
       (println "request" (:id request))
-      (let [result (run-agent root agent-command (agent-input (:body request)))
-            text (answer-text result (stage-list root))]
+      (wait-until-ready! root 5000)
+      (let [marker (send-request! root request)
+            answer (wait-for-answer! root marker 600000)
+            text (answer-text answer (stage-list root))]
         (answer-request! root request text)))
     (println "no pending requests")))
 
@@ -212,9 +301,11 @@
       (let [root (root-dir options)]
         (if (:stop options)
           (stop! root)
+          (if (:stop-agent options)
+            (stop-agent! root)
           (let [agent-command (or (:agent-command options)
                                   (not-empty (System/getenv "SWARMFORGE_AGENT_COMMAND"))
-                                  "codex exec --sandbox workspace-write")]
+                                  (default-agent-command root))]
             (fs/create-dirs (fs/path root ".swarmforge"))
             (spit (str (pid-file root))
                   (str (.pid (java.lang.ProcessHandle/current)) "\n"))
@@ -233,6 +324,6 @@
                 (loop []
                   (run-once! root agent-command)
                   (Thread/sleep (* 1000 (:interval options)))
-                  (recur))))))))))
+                  (recur)))))))))))
 
 (apply -main *command-line-args*)

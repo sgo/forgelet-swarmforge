@@ -8,6 +8,12 @@ The shared engineering rules are in
 `swarmforge/constitution/articles/engineering.prompt`; read them before setting
 up or changing the build.
 
+The project tools live in `.swarmforge/bin`. Before running a gate manually:
+
+```sh
+export PATH="$PWD/.swarmforge/bin:$PWD/swarmforge/scripts:$PATH"
+```
+
 ```
 spec -> code -> clean -> architect -> harden -> clean-final -> verify -> release?
 ```
