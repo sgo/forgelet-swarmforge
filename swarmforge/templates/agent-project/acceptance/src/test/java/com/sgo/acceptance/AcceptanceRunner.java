@@ -42,6 +42,8 @@ public final class AcceptanceRunner {
                 try {
                     runtime.run(feature, scenario, rows.get(index));
                     out.append("PASS ").append(display).append('\n');
+                } catch (AcceptanceInfrastructureError failure) {
+                    throw failure;
                 } catch (Throwable failure) {
                     failures.add(display);
                     out.append("FAIL ").append(display)

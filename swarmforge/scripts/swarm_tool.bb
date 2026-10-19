@@ -6,11 +6,14 @@
             [clojure.string :as str]))
 
 (def catalog
-  {"gherkin-parser" {:source "github.com/unclebob/Acceptance-Pipeline-Specification"
+  {"gherkin-parser" {:source "github.com/sgo/Acceptance-Pipeline-Specification"
+                     :ref "forgelet"
                      :bb-task "gherkin-parser"}
-   "ir-dry-checker" {:source "github.com/unclebob/Acceptance-Pipeline-Specification"
+   "ir-dry-checker" {:source "github.com/sgo/Acceptance-Pipeline-Specification"
+                     :ref "forgelet"
                      :bb-task "gherkin-ir-dry-checker"}
-   "gherkin-mutator" {:source "github.com/unclebob/Acceptance-Pipeline-Specification"
+   "gherkin-mutator" {:source "github.com/sgo/Acceptance-Pipeline-Specification"
+                      :ref "forgelet"
                       :bb-task "gherkin-mutator"}
    "crap4clj" {:source "github.com/unclebob/crap4clj" :bb-task "crap4clj"
                :needs ["cloverage"]}

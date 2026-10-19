@@ -49,10 +49,10 @@ final class AcceptanceRuntime {
                 .filter(handler -> handler.matches(text))
                 .toList();
         if (matching.isEmpty()) {
-            throw new AssertionError("no step handler for: " + text);
+            throw new AcceptanceInfrastructureError("no step handler for: " + text);
         }
         if (matching.size() > 1) {
-            throw new AssertionError("ambiguous step handlers for: " + text);
+            throw new AcceptanceInfrastructureError("ambiguous step handlers for: " + text);
         }
         return matching.get(0);
     }
@@ -66,7 +66,7 @@ final class AcceptanceRuntime {
             String column = matcher.group(1);
             String value = example.get(column);
             if (value == null) {
-                throw new AssertionError("step wants <" + column
+                throw new AcceptanceInfrastructureError("step wants <" + column
                         + "> but the example row only has " + example.keySet());
             }
             result.append(value);

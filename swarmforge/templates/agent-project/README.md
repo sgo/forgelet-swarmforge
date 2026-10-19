@@ -33,3 +33,7 @@ It mutates example values through the same runner and writes
 `target/acceptance-mutation/mutation.log`. The mutator rewrites features with
 its manifest, so the script works on copies under `tmp/`; approved feature
 files are untouched.
+
+Projects with custom value formats add `acceptance/value-adapter.sh`; the
+mutation script passes it as `--value-adapter`. The adapter and the step
+handlers must share the same parser, so a mutated value is still executable.

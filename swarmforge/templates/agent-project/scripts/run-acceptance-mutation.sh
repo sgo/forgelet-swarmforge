@@ -24,6 +24,10 @@ report=target/acceptance-mutation/mutation.log
 : > "$report"
 failed=0
 ran=0
+adapter_args=()
+if [[ -x acceptance/value-adapter.sh ]]; then
+  adapter_args=(--value-adapter "acceptance/value-adapter.sh")
+fi
 
 while IFS= read -r feature; do
   [[ -f "$feature" ]] || continue
@@ -51,7 +55,8 @@ while IFS= read -r feature; do
       --work-dir "$work/$stem" \
       --status-interval 15s \
       --level hard \
-      --runner-worker "acceptance/runner-worker.sh" 2>&1 | tee -a "$report"; then
+      --runner-worker "acceptance/runner-worker.sh" \
+      "${adapter_args[@]}" 2>&1 | tee -a "$report"; then
     failed=1
   fi
   ran=1

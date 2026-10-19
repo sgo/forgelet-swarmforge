@@ -139,6 +139,9 @@
 
 ## Acceptance Pipeline
 - Use github.com/unclebob/Acceptance-Pipeline-Specification for Gherkin acceptance tests.
+- The family's APS fork is `github.com/sgo/Acceptance-Pipeline-Specification`, branch `forgelet`.
+  Prefer its `gherkin-parser`, `ir-dry-checker` and `gherkin-mutator` over upstream; upstream is
+  only the fallback when the fork cannot be used.
 - The Acceptance Pipeline Specification supplies `gherkin-parser`, `ir-dry-checker`, and `gherkin-mutator`. Install them with the project-local helper; do not search `$HOME` or run `find` for binaries.
 - At Tool Startup, for each required APS tool, run `swarm_tool.sh require <tool>`. If it is missing, run exactly `swarm_tool.sh ensure <tool>`.
 - Two-arg forms:
