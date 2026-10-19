@@ -57,6 +57,11 @@ A bootstrap feature is waived only by naming it, with a reason, in
 `acceptance/waived-features.txt`. The runner prints the waiver, so a skipped
 feature is visible in the gate log rather than silently ignored.
 
+`harden` runs PIT and then `scripts/run-acceptance-mutation.sh`, which mutates
+the example values in every non-waived feature through the same runner. A
+survivor or an infrastructure error fails the gate. The mutator works on
+copies under `tmp/`, so it never rewrites the approved feature files.
+
 - **spec**: the approved feature bundle. `stage propose spec <file>...` prints
   the proposal; `stage approve <id> --words
   "<their words>"` records the exact answer. Approval is single-use and stale
@@ -71,8 +76,9 @@ feature is visible in the gate log rather than silently ignored.
   base commit.
 - **architect**: green invariants plus `ARCHITECTURE.md`, which states what was
   restructured and why. This is refactoring, not a behaviour change.
-- **harden**: PIT with XML output. A survivor on a touched line blocks unless
-  the project records why it is equivalent.
+- **harden**: PIT with XML output, then Gherkin acceptance mutation. A PIT
+  survivor on a touched line blocks unless the project records why it is
+  equivalent; a Gherkin survivor or error blocks.
 - **clean-final**: the same clean check on the hardened tree.
 - **qa**: property tests first, then the acceptance suite.
   `scripts/run-acceptance-tests.sh` parses every feature and dispatches every

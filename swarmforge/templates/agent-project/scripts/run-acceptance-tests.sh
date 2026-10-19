@@ -13,6 +13,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+prepare_only=0
+if [[ "${1:-}" == "--prepare" ]]; then
+  prepare_only=1
+fi
+
 if ! command -v gherkin-parser >/dev/null 2>&1; then
   echo "acceptance: gherkin-parser is not on PATH; run swarm_tool.sh require gherkin-parser" >&2
   exit 1
@@ -45,6 +50,7 @@ done < <(find . -type d \
   \( -path '*/target/classes' -o -path '*/target/test-classes' \) | sort)
 
 mkdir -p target/acceptance/classes target/acceptance/ir
+printf '%s\n' "$classpath" > target/acceptance/classpath.txt
 find target/acceptance/classes target/acceptance/ir -type f -delete
 
 sources=()
@@ -56,6 +62,10 @@ if [[ ${#sources[@]} -eq 0 ]]; then
   exit 1
 fi
 javac -cp "$classpath" -d target/acceptance/classes "${sources[@]}"
+
+if [[ "$prepare_only" -eq 1 ]]; then
+  exit 0
+fi
 
 report=target/acceptance/acceptance.log
 : > "$report"

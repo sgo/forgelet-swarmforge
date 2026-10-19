@@ -70,6 +70,14 @@
              (fs/path project "scripts" "run-acceptance-tests.sh")))
         (is (fs/executable?
              (fs/path project "scripts" "run-acceptance-tests.sh")))
+        (is (fs/regular-file?
+             (fs/path project "scripts" "run-acceptance-mutation.sh")))
+        (is (fs/executable?
+             (fs/path project "scripts" "run-acceptance-mutation.sh")))
+        (is (fs/regular-file?
+             (fs/path project "acceptance" "runner-worker.sh")))
+        (is (fs/executable?
+             (fs/path project "acceptance" "runner-worker.sh")))
         (is (fs/regular-file? (fs/path project ".swarmforge" "single-agent")))
         (is (fs/regular-file?
              (fs/path project "swarmforge" "constitution" "articles"
@@ -84,6 +92,12 @@
         (is (str/includes?
              (slurp (str (fs/path project "stages.edn")))
              "target/acceptance/acceptance.log"))
+        (is (str/includes?
+             (slurp (str (fs/path project "stages.edn")))
+             "scripts/run-acceptance-mutation.sh"))
+        (is (str/includes?
+             (slurp (str (fs/path project "stages.edn")))
+             "target/acceptance-mutation/mutation.log"))
         (is (= "Java\n" (slurp (str (fs/path project "swarmforge" "language.conf")))))
         (is (str/includes?
              (slurp (str (fs/path project ".swarmforge" "roles.tsv")))
@@ -182,6 +196,7 @@
         (is (str/includes? stages ":name \"verify\""))
         (is (str/includes? stages "scripts/run-acceptance-tests.sh"))
         (is (str/includes? stages "target/acceptance/acceptance.log"))
+        (is (str/includes? stages "scripts/run-acceptance-mutation.sh"))
         (is (not (str/includes? stages ":name \"qa\""))))
       (let [listing (run-stage project "list")]
         (is (zero? (:exit listing)) (:err listing))

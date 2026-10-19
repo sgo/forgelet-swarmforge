@@ -22,3 +22,14 @@ scripts/run-acceptance-tests.sh
 The script compiles the harness separately from the Maven modules, so it works
 for a single module or a reactor. It writes `target/acceptance/acceptance.log`
 and fails on an unhandled or ambiguous step.
+
+Gherkin mutation runs in `harden`:
+
+```sh
+scripts/run-acceptance-mutation.sh
+```
+
+It mutates example values through the same runner and writes
+`target/acceptance-mutation/mutation.log`. The mutator rewrites features with
+its manifest, so the script works on copies under `tmp/`; approved feature
+files are untouched.

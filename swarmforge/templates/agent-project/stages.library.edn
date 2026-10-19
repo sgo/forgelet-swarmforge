@@ -20,9 +20,13 @@
    :stamp [:sources]}
   {:name "harden"
    :runs [["mvn" "-Pwith-mutation-tests"
-           "-DoutputFormats=XML,HTML" "verify"]]
-   :evidence ["target/pit-reports/mutations.xml"]
-   :stamp [:sources]}
+           "-DoutputFormats=XML,HTML" "verify"]
+          ["scripts/run-acceptance-mutation.sh"]]
+   :evidence ["target/pit-reports/mutations.xml"
+              "target/acceptance-mutation/mutation.log"]
+   :stamp [:features :sources "acceptance"
+           "scripts/run-acceptance-tests.sh"
+           "scripts/run-acceptance-mutation.sh"]}
   {:name "clean-final"
    :runs [["crap4java" "--test-command" "mvn -q -Pwith-unit-tests test" "."]
           ["dry4java" "--format" "edn" "src/main/java"]]
