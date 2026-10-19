@@ -61,6 +61,19 @@ report=target/acceptance/acceptance.log
 : > "$report"
 failed=0
 for feature in "${features[@]}"; do
+  waived=""
+  if [[ -f acceptance/waived-features.txt ]]; then
+    while IFS=$'\t' read -r path reason; do
+      [[ -z "$path" || "$path" == \#* ]] && continue
+      if [[ "$path" == "$feature" ]]; then
+        waived="${reason:-listed in acceptance/waived-features.txt}"
+      fi
+    done < acceptance/waived-features.txt
+  fi
+  if [[ -n "$waived" ]]; then
+    echo "waived $feature: $waived" | tee -a "$report"
+    continue
+  fi
   stem="$(printf '%s' "$feature" \
     | sed -e 's#^features/##' -e 's#/#-#g' -e 's#\.feature$##')"
   ir="target/acceptance/ir/$stem.json"

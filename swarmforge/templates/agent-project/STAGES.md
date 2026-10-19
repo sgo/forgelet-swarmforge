@@ -53,6 +53,10 @@ ships `acceptance/src` with a runner and an empty handler list; add one
 handler per step shape and keep `scripts/run-acceptance-tests.sh` green. A
 step the harness cannot execute is not a scenario, only prose.
 
+A bootstrap feature is waived only by naming it, with a reason, in
+`acceptance/waived-features.txt`. The runner prints the waiver, so a skipped
+feature is visible in the gate log rather than silently ignored.
+
 - **spec**: the approved feature bundle. `stage propose spec <file>...` prints
   the proposal; `stage approve <id> --words
   "<their words>"` records the exact answer. Approval is single-use and stale
