@@ -32,6 +32,8 @@ command. Your terminal output is not sent to the phone.
 
 A pre-commit hook refuses commits until the current spec bundle is approved.
 Do not use `--no-verify`; run `stage propose spec` and `stage approve` first.
+The proposal also appears in the project dashboard and the phone's approvals
+room; only the operator approves it, with their own words.
 
 Do not create worktrees or hand work to another role. The project root is the
 checkout.

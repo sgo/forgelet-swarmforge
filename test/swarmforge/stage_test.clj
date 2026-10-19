@@ -8,6 +8,7 @@
 
 (def repo-root (fs/cwd))
 (def stage-script (fs/path repo-root "swarmforge" "scripts" "stage.bb"))
+(def pack-web-test (fs/path repo-root "test" "swarmforge" "pack_web_test.bb"))
 
 (def stage-config
   {:task "fixture"
@@ -52,6 +53,12 @@
                  args
                  [:dir (str root)])))
 
+(defn run-pack-web-test [root & args]
+  (apply sh/sh
+         (concat ["bb" (str pack-web-test)]
+                 args
+                 [:dir (str root)])))
+
 (defn state [root]
   (edn/read-string
    (slurp (str (fs/path root ".swarmforge" "stages" "fixture.edn")))))
@@ -74,6 +81,8 @@
     (write-file (fs/path root "spec.md") "# Fixture spec\n\nA fixture.\n")
     (write-file (fs/path root "features" "extra.feature")
                 "Feature: extra\n\n  Scenario: extra\n    Given a fixture\n")
+    (write-file (fs/path root ".swarmforge" "roles.tsv")
+                (format "agent\tmaster\t%s\tfixture-agent\tAgent\tcodex\ttask\n" root))
     (write-file (fs/path root "stages.edn") (pr-str stage-config))
     (sh/sh "git" "add" "-A" :dir (str root))
     (sh/sh "git" "commit" "-q" "-m" "fixture" :dir (str root))
@@ -156,5 +165,101 @@
           (let [result (run-stage root "approve" pending "--words" "approve")]
             (is (not (zero? (:exit result))))
             (is (str/includes? (:err result) "changed")))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest a-spec-proposal-reaches-the-dashboard-and-the-board
+  (let [root (fixture)
+        approval-file (fn [id]
+                        (fs/path root ".swarmforge" "handoffs"
+                                 "pending_approval" (str id ".handoff")))
+        board-file (fs/path root ".swarmforge" "board" "tasks.tsv")]
+    (try
+      (testing "proposing writes one stage approval and a spec card"
+        (let [propose (run-stage root "propose" "spec"
+                                 "spec.md" "features/extra.feature")
+              id (latest-proposal-id root)]
+          (is (zero? (:exit propose)) (:err propose))
+          (is (str/includes? (:out propose) "phone's approvals room"))
+          (is (fs/regular-file? (approval-file id)))
+          (let [approval (slurp (str (approval-file id)))]
+            (is (str/includes? approval "kind: stage-spec"))
+            (is (str/includes? approval "to: operator"))
+            (is (str/includes? approval "features/extra.feature")))
+          (is (re-find #"(?m)^fixture\tspec\t" (slurp (str board-file))))
+          (is (str/includes?
+               (slurp (str (fs/path root ".swarmforge" "board" "lanes.tsv")))
+               "code"))
+          (let [dashboard (json/parse-string
+                           (:out (run-pack-web-test root "--test-state" (str root)))
+                           true)
+                approval (first (:approvals dashboard))]
+            (is (= "stage-spec" (:kind approval)))
+            (is (= "spec → operator" (:gate approval)))
+            (is (= "Fixture spec" (:task approval))))))
+
+      (testing "a new proposal replaces the old approval, and approving clears it"
+        (let [old-id (latest-proposal-id root)]
+          (run-stage root "propose" "spec" "spec.md" "features/extra.feature")
+          (let [new-id (latest-proposal-id root)]
+            (is (not= old-id new-id))
+            (is (not (fs/exists? (approval-file old-id))))
+            (is (fs/regular-file? (approval-file new-id)))
+            (is (zero? (:exit (run-stage root "approve" new-id "--words" "approve"))))
+            (is (not (fs/exists? (approval-file new-id)))))))
+
+      (testing "a stage check moves the card, and completion finishes it"
+        (doseq [stage ["code" "clean" "architect" "harden" "qa"]]
+          (is (zero? (:exit (run-stage root "check" stage)))))
+        (is (re-find #"(?m)^fixture\tqa\t" (slurp (str board-file))))
+        (is (zero? (:exit (run-stage root "complete"))))
+        (is (re-find #"(?m)^fixture\tdone\t" (slurp (str board-file)))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest a-sent-back-spec-is-not-an-approval
+  (let [root (fixture)]
+    (try
+      (run-stage root "propose" "spec" "spec.md" "features/extra.feature")
+      (let [id (latest-proposal-id root)]
+        (let [reject (run-stage root "reject" id "--words" "split the scenario")]
+          (is (zero? (:exit reject)) (:err reject))
+          (is (str/includes? (:out reject) "sent back"))
+          (is (= :sent_back (get-in (state root) [:proposals id :status])))
+          (is (not (fs/exists?
+                    (fs/path root ".swarmforge" "handoffs"
+                             "pending_approval" (str id ".handoff")))))
+          (let [check (run-stage root "check" "spec")]
+            (is (not (zero? (:exit check))))
+            (is (str/includes? (:err check) "No current approved proposal")))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest the-dashboard-decides-a-stage-spec-through-the-stage-tool
+  (let [root (fixture)
+        approval-file (fn [id]
+                        (fs/path root ".swarmforge" "handoffs"
+                                 "pending_approval" (str id ".handoff")))]
+    (try
+      (testing "accepting approves the proposal and clears the approval"
+        (run-stage root "propose" "spec" "spec.md" "features/extra.feature")
+        (let [id (latest-proposal-id root)
+              result (run-pack-web-test root "--test-approve" (str root) id)]
+          (is (zero? (:exit result)) (:err result))
+          (is (= :approved (get-in (state root) [:proposals id :status])))
+          (is (not (fs/exists? (approval-file id))))))
+
+      (testing "sending back records the operator's words and wakes the agent"
+        (run-stage root "propose" "spec" "spec.md" "features/extra.feature")
+        (let [id (latest-proposal-id root)
+              result (run-pack-web-test root "--test-retry-task"
+                                        (str root) id "split the scenario")]
+          (is (zero? (:exit result)) (:err result))
+          (is (= :sent_back (get-in (state root) [:proposals id :status])))
+          (is (not (fs/exists? (approval-file id))))
+          (let [pending (fs/path root ".swarmforge" "dashboard" "requests" "pending")
+                bodies (when (fs/directory? pending)
+                         (mapv #(slurp (str %)) (fs/list-dir pending)))]
+            (is (some #(str/includes? % "split the scenario") bodies)))))
       (finally
         (fs/delete-tree root)))))

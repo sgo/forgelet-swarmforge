@@ -19,6 +19,7 @@
        "  stage check <name> [--root DIR]\n"
        "  stage propose spec <file>... [--root DIR]\n"
        "  stage approve <proposal> --words \"<operator's words>\" [--root DIR]\n"
+       "  stage reject <proposal> --words \"<operator's words>\" [--root DIR]\n"
        "  stage complete [--root DIR]\n"
        "  stage status [--json] [--root DIR]\n"))
 
@@ -125,6 +126,92 @@
 
 (defn save-state [root task state]
   (write-edn (state-file root task) state))
+
+(defn board-dir [root]
+  (fs/path root ".swarmforge" "board"))
+
+(defn board-tasks-file [root]
+  (fs/path (board-dir root) "tasks.tsv"))
+
+(defn board-lanes-file [root]
+  (fs/path (board-dir root) "lanes.tsv"))
+
+(defn board-columns [line]
+  (str/split line #"\t" -1))
+
+(defn update-board! [root config lane]
+  (let [name (:task config)
+        file (board-tasks-file root)
+        now (now)
+        rows (if (fs/regular-file? file)
+               (->> (str/split-lines (slurp (str file)))
+                    (remove str/blank?))
+               [])
+        existing (some #(when (= name (first (board-columns %))) %) rows)
+        created (if existing (get (board-columns existing) 2 now) now)
+        card (str/join "\t" [name lane created now name 0])
+        kept (remove #(= name (first (board-columns %))) rows)]
+    (fs/create-dirs (board-dir root))
+    (spit (str file) (str (str/join "\n" (concat kept [card])) "\n"))
+    (spit (str (board-lanes-file root))
+          (str (str/join "\n" (concat (map :name (:stages config)) ["done"])) "\n"))))
+
+(defn message-headers [text]
+  (let [[header] (str/split (or text "") #"\n\n" 2)]
+    (into {}
+          (for [line (str/split-lines (or header ""))
+                :let [[key value] (str/split line #": " 2)]
+                :when (and key value)]
+            [key value]))))
+
+(defn stage-approval? [path]
+  (= "stage-spec"
+     (get (message-headers (slurp (str path))) "kind")))
+
+(defn pending-approval-dir [root]
+  (fs/path root ".swarmforge" "handoffs" "pending_approval"))
+
+(defn stage-approval-file [root id]
+  (fs/path (pending-approval-dir root) (str id ".handoff")))
+
+(defn remove-stage-approvals! [root]
+  (let [dir (pending-approval-dir root)]
+    (when (fs/directory? dir)
+      (doseq [file (fs/list-dir dir)
+              :when (and (fs/regular-file? file)
+                         (str/ends-with? (fs/file-name file) ".handoff")
+                         (stage-approval? file))]
+        (fs/delete-if-exists file)))))
+
+(defn card-name [root config files]
+  (let [heading (fn [file]
+                  (some #(when (str/starts-with? % "# ") (str/trim (subs % 2)))
+                        (str/split-lines (slurp (str (fs/path root file))))))
+        task-files (->> files
+                        (filter #(str/starts-with? % "tasks/"))
+                        (sort-by #(fs/last-modified-time (fs/path root %))
+                                 #(compare %2 %1)))]
+    (or (some heading task-files)
+      (some heading files)
+      (:task config))))
+
+(defn write-stage-approval! [root config proposal]
+  (remove-stage-approvals! root)
+  (let [file (stage-approval-file root (:id proposal))
+        card (card-name root config (:files proposal))]
+    (fs/create-dirs (fs/parent file))
+    (spit (str file)
+          (str "from: agent\n"
+               "to: operator\n"
+               "kind: stage-spec\n"
+               "task: " card "\n"
+               "task_id: " card "\n"
+               "artifacts: " (str/join ", " (:files proposal)) "\n"
+               "created_at: " (:at proposal) "\n"
+               "\n"
+               "Spec proposal for " (:task config) "\n\n"
+               "Approve this exact Gherkin and task note, or send it back with the changes you want.\n\n"
+               (:body proposal)))))
 
 (defn stage-by-name [config name]
   (or (some #(when (= name (:name %)) %) (:stages config))
@@ -305,6 +392,7 @@
                               (collect-evidence root patterns)
                               (resolve-inputs root stage)))))]
       (save-state root (:task config) state)
+      (update-board! root config name)
       (println (str "stage " name ": done at tree " tree)))))
 
 (defn propose! [root config state patterns]
@@ -322,6 +410,8 @@
                     :status :pending}]
       (save-state root (:task config)
                   (assoc-in state [:proposals id] proposal))
+      (update-board! root config "spec")
+      (write-stage-approval! root config proposal)
       (println (str "spec proposal " id))
       (println (str "files: " (str/join ", " files)))
       (println (str "sha256: " (:hash proposal)))
@@ -329,7 +419,8 @@
       (println (:body proposal))
       (println "---")
       (println (str "Ask the operator to approve this exact text with: "
-                    "stage approve " id " --words \"<their words>\"")))))
+                    "stage approve " id " --words \"<their words>\""))
+      (println "The proposal is also in the project dashboard and the phone's approvals room."))))
 
 (defn approve! [root config state id words]
   (let [proposal (get-in state [:proposals id])]
@@ -356,7 +447,27 @@
                                   :files files}]
                                 files)]
         (save-state root (:task config) state)
+        (remove-stage-approvals! root)
+        (update-board! root config "spec")
         (println (str "approved " id " at tree " tree))))))
+
+(defn reject! [root config state id words]
+  (let [proposal (get-in state [:proposals id])]
+    (when-not proposal
+      (exit! 1 (str "No proposal " id)))
+    (when (= :approved (:status proposal))
+      (exit! 1 (str "Proposal " id " is already approved")))
+    (when (str/blank? words)
+      (exit! 1 "Pass the operator's own words with --words"))
+    (let [rejected (assoc proposal
+                          :status :sent_back
+                          :sent-back-at (now)
+                          :words words)
+          state (assoc-in state [:proposals id] rejected)]
+      (save-state root (:task config) state)
+      (remove-stage-approvals! root)
+      (update-board! root config "spec")
+      (println (str "sent back " id)))))
 
 (defn stage-status [config state stage tree]
   (let [name (:name stage)
@@ -427,6 +538,7 @@
         (exit! 1 (str "Stages not current: " (str/join ", " missing))))
       (save-state root (:task config)
                   (assoc state :complete {:tree tree :at (now)}))
+      (update-board! root config "done")
       (println (str "complete: " (:task config) " at tree " tree)))))
 
 (defn parse-args [args]
@@ -475,6 +587,9 @@
         "approve" (if-let [id (second args)]
                     (approve! root config state id (:words options))
                     (exit! 1 "Usage: stage approve <proposal> --words \"<words>\""))
+        "reject" (if-let [id (second args)]
+                   (reject! root config state id (:words options))
+                   (exit! 1 "Usage: stage reject <proposal> --words \"<words>\""))
         "complete" (complete! root config state)
         "status" (if (:json options)
                    (println (status-json root config state))

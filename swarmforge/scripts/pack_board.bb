@@ -85,6 +85,9 @@
 (defn tasks-file [root]
   (fs/path (board-dir root) "tasks.tsv"))
 
+(defn lanes-file [root]
+  (fs/path (board-dir root) "lanes.tsv"))
+
 (defn with-board-lock [root f]
   (let [dir (board-dir root)
         path (fs/path dir "tasks.lock")
@@ -229,8 +232,13 @@
   (map #(str/split % #"\t" -1) (read-rows (roles-file root))))
 
 (defn lanes! [opts]
-  (doseq [cols (role-rows (resolve-root opts))]
-    (println (first cols))))
+  (let [root (resolve-root opts)
+        file (lanes-file root)]
+    (if (fs/regular-file? file)
+      (doseq [line (read-rows file)]
+        (println (first (str/split line #"\t"))))
+      (doseq [cols (role-rows root)]
+        (println (first cols))))))
 
 (defn master-lane! [opts]
   (let [masters (filterv #(= "master" (second %)) (role-rows (resolve-root opts)))]

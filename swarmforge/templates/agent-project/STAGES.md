@@ -58,6 +58,9 @@ step the harness cannot execute is not a scenario, only prose.
   "<their words>"` records the exact answer. Approval is single-use and stale
   when any file in the bundle changes.
   The pre-commit hook refuses a commit until the current bundle is approved.
+  The proposal is also posted to the project dashboard and the phone's
+  approvals room; `stage approve` or `stage reject` clears it. Only the
+  operator's words approve a spec.
 - **code**: `mvn -Pwith-unit-tests verify`.
 - **clean**: `crap4java` for CRAP and `dry4java` for duplicate pairs. The
   project's CRAP ceiling is 6; DRY and mutation are deltas against the task's
@@ -72,6 +75,10 @@ step the harness cannot execute is not a scenario, only prose.
   step to a handler under `acceptance/src`. A step with no handler or two
   matching handlers fails the gate.
 - **release**: optional; `n/a` is not a pass for a release that was skipped.
+
+Each `stage check` moves the project's card on `.swarmforge/board/tasks.tsv`,
+which is what the phone's activity room reads. `stage complete` moves it to
+`done`.
 
 Do not create worktrees. Do not hand work to another role. The project root is
 the checkout.

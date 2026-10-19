@@ -513,14 +513,16 @@
 (defn approval-entry [root path]
   (let [headers (:headers (parse-message path))
         to (first (comma-list (get headers "to")))
-        id (approval-id path)]
-    {:id id
-     :gate (str "spec → " to)
-     :task_id (or (not-empty (get headers "task_id")) (get headers "task"))
-     :task (get headers "task")
-     :artifacts (filterv #(allowed-doc? root %)
-                          (comma-list (get headers "artifacts")))
-     :reviews (read-reviews root id)}))
+        id (approval-id path)
+        kind (not-empty (get headers "kind"))]
+    (cond-> {:id id
+             :gate (str "spec → " to)
+             :task_id (or (not-empty (get headers "task_id")) (get headers "task"))
+             :task (get headers "task")
+             :artifacts (filterv #(allowed-doc? root %)
+                                  (comma-list (get headers "artifacts")))
+             :reviews (read-reviews root id)}
+      kind (assoc :kind kind))))
 
 (defn approvals [root]
   (mapv #(approval-entry root %) (pending-files root)))
@@ -1179,16 +1181,34 @@
     content
     (str/replace-first content #"\n\n" "\napproved: true\n\n")))
 
+(defn stage-command! [root & args]
+  (let [result (apply sh
+                      (concat ["bb" (str (fs/path script-dir "stage.bb"))]
+                              args
+                              ["--root" (str root)]))]
+    (when-not (zero? (:exit result))
+      (throw (ex-info (str/trim (str (:err result) "\n" (:out result)))
+                      {:http-status 500})))
+    (:out result)))
+
 (defn approve! [root id]
   (let [src (require-pending! root id)
         headers (:headers (parse-message src))
-        dest (fs/path root ".swarmforge" "handoffs" "outbox" (fs/file-name src))]
-    (fs/create-dirs (fs/parent dest))
-    (spit (str dest) (with-approved (slurp (str src))))
-    (fs/delete-if-exists src)
-    (record-resolution! root id (get headers "task") "approved")
-    (drop-reviews! root id)
-    (drop-task-reviews! root (or (not-empty (get headers "task_id")) (get headers "task")))))
+        task (get headers "task")
+        task-id (or (not-empty (get headers "task_id")) task)]
+    (if (= "stage-spec" (get headers "kind"))
+      (do
+        (stage-command! root "approve" id "--words" "approve")
+        (record-resolution! root id task "approved")
+        (drop-reviews! root id)
+        (drop-task-reviews! root task-id))
+      (let [dest (fs/path root ".swarmforge" "handoffs" "outbox" (fs/file-name src))]
+        (fs/create-dirs (fs/parent dest))
+        (spit (str dest) (with-approved (slurp (str src))))
+        (fs/delete-if-exists src)
+        (record-resolution! root id task "approved")
+        (drop-reviews! root id)
+        (drop-task-reviews! root task-id)))))
 
 (defn save-review! [root id path comments]
   (when (str/blank? path)
@@ -1335,23 +1355,36 @@
         headers (:headers (parse-message src))
         task (get headers "task")
         task-id (or (not-empty (get headers "task_id")) task)
+        stage-spec? (= "stage-spec" (get headers "kind"))
         commit (not-empty (get headers "commit"))
         n (if (git-repo? root) (next-rejected-n root task-id) 1)
         wt (worktree-for root (get headers "from"))
         reviews (read-reviews root id)]
-    (doseq [path (approval-doc-paths headers reviews)]
-      (append-task-review! root task-id path comments))
-    (when commit
-      (snapshot-rejected! root task-id commit n)
-      (restore-commit! wt commit))
-    (fs/delete-if-exists src)
-    (record-resolution! root id task "sent_back")
-    (drop-reviews! root id)
-    (drop-task-audits! root task-id task)
-    (restore-task-base! root headers)
-    (increment-audit-count! root task-id)
-    (when-not (str/blank? task)
-      (inject-master! root (retry-message task comments reviews)))))
+    (if stage-spec?
+      (do
+        (stage-command! root "reject" id "--words"
+                        (or (not-empty comments) "sent back from the dashboard"))
+        (record-resolution! root id task "sent_back")
+        (drop-reviews! root id)
+        (write-chat-request!
+         root
+         (str "Spec proposal " id " was sent back."
+              (when-not (str/blank? comments) (str "\n\n" comments))
+              "\n\nRevise the task note or Gherkin, then propose the bundle again.")))
+      (do
+        (doseq [path (approval-doc-paths headers reviews)]
+          (append-task-review! root task-id path comments))
+        (when commit
+          (snapshot-rejected! root task-id commit n)
+          (restore-commit! wt commit))
+        (fs/delete-if-exists src)
+        (record-resolution! root id task "sent_back")
+        (drop-reviews! root id)
+        (drop-task-audits! root task-id task)
+        (restore-task-base! root headers)
+        (increment-audit-count! root task-id)
+        (when-not (str/blank? task)
+          (inject-master! root (retry-message task comments reviews)))))))
 
 (defn delete-approval! [root id]
   (let [src (require-pending! root id)
@@ -1361,16 +1394,23 @@
         commit (not-empty (get headers "commit"))
         n (if (git-repo? root) (next-rejected-n root task-id) 1)
         wt (worktree-for root (get headers "from"))]
-    (when commit
-      (snapshot-rejected! root task-id commit n))
-    (rollback-to-base! wt headers)
-    (archive-rejected! root task-id task)
-    (drop-task-handoffs! root task-id task)
-    (drop-task-audits! root task-id task)
-    (pack-board root "delete" "--name" task)
-    (fs/delete-if-exists (reject-notify root task))
-    (drop-reviews! root id)
-    (drop-task-reviews! root task-id)))
+    (if (= "stage-spec" (get headers "kind"))
+      (do
+        (stage-command! root "reject" id "--words" "withdrawn from the dashboard")
+        (record-resolution! root id task "sent_back")
+        (drop-reviews! root id)
+        (drop-task-reviews! root task-id))
+      (do
+        (when commit
+          (snapshot-rejected! root task-id commit n))
+        (rollback-to-base! wt headers)
+        (archive-rejected! root task-id task)
+        (drop-task-handoffs! root task-id task)
+        (drop-task-audits! root task-id task)
+        (pack-board root "delete" "--name" task)
+        (fs/delete-if-exists (reject-notify root task))
+        (drop-reviews! root id)
+        (drop-task-reviews! root task-id)))))
 
 (defn approval-route [uri]
   (let [path (first (str/split (or uri "") #"\?"))]

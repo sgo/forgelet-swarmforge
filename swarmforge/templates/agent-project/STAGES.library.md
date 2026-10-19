@@ -60,6 +60,9 @@ step that can only be checked by reading source is not a scenario.
   words>"` records the exact answer. Approval is single-use and stale when the
   bundle changes.
   The pre-commit hook refuses a commit until the current bundle is approved.
+  The proposal is also posted to the project dashboard and the phone's
+  approvals room; `stage approve` or `stage reject` clears it. Only the
+  operator's words approve a spec.
 - **code**: `mvn -Pwith-unit-tests verify`.
 - **clean**: CRAP at or below 6 and DRY deltas against the task's base commit.
 - **architect**: invariant tests plus `ARCHITECTURE.md`; refactoring only.
@@ -74,6 +77,10 @@ step that can only be checked by reading source is not a scenario.
   (for example japicmp or revapi) to this stage, so a binary or source
   incompatibility cannot pass unnoticed.
 - **release**: optional; `n/a` is not a pass for a release that was skipped.
+
+Each `stage check` moves the project's card on `.swarmforge/board/tasks.tsv`,
+which is what the phone's activity room reads. `stage complete` moves it to
+`done`.
 
 Do not create worktrees or hand work to another role. The project root is the
 checkout.
