@@ -1201,7 +1201,12 @@
         (stage-command! root "approve" id "--words" "approve")
         (record-resolution! root id task "approved")
         (drop-reviews! root id)
-        (drop-task-reviews! root task-id))
+        (drop-task-reviews! root task-id)
+        (write-chat-request!
+         root
+         (str "Spec proposal " id " was approved. Continue with the slice.\n\n"
+              "Run stage list to see the next gate; do not skip clean, architect, "
+              "harden, clean-final or verify.")))
       (let [dest (fs/path root ".swarmforge" "handoffs" "outbox" (fs/file-name src))]
         (fs/create-dirs (fs/parent dest))
         (spit (str dest) (with-approved (slurp (str src))))
