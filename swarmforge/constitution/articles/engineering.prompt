@@ -152,6 +152,11 @@
   the public behaviour, and fail on an unhandled or ambiguous step. Hand-written unit or property
   tests are not acceptance evidence.
 - Gherkin acceptance mutation means running `gherkin-mutator` to mutate Gherkin example values.
+- Write value-driven behaviour as Gherkin Scenario Outlines with example tables. `gherkin-mutator`
+  mutates example cells only, so a feature with no examples produces zero mutations and is not
+  acceptance-mutation evidence. A boolean scenario may stay a plain scenario; record that choice in
+  the task note. When a non-waived feature reports zero mutations, parameterize its value-driven
+  scenarios or record the exemption.
 - Gherkin acceptance mutation runs must report periodic progress/status so agents can distinguish normal long-running work from a hang.
 
 ## Verification

@@ -24,6 +24,9 @@ that calls the public API, and `scripts/run-acceptance-tests.sh` must pass.
 Hand-written JUnit is unit coverage, not acceptance evidence.
 The harden gate also runs `scripts/run-acceptance-mutation.sh`, which mutates
 Gherkin example values and fails on a survivor or infrastructure error.
+Write value-driven behaviour as Scenario Outlines with example tables. A plain
+scenario has no mutable cells, so it is not acceptance-mutation evidence; a
+boolean scenario may stay plain, with that choice recorded in the task note.
 
 End every turn with a line exactly `<<AGENT READY>>`, so the relay knows the
 turn is complete.

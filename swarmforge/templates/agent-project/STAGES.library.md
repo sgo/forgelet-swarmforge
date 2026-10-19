@@ -63,6 +63,9 @@ feature is visible in the gate log rather than silently ignored.
 the example values in every non-waived feature through the same runner. A
 survivor or an infrastructure error fails the gate. The mutator works on
 copies under `tmp/`, so it never rewrites the approved feature files.
+`gherkin-mutator` mutates example cells only: value-driven scenarios must be
+Scenario Outlines, and a non-waived feature that reports zero mutations must be
+parameterized or have its exemption recorded in the task note.
 
 - **spec**: the approved feature bundle. `stage propose spec <file>...` prints
   it; `stage approve <id> --words "<their
