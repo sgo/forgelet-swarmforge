@@ -209,6 +209,16 @@
   (str "codex -C " (sq (str root))
        " --no-alt-screen --dangerously-bypass-approvals-and-sandbox"))
 
+(defn name-agent-window! [root]
+  (let [window (str session-name ":0")
+        project (str (fs/file-name root))]
+    ;; The project is a stable label in the attached status line. Without
+    ;; automatic-rename off, tmux replaces it with whatever process is active
+    ;; in the pane - normally "codex", which says nothing about the project.
+    (tmux root "set-window-option" "-t" window "automatic-rename" "off")
+    (tmux root "set-window-option" "-t" window "allow-rename" "off")
+    (tmux root "rename-window" "-t" window project)))
+
 (declare settle-agent-session!)
 
 (defn start-agent-session! [root command]
@@ -228,7 +238,11 @@
                             "; exec " command))]
       (when-not (zero? (:exit result))
         (exit! 1 "Could not start the agent session: " (:err result))))
-    (settle-agent-session! root)))
+    (settle-agent-session! root))
+  ;; Also correct a session that predates the project-name behavior. The
+  ;; persistent session survives a relay restart, so naming only a new session
+  ;; would leave an upgraded project showing "codex" until it was killed.
+  (name-agent-window! root))
 
 (defn settle-agent-session! [root]
   (loop [waited 0]

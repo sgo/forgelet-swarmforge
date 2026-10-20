@@ -244,6 +244,38 @@
         (sh/sh "tmux" "-S" sock "kill-server")
         (fs/delete-tree forge)))))
 
+(deftest a-single-agent-window-is-named-for-its-project
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "propositions")
+        sock (str (fs/path project ".swarmforge" "agent-tmux.sock"))]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge) "propositions"))))
+      (let [once (run project
+                      "bb" (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
+                      "--root" (str project)
+                      "--once" "--no-serve"
+                      "--agent-command"
+                      "sh -c 'echo \"<<AGENT READY>>\"; sleep 60'")]
+        (is (zero? (:exit once)) (:err once)))
+      (sh/sh "tmux" "-S" sock "rename-window" "-t" "swarmforge-agent:0" "codex")
+      (sh/sh "tmux" "-S" sock "set-window-option" "-t" "swarmforge-agent:0"
+             "automatic-rename" "on")
+      (let [again (run project
+                       "bb" (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
+                       "--root" (str project)
+                       "--once" "--no-serve"
+                       "--agent-command"
+                       "sh -c 'echo \"<<AGENT READY>>\"; sleep 60'")]
+        (is (zero? (:exit again)) (:err again)))
+      (let [windows (sh/sh "tmux" "-S" sock "list-windows"
+                           "-t" "swarmforge-agent"
+                           "-F" "#{window_name}:#{automatic-rename}:#{allow-rename}")]
+        (is (zero? (:exit windows)) (:err windows))
+        (is (= "propositions:0:0\n" (:out windows))))
+      (finally
+        (sh/sh "tmux" "-S" sock "kill-server")
+        (fs/delete-tree forge)))))
+
 (deftest stop-closes-the-agent-session
   (let [forge (fixture-forge)
         project (fs/path forge "projects" "agent")
