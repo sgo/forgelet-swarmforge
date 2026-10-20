@@ -75,6 +75,9 @@ parameterized or have its exemption recorded in the task note.
   The proposal is also posted to the project dashboard and the phone's
   approvals room; `stage approve` or `stage reject` clears it. Only the
   operator's words approve a spec.
+  While a proposal is pending, a new proposal is refused; decide it, or pass
+  `--replace` to supersede it explicitly. The old proposal is recorded as
+  superseded and the bridge reports that ending.
 - **code**: `mvn -Pwith-unit-tests verify`.
 - **clean**: CRAP at or below 6 and DRY deltas against the task's base commit.
 - **architect**: invariant tests plus `ARCHITECTURE.md`; refactoring only.

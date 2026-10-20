@@ -17,7 +17,7 @@
   (str "Usage:\n"
        "  stage list [--root DIR]\n"
        "  stage check <name> [--root DIR]\n"
-       "  stage propose spec <file>... [--root DIR]\n"
+       "  stage propose spec <file>... [--replace] [--root DIR]\n"
        "  stage approve <proposal> --words \"<operator's words>\" [--root DIR]\n"
        "  stage reject <proposal> --words \"<operator's words>\" [--root DIR]\n"
        "  stage complete [--root DIR]\n"
@@ -174,6 +174,18 @@
 (defn stage-approval-file [root id]
   (fs/path (pending-approval-dir root) (str id ".handoff")))
 
+(defn resolved-approval-dir [root]
+  (fs/path root ".swarmforge" "approvals" "resolved"))
+
+(defn record-resolution! [root config id resolution]
+  (let [file (fs/path (resolved-approval-dir root) (str id ".edn"))]
+    (fs/create-dirs (fs/parent file))
+    (spit (str file)
+          (pr-str {:id id
+                   :task (:task config)
+                   :resolution resolution
+                   :at (now)}))))
+
 (defn remove-stage-approvals! [root]
   (let [dir (pending-approval-dir root)]
     (when (fs/directory? dir)
@@ -196,7 +208,6 @@
       (:task config))))
 
 (defn write-stage-approval! [root config proposal]
-  (remove-stage-approvals! root)
   (let [file (stage-approval-file root (:id proposal))
         card (card-name root config (:files proposal))]
     (fs/create-dirs (fs/parent file))
@@ -395,32 +406,54 @@
       (update-board! root config name)
       (println (str "stage " name ": done at tree " tree)))))
 
-(defn propose! [root config state patterns]
+(defn pending-proposals [state]
+  (->> (:proposals state)
+       (filter (fn [[_ proposal]] (= :pending (:status proposal))))
+       (sort-by key)))
+
+(defn propose! [root config state patterns replace?]
   (let [files (spec-files root patterns)]
     (when (empty? files)
       (exit! 1 (str "No spec files found for " (str/join ", " patterns))))
     (let [id (str "spec-" (System/currentTimeMillis))
-          proposal {:id id
-                    :patterns (vec patterns)
-                    :files files
-                    :file (first files)
-                    :hash (spec-hash root files)
-                    :body (spec-body root files)
-                    :at (now)
-                    :status :pending}]
-      (save-state root (:task config)
-                  (assoc-in state [:proposals id] proposal))
-      (update-board! root config "spec")
-      (write-stage-approval! root config proposal)
-      (println (str "spec proposal " id))
-      (println (str "files: " (str/join ", " files)))
-      (println (str "sha256: " (:hash proposal)))
-      (println "---")
-      (println (:body proposal))
-      (println "---")
-      (println (str "Ask the operator to approve this exact text with: "
-                    "stage approve " id " --words \"<their words>\""))
-      (println "The proposal is also in the project dashboard and the phone's approvals room."))))
+          pending (pending-proposals state)]
+      (when (and (seq pending) (not replace?))
+        (exit! 1
+               (str "Spec proposal(s) already pending: "
+                    (str/join ", " (map first pending))
+                    ". Approve or reject them, or pass --replace to supersede them.")))
+      (let [state (if replace?
+                    (reduce (fn [result [pending-id proposal]]
+                              (record-resolution! root config pending-id "superseded")
+                              (assoc-in result [:proposals pending-id]
+                                        (assoc proposal
+                                               :status :superseded
+                                               :superseded-at (now)
+                                               :superseded-by id)))
+                            state pending)
+                    state)
+            proposal {:id id
+                      :patterns (vec patterns)
+                      :files files
+                      :file (first files)
+                      :hash (spec-hash root files)
+                      :body (spec-body root files)
+                      :at (now)
+                      :status :pending}
+            state (assoc-in state [:proposals id] proposal)]
+        (save-state root (:task config) state)
+        (remove-stage-approvals! root)
+        (update-board! root config "spec")
+        (write-stage-approval! root config proposal)
+        (println (str "spec proposal " id))
+        (println (str "files: " (str/join ", " files)))
+        (println (str "sha256: " (:hash proposal)))
+        (println "---")
+        (println (:body proposal))
+        (println "---")
+        (println (str "Ask the operator to approve this exact text with: "
+                      "stage approve " id " --words \"<their words>\""))
+        (println "The proposal is also in the project dashboard and the phone's approvals room.")))))
 
 (defn approve! [root config state id words]
   (let [proposal (get-in state [:proposals id])]
@@ -447,6 +480,7 @@
                                   :files files}]
                                 files)]
         (save-state root (:task config) state)
+        (record-resolution! root config id "approved")
         (remove-stage-approvals! root)
         (update-board! root config "spec")
         (println (str "approved " id " at tree " tree))))))
@@ -465,6 +499,7 @@
                           :words words)
           state (assoc-in state [:proposals id] rejected)]
       (save-state root (:task config) state)
+      (record-resolution! root config id "sent_back")
       (remove-stage-approvals! root)
       (update-board! root config "spec")
       (println (str "sent back " id)))))
@@ -559,6 +594,9 @@
             (recur (nnext remaining) (assoc options :words value) positional)
             (exit! 1 "--words needs a value"))
 
+          (= argument "--replace")
+          (recur (next remaining) (assoc options :replace true) positional)
+
           (= argument "--json")
           (recur (next remaining) (assoc options :json true) positional)
 
@@ -582,8 +620,8 @@
                   (exit! 1 "Usage: stage check <name>"))
         "propose" (let [[_ kind & files] args]
                     (if (and (= "spec" kind) (seq files))
-                      (propose! root config state files)
-                      (exit! 1 "Usage: stage propose spec <file>...")))
+                      (propose! root config state files (:replace options))
+                      (exit! 1 "Usage: stage propose spec <file>... [--replace]")))
         "approve" (if-let [id (second args)]
                     (approve! root config state id (:words options))
                     (exit! 1 "Usage: stage approve <proposal> --words \"<words>\""))

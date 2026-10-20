@@ -200,7 +200,7 @@
 
       (testing "a new proposal replaces the old approval, and approving clears it"
         (let [old-id (latest-proposal-id root)]
-          (run-stage root "propose" "spec" "spec.md" "features/extra.feature")
+          (run-stage root "propose" "spec" "spec.md" "features/extra.feature" "--replace")
           (let [new-id (latest-proposal-id root)]
             (is (not= old-id new-id))
             (is (not (fs/exists? (approval-file old-id))))
@@ -232,6 +232,36 @@
           (let [check (run-stage root "check" "spec")]
             (is (not (zero? (:exit check))))
             (is (str/includes? (:err check) "No current approved proposal")))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest a-pending-spec-must-be-decided-or-explicitly-replaced
+  (let [root (fixture)
+        approval-file (fn [id]
+                        (fs/path root ".swarmforge" "handoffs"
+                                 "pending_approval" (str id ".handoff")))
+        resolved-file (fn [id]
+                        (fs/path root ".swarmforge" "approvals"
+                                 "resolved" (str id ".edn")))]
+    (try
+      (run-stage root "propose" "spec" "spec.md" "features/extra.feature")
+      (let [first-id (latest-proposal-id root)]
+        (let [blocked (run-stage root "propose" "spec"
+                                 "spec.md" "features/extra.feature")]
+          (is (not (zero? (:exit blocked))))
+          (is (str/includes? (:err blocked) "already pending"))
+          (is (str/includes? (:err blocked) first-id))
+          (is (fs/regular-file? (approval-file first-id))))
+        (let [replaced (run-stage root "propose" "spec"
+                                  "spec.md" "features/extra.feature" "--replace")
+              second-id (latest-proposal-id root)]
+          (is (zero? (:exit replaced)) (:err replaced))
+          (is (not= first-id second-id))
+          (is (= :superseded (get-in (state root) [:proposals first-id :status])))
+          (is (fs/regular-file? (resolved-file first-id)))
+          (is (str/includes? (slurp (str (resolved-file first-id))) "superseded"))
+          (is (not (fs/exists? (approval-file first-id))))
+          (is (fs/regular-file? (approval-file second-id)))))
       (finally
         (fs/delete-tree root)))))
 

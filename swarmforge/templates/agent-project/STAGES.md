@@ -73,6 +73,9 @@ parameterized or have its exemption recorded in the task note.
   The proposal is also posted to the project dashboard and the phone's
   approvals room; `stage approve` or `stage reject` clears it. Only the
   operator's words approve a spec.
+  While a proposal is pending, a new proposal is refused; decide it, or pass
+  `--replace` to supersede it explicitly. The old proposal is recorded as
+  superseded and the bridge reports that ending.
 - **code**: `mvn -Pwith-unit-tests verify`.
 - **clean**: `crap4java` for CRAP and `dry4java` for duplicate pairs. The
   project's CRAP ceiling is 6; DRY and mutation are deltas against the task's
