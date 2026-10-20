@@ -132,7 +132,9 @@ tmux session, and appends `stage list` to the answer. The same session is what
 one agent rather than two. The command defaults to
 `codex -C <project> --no-alt-screen --dangerously-bypass-approvals-and-sandbox`;
 set `SWARMFORGE_AGENT_COMMAND` to use another agent. The runner never creates
-a worktree or a handoff.
+a worktree or a handoff. The attached tmux window is named for the project,
+with automatic renaming disabled, so its status line reads
+`swarmforg0:<project>` rather than `swarmforg0:codex`.
 Closing the project stops both the relay and the `swarmforge-agent` session;
 `agent-runner.bb --stop-agent` stops only the agent, leaving the phone relay
 running.
