@@ -206,6 +206,44 @@
         (stop-agent-session! project)
         (fs/delete-tree forge)))))
 
+(deftest an-old-ready-marker-does-not-deliver-into-a-busy-agent
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent")
+        sock (str (fs/path project ".swarmforge" "agent-tmux.sock"))]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge) "agent"))))
+      (write-file (fs/path project ".swarmforge" "dashboard" "requests" "pending"
+                           "req-busy.request")
+                  "id: req-busy\nstatus: pending\ncreated_at: 2026-10-20T21:24:12Z\n\nApproved. Continue.\n")
+      (fs/create-dirs (fs/parent sock))
+      (is (zero? (:exit
+                  (sh/sh "tmux" "-S" sock "new-session" "-d" "-s" "swarmforge-agent"
+                         "sh -c 'echo \"<<AGENT READY>>\"; echo \"• Working (1s • esc to interrupt)\"; sleep 60'"))))
+
+      (let [while-busy (run project
+                            "bb" (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
+                            "--root" (str project)
+                            "--once" "--no-serve"
+                            "--agent-command" fake-agent-command)]
+        (is (zero? (:exit while-busy)) (:err while-busy))
+        (is (str/includes? (:out while-busy) "agent is still in a turn"))
+        (is (fs/regular-file? (fs/path project ".swarmforge" "dashboard" "requests"
+                                        "pending" "req-busy.request"))))
+
+      (sh/sh "tmux" "-S" sock "kill-server")
+      (let [once-ready (run project
+                            "bb" (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
+                            "--root" (str project)
+                            "--once" "--no-serve"
+                            "--agent-command" fake-agent-command)]
+        (is (zero? (:exit once-ready)) (:err once-ready))
+        (is (fs/regular-file? (fs/path project ".swarmforge" "dashboard" "requests"
+                                        "done" "req-busy.request"))
+            (str "runner output: " (:out once-ready) (:err once-ready))))
+      (finally
+        (sh/sh "tmux" "-S" sock "kill-server")
+        (fs/delete-tree forge)))))
+
 (deftest stop-closes-the-agent-session
   (let [forge (fixture-forge)
         project (fs/path forge "projects" "agent")

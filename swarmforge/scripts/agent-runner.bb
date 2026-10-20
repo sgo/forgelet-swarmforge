@@ -188,19 +188,22 @@
 (defn session? [root]
   (zero? (:exit (tmux root "has-session" "-t" session-name))))
 
-(defn pane [root]
-  (let [result (tmux root "capture-pane" "-p" "-J" "-S" "-4000"
-                     "-t" session-name)]
-    (when (zero? (:exit result))
-      (:out result))))
-
 (defn visible-pane [root]
   (let [result (tmux root "capture-pane" "-p" "-J" "-t" session-name)]
     (when (zero? (:exit result))
       (:out result))))
 
+(defn busy? [text]
+  (str/includes? (str/lower-case (or text "")) "esc to interrupt"))
+
 (defn ready? [root]
-  (str/includes? (or (pane root) "") ready-marker))
+  ;; Scrollback is not readiness. Once a previous turn left its ready marker
+  ;; above the visible screen, that old marker says nothing about this moment;
+  ;; Codex's current pane says it is busy explicitly while a turn runs.
+  (let [text (or (visible-pane root) "")]
+    (and (not (busy? text))
+         (or (str/includes? text ready-marker)
+             (str/includes? text "Ask Codex to do anything")))))
 
 (defn default-agent-command [root]
   (str "codex -C " (sq (str root))
@@ -284,6 +287,28 @@
     (tmux root "send-keys" "-t" session-name "C-m")
     id))
 
+(defn composer-tail [root]
+  (let [lines (vec (str/split-lines (or (visible-pane root) "")))
+        prompt-index (last
+                      (keep-indexed
+                       (fn [index line]
+                         (when (str/starts-with? (str/triml line) "›")
+                           index))
+                       lines))]
+    (if (some? prompt-index)
+      (str/join "\n" (subvec lines prompt-index))
+      "")))
+
+(defn request-in-composer? [root id]
+  (str/includes? (composer-tail root) (str "[phone " id "]")))
+
+(defn deliver-request! [root request]
+  (if (request-in-composer? root (:id request))
+    ;; The earlier paste reached the composer but its Enter did not submit it.
+    ;; Submitting the text already there is safer than pasting a second copy.
+    (tmux root "send-keys" "-t" session-name "C-m")
+    (send-request! root request)))
+
 (defn request-done? [root id]
   (fs/regular-file?
    (fs/path root ".swarmforge" "dashboard" "requests" "done"
@@ -301,13 +326,18 @@
   (start-agent-session! root agent-command)
   (settle-agent-session! root)
   (if-let [request (pending-request root)]
-    (do
-      (println "request" (:id request))
-      (wait-until-ready! root 5000)
-      (send-request! root request)
-      (if (wait-for-done! root (:id request) 600000)
-        (println "answered" (:id request))
-        (println "still pending after timeout:" (:id request))))
+    (let [id (:id request)]
+      (if-not (ready? root)
+        (println "request" id "waits: the agent is still in a turn")
+        (do
+          (println (if (request-in-composer? root id)
+                     "ringing request already in the composer:"
+                     "request")
+                   id)
+          (deliver-request! root request)
+          (if (wait-for-done! root id 15000)
+            (println "answered" id)
+            (println "still pending after delivery; the next pass will ring it again:" id)))))
     (println "no pending requests")))
 
 (defn -main [& args]
