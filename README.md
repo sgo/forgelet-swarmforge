@@ -148,6 +148,10 @@ The project carries an `AGENTS.md` that points at `STAGES.md` and the forge's
 copied `swarmforge/constitution/articles/engineering.prompt`, so the build,
 quality, release and deployment rules travel with the project rather than
 being repeated in every operator request.
+The template's required `deploy` stage runs `scripts/publish-snapshot.sh` after
+the quality gates. It deploys the current `-SNAPSHOT` through the configured
+Maven target, so `stage complete` cannot finish the card while the snapshot is
+unpublished or the deployment stage is absent, optional or stale.
 
 For a library, pass `--profile library`: the template replaces the acceptance
 QA gate with an explicit `verify` stage (property tests, plus the library's API

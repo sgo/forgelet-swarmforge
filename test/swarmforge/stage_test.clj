@@ -140,6 +140,37 @@
       (finally
         (fs/delete-tree root)))))
 
+(deftest a-configured-deploy-target-requires-a-required-stage
+  (let [root (fixture)
+        stages-file (fs/path root "stages.edn")]
+    (try
+      (write-file (fs/path root "swarmforge" "deploy.conf") "github-packages\n")
+      (let [missing (run-stage root "complete")]
+        (is (not (zero? (:exit missing))))
+        (is (str/includes? (:err missing) "no deploy stage")))
+
+      (write-file stages-file
+                  (pr-str (update stage-config :stages conj
+                                  {:name "deploy"
+                                   :optional true
+                                   :runs [["scripts/publish-snapshot.sh"]]
+                                   :stamp [:sources]})))
+      (let [optional (run-stage root "complete")]
+        (is (not (zero? (:exit optional))))
+        (is (str/includes? (:err optional) "deploy stage is optional")))
+
+      (write-file stages-file
+                  (pr-str (update stage-config :stages conj
+                                  {:name "deploy"
+                                   :runs [["scripts/publish-snapshot.sh"]]
+                                   :stamp [:sources]})))
+      (let [required (run-stage root "complete")]
+        (is (not (zero? (:exit required))))
+        (is (not (str/includes? (:err required) "deploy stage")))
+        (is (str/includes? (:err required) "working tree is not committed")))
+      (finally
+        (fs/delete-tree root)))))
+
 (deftest approval-is-single-use-and-tied-to-the-spec
   (let [root (fixture)]
     (try

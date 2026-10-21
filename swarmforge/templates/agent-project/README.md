@@ -8,6 +8,21 @@ request at a time.
 The forge dashboard marks this project as single-agent and links to the
 project's own dashboard.
 
+## Snapshot deployment
+
+A completed card deploys its current `-SNAPSHOT` after every quality gate and
+after its reviewed commit has been pushed:
+
+```sh
+stage check deploy
+```
+
+The stage runs `scripts/publish-snapshot.sh` through
+`GITHUB_PACKAGES_TOKEN` and the `with-release-tests` profile.
+`swarmforge/deploy.conf` names the target, and `stage complete` refuses while
+the required deploy stage is absent or stale. The optional `release` stage is
+separate.
+
 ## Acceptance
 
 The approved Gherkin is executed, not just translated into hand-written tests.

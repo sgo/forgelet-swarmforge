@@ -40,5 +40,12 @@ Do not use `--no-verify`; run `stage propose spec` and `stage approve` first.
 The proposal also appears in the project dashboard and the phone's approvals
 room; only the operator approves it, with their own words.
 
+Snapshot deployment is part of card completion, not an optional release:
+after the reviewed tree is committed and pushed, run `stage check deploy`.
+It executes `scripts/publish-snapshot.sh` and deploys the current
+`-SNAPSHOT`. When `swarmforge/deploy.conf` names a target, `stage complete`
+refuses if `stages.edn` has no required `deploy` stage or if that stage is
+stale. Do not use a GitHub Actions workflow as a substitute.
+
 Do not create worktrees or hand work to another role. The project root is the
 checkout.

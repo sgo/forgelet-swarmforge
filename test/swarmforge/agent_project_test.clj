@@ -74,6 +74,12 @@
              (fs/path project "scripts" "run-acceptance-mutation.sh")))
         (is (fs/executable?
              (fs/path project "scripts" "run-acceptance-mutation.sh")))
+        (is (fs/executable?
+             (fs/path project "scripts" "publish-snapshot.sh")))
+        (is (fs/executable?
+             (fs/path project "scripts" "github-packages-token.sh")))
+        (is (= "github-packages\n"
+               (slurp (str (fs/path project "swarmforge" "deploy.conf")))))
         (is (fs/regular-file?
              (fs/path project "acceptance" "runner-worker.sh")))
         (is (fs/executable?
@@ -110,7 +116,7 @@
         (let [listing (run-stage project "list")]
           (is (zero? (:exit listing)) (:err listing))
           (doseq [stage ["spec" "code" "clean" "architect"
-                         "harden" "clean-final" "qa" "release"]]
+                         "harden" "clean-final" "qa" "deploy" "release"]]
             (is (str/includes? (:out listing) stage)))))
 
       (testing "the code gate runs its command and records evidence"
@@ -194,6 +200,13 @@
         (is (str/includes? stages ":profile :library"))
         (is (str/includes? stages ":task \"agent-lib\""))
         (is (str/includes? stages ":name \"verify\""))
+        (let [parsed (edn/read-string stages)
+              names (mapv :name (:stages parsed))
+              deploy (some #(when (= "deploy" (:name %)) %) (:stages parsed))]
+          (is (= ["verify" "deploy" "release"]
+                 (subvec names (- (count names) 3))))
+          (is (not (:optional deploy)))
+          (is (= [["scripts/publish-snapshot.sh"]] (:runs deploy))))
         (is (str/includes? stages "scripts/run-acceptance-tests.sh"))
         (is (str/includes? stages "target/acceptance/acceptance.log"))
         (is (str/includes? stages "scripts/run-acceptance-mutation.sh"))
@@ -201,7 +214,37 @@
       (let [listing (run-stage project "list")]
         (is (zero? (:exit listing)) (:err listing))
         (is (str/includes? (:out listing) "verify"))
+        (is (str/includes? (:out listing) "deploy"))
         (is (not (str/includes? (:out listing) "qa"))))
+      (finally
+        (stop-agent-session! project)
+        (fs/delete-tree forge)))))
+
+(deftest a-snapshot-deployment-uses-the-release-gate-and-project-token
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent-lib")]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge)
+                            "--profile" "library" "agent-lib"))))
+      (let [fake-bin (fs/path forge "fake-bin")
+            mvn (fs/path fake-bin "mvn")]
+        (write-file mvn
+                    (str "#!/bin/sh\n"
+                         "case \" $* \" in\n"
+                         "  *\" help:evaluate \"*) printf '0.1.0-SNAPSHOT\\n' ;;\n"
+                         "  *\" deploy \"*) mkdir -p target; "
+                         "printf 'token=%s args=%s\\n' \"$GITHUB_PACKAGES_TOKEN\" \"$*\" "
+                         "> target/deploy.args ;;\n"
+                         "  *) printf 'unexpected mvn: %s\\n' \"$*\" >&2; exit 2 ;;\n"
+                         "esac\n"))
+        (fs/set-posix-file-permissions mvn "rwxr-xr-x")
+        (let [publish (sh/sh (str (fs/path project "scripts" "publish-snapshot.sh"))
+                             :dir (str project)
+                             :env {"PATH" (str fake-bin ":" (System/getenv "PATH"))
+                                   "GITHUB_PACKAGES_TOKEN" "test-packages-token"})]
+          (is (zero? (:exit publish)) (:err publish))
+          (is (= "token=test-packages-token args=-B -Pwith-release-tests deploy\n"
+                 (slurp (str (fs/path project "target" "deploy.args")))))))
       (finally
         (stop-agent-session! project)
         (fs/delete-tree forge)))))

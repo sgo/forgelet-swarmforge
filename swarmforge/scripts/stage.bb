@@ -522,11 +522,15 @@
       "(operator approval)"
       "")))
 
+(declare deploy-configuration-problem)
+
 (defn list! [root config state]
   (let [tree (worktree-tree root)]
     (println (str "task: " (:task config)))
     (println (str "tree: " tree))
     (println "Each stage is a gate on the current vertical slice; tests, cleanup and hardening are not later tasks.")
+    (when-let [problem (deploy-configuration-problem root config)]
+      (println (str "warning: " problem)))
     (doseq [stage (:stages config)]
       (println (format "%-10s %-8s %s"
                        (:name stage)
@@ -535,6 +539,29 @@
       (let [inputs (resolve-inputs root stage)]
         (when (seq inputs)
           (println (str "           inputs: " (str/join ", " inputs))))))))
+
+(defn configured-deploy-target [root]
+  (let [file (fs/path root "swarmforge" "deploy.conf")]
+    (when (fs/regular-file? file)
+      (->> (str/split-lines (slurp (str file)))
+           (map str/trim)
+           (remove str/blank?)
+           (remove #(str/starts-with? % "#"))
+           first))))
+
+(defn deploy-configuration-problem [root config]
+  (when-let [target (configured-deploy-target root)]
+    (let [stage (some #(when (= "deploy" (:name %)) %) (:stages config))]
+      (cond
+        (nil? stage)
+        (str "snapshot deployment is configured as " target
+             " but stages.edn has no deploy stage")
+
+        (:optional stage)
+        (str "snapshot deployment is configured as " target
+             " but the deploy stage is optional")
+
+        :else nil))))
 
 (defn status-json [root config state]
   (let [tree (worktree-tree root)
@@ -558,6 +585,8 @@
 (defn complete! [root config state]
   (let [tree (worktree-tree root)
         head (head-tree root)]
+    (when-let [problem (deploy-configuration-problem root config)]
+      (exit! 1 problem))
     (when-not head
       (exit! 1 "No HEAD commit; commit the project first"))
     (when-not (= tree head)

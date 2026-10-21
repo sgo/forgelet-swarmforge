@@ -24,7 +24,7 @@ Spec-only and bootstrap tasks need an explicit waiver in the approved spec,
 not a deferred gate.
 
 ```
-spec -> code -> clean -> architect -> harden -> clean-final -> verify -> release?
+spec -> code -> clean -> architect -> harden -> clean-final -> verify -> deploy -> release?
 ```
 
 Run `bb swarmforge/scripts/stage.bb list --root .` when you think the work is
@@ -92,6 +92,13 @@ parameterized or have its exemption recorded in the task note.
   gate. If the library publishes an API, also add the compatibility check
   (for example japicmp or revapi) to this stage, so a binary or source
   incompatibility cannot pass unnoticed.
+- **deploy**: required for every completed card. After every earlier gate is
+  current, commit and push the card, then run `stage check deploy`. The stage
+  executes `scripts/publish-snapshot.sh`, which requires a `-SNAPSHOT` version,
+  uses `GITHUB_PACKAGES_TOKEN` through the project helper, activates
+  `with-release-tests`, and deploys to the target named by
+  `swarmforge/deploy.conf`. `stage complete` refuses while this stage is absent,
+  optional or stale. No GitHub Actions workflow is involved.
 - **release**: optional; `n/a` is not a pass for a release that was skipped.
 
 Each `stage check` moves the project's card on `.swarmforge/board/tasks.tsv`,

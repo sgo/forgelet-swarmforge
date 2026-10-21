@@ -81,6 +81,20 @@
 - A project's scripts name the profile for each suite; run a gate the way the script for it does, and
   leave the gates off otherwise. No gate is a homegrown substitute for the tool the table names.
 
+## Java Snapshot Deployment
+- A completed card for a project with `swarmforge/deploy.conf` publishes its current `-SNAPSHOT`
+  after all verification gates and after the reviewed commit is pushed. Run
+  `scripts/publish-snapshot.sh` through the required `deploy` stage; `stage complete` must refuse
+  while that stage is absent, optional or stale.
+- Snapshot deployment is not a release. It uses `-Pwith-release-tests deploy`, the project's
+  token helper and the configured Maven repository, and it does not create a release tag or advance
+  the development version. The optional `release` stage remains the separate `release:prepare` /
+  `release:perform` path above.
+- Every publishable template ships `scripts/publish-snapshot.sh`,
+  `scripts/github-packages-token.sh` and `swarmforge/deploy.conf`. A project that genuinely has no
+  deploy target removes `deploy.conf` and the deploy stage deliberately rather than leaving a
+  configured target unimplemented.
+
 ## Java Releases
 - A Java project's release is `mvn release:prepare` and then `mvn release:perform`, with the exact
   release version and the exact next development version the task names - never derived, never

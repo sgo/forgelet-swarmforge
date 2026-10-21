@@ -87,6 +87,12 @@ chmod +x "$dest/swarm"
 if [[ -f "$dest/scripts/run-acceptance-tests.sh" ]]; then
   chmod +x "$dest/scripts/run-acceptance-tests.sh"
 fi
+if [[ -f "$dest/scripts/publish-snapshot.sh" ]]; then
+  chmod +x "$dest/scripts/publish-snapshot.sh"
+fi
+if [[ -f "$dest/scripts/github-packages-token.sh" ]]; then
+  chmod +x "$dest/scripts/github-packages-token.sh"
+fi
 
 mkdir -p "$dest/.swarmforge"
 printf 'agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n' "$dest" \
