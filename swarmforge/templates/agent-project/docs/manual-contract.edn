@@ -1,0 +1,6 @@
+{:documents
+ {:readme "README.md"
+  :manual "docs/manual.md"
+  :architecture "ARCHITECTURE.md"}
+ :sections []
+ :examples []}

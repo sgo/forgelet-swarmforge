@@ -24,7 +24,7 @@ Spec-only and bootstrap tasks need an explicit waiver in the approved spec,
 not a deferred gate.
 
 ```
-spec -> code -> clean -> architect -> harden -> clean-final -> verify -> deploy -> release?
+spec -> code -> clean -> architect -> harden -> clean-final -> verify -> docs -> deploy -> release?
 ```
 
 Run `bb swarmforge/scripts/stage.bb list --root .` when you think the work is
@@ -92,6 +92,12 @@ parameterized or have its exemption recorded in the task note.
   gate. If the library publishes an API, also add the compatibility check
   (for example japicmp or revapi) to this stage, so a binary or source
   incompatibility cannot pass unnoticed.
+- **docs**: required for every card. Update `README.md`, `docs/manual.md` and
+  `ARCHITECTURE.md` where their audiences require it. `docs/manual-contract.edn`
+  links each document section to the public APIs it explains and to executable
+  examples whose output checks the prose. `scripts/check-documentation.sh`
+  verifies required documents, headings, API ownership, examples and local
+  links. The task report records what changed or why a surface was unchanged.
 - **deploy**: required for every completed card. After every earlier gate is
   current, commit and push the card, then run `stage check deploy`. The stage
   executes `scripts/publish-snapshot.sh`, which requires a `-SNAPSHOT` version,

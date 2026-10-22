@@ -8,6 +8,19 @@ request at a time.
 The forge dashboard marks this project as single-agent and links to the
 project's own dashboard.
 
+## Documentation contract
+
+Every completed card includes the `docs` gate. The maintained surfaces are:
+
+- `README.md` for setup, coordinates, quick start and project status;
+- `docs/manual.md` for detailed public behaviour; and
+- `ARCHITECTURE.md` for boundaries and structural decisions.
+
+`docs/manual-contract.edn` maps sections to the public APIs they explain and
+to executable examples. `scripts/check-documentation.sh` checks the documents,
+headings, API ownership, local links and example output. A section without an
+example must be explicitly conceptual and carry its reason.
+
 ## Snapshot deployment
 
 A completed card deploys its current `-SNAPSHOT` after every quality gate and

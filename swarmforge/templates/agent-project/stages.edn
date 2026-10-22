@@ -37,6 +37,12 @@
    :evidence ["target/surefire-reports/*.xml"
               "target/acceptance/acceptance.log"]
    :stamp [:features :sources "acceptance" "scripts/run-acceptance-tests.sh"]}
+  {:name "docs"
+   :runs [["scripts/check-documentation.sh"]]
+   :evidence ["target/documentation/check.log"]
+   :stamp [:features :sources "README.md" "docs" "ARCHITECTURE.md"
+           "scripts/check-documentation.sh"
+           "swarmforge/scripts/check-documentation.bb"]}
   {:name "deploy"
    :runs [["scripts/publish-snapshot.sh"]]
    :evidence []

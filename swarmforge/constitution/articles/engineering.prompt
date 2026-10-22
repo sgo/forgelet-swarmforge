@@ -81,6 +81,17 @@
 - A project's scripts name the profile for each suite; run a gate the way the script for it does, and
   leave the gates off otherwise. No gate is a homegrown substitute for the tool the table names.
 
+## Documentation Gates
+- A completed slice reviews three documents: `README.md` for installation, coordinates, quick start and
+  project status; `docs/manual.md` for current public behaviour; and `ARCHITECTURE.md` for boundaries
+  and structural decisions. The task records what changed in each or why it needed no change.
+- `docs/manual-contract.edn` maps every maintained document section to its public APIs and executable
+  examples. Each non-conceptual section runs at least one example against the current tree. A section
+  may omit an example only by declaring itself conceptual with a reason.
+- The required `docs` stage runs `scripts/check-documentation.sh`, which rejects missing sections, APIs,
+  examples, required headings and broken local links. It runs after behavioural verification and before
+  snapshot deployment, so documentation about the final tree is what ships.
+
 ## Java Snapshot Deployment
 - A completed card for a project with `swarmforge/deploy.conf` publishes its current `-SNAPSHOT`
   after all verification gates and after the reviewed commit is pushed. Run

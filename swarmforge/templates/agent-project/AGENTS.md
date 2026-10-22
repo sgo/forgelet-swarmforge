@@ -40,6 +40,18 @@ Do not use `--no-verify`; run `stage propose spec` and `stage approve` first.
 The proposal also appears in the project dashboard and the phone's approvals
 room; only the operator approves it, with their own words.
 
+Documentation is part of the slice. Before `stage check docs`, review all three
+surfaces: `README.md` for installation, coordinates, quick start and project
+status; `docs/manual.md` for detailed public behaviour and extension guidance;
+and `ARCHITECTURE.md` for boundaries and structural decisions. Record in the
+task note what changed in each or why it did not need to change.
+
+Keep `docs/manual-contract.edn` current. Each section names the public APIs it
+owns and at least one executable example, unless it is explicitly conceptual
+with a reason. The example command runs against the current tree and must print
+the declared text; a removed or changed API therefore makes the documenting
+section fail rather than leaving stale prose behind.
+
 Snapshot deployment is part of card completion, not an optional release:
 after the reviewed tree is committed and pushed, run `stage check deploy`.
 It executes `scripts/publish-snapshot.sh` and deploys the current

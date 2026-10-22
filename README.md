@@ -148,6 +148,11 @@ The project carries an `AGENTS.md` that points at `STAGES.md` and the forge's
 copied `swarmforge/constitution/articles/engineering.prompt`, so the build,
 quality, release and deployment rules travel with the project rather than
 being repeated in every operator request.
+The required `docs` stage runs `scripts/check-documentation.sh`. The maintained
+README, consumer manual and architecture document are linked through
+`docs/manual-contract.edn` to public APIs and executable examples, so changed
+behaviour makes the owning section fail instead of leaving stale prose in the
+tree.
 The template's required `deploy` stage runs `scripts/publish-snapshot.sh` after
 the quality gates. It deploys the current `-SNAPSHOT` through the configured
 Maven target, so `stage complete` cannot finish the card while the snapshot is

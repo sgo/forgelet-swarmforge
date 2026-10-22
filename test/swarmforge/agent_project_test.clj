@@ -78,6 +78,10 @@
              (fs/path project "scripts" "publish-snapshot.sh")))
         (is (fs/executable?
              (fs/path project "scripts" "github-packages-token.sh")))
+        (is (fs/executable?
+             (fs/path project "scripts" "check-documentation.sh")))
+        (is (fs/regular-file?
+             (fs/path project "docs" "manual-contract.edn")))
         (is (= "github-packages\n"
                (slurp (str (fs/path project "swarmforge" "deploy.conf")))))
         (is (fs/regular-file?
@@ -116,7 +120,7 @@
         (let [listing (run-stage project "list")]
           (is (zero? (:exit listing)) (:err listing))
           (doseq [stage ["spec" "code" "clean" "architect"
-                         "harden" "clean-final" "qa" "deploy" "release"]]
+                         "harden" "clean-final" "qa" "docs" "deploy" "release"]]
             (is (str/includes? (:out listing) stage)))))
 
       (testing "the code gate runs its command and records evidence"
@@ -203,8 +207,8 @@
         (let [parsed (edn/read-string stages)
               names (mapv :name (:stages parsed))
               deploy (some #(when (= "deploy" (:name %)) %) (:stages parsed))]
-          (is (= ["verify" "deploy" "release"]
-                 (subvec names (- (count names) 3))))
+          (is (= ["verify" "docs" "deploy" "release"]
+                 (subvec names (- (count names) 4))))
           (is (not (:optional deploy)))
           (is (= [["scripts/publish-snapshot.sh"]] (:runs deploy))))
         (is (str/includes? stages "scripts/run-acceptance-tests.sh"))
@@ -214,6 +218,7 @@
       (let [listing (run-stage project "list")]
         (is (zero? (:exit listing)) (:err listing))
         (is (str/includes? (:out listing) "verify"))
+        (is (str/includes? (:out listing) "docs"))
         (is (str/includes? (:out listing) "deploy"))
         (is (not (str/includes? (:out listing) "qa"))))
       (finally
@@ -245,6 +250,63 @@
           (is (zero? (:exit publish)) (:err publish))
           (is (= "token=test-packages-token args=-B -Pwith-release-tests deploy\n"
                  (slurp (str (fs/path project "target" "deploy.args")))))))
+      (finally
+        (stop-agent-session! project)
+        (fs/delete-tree forge)))))
+
+(deftest a-manual-contract-runs-examples-and-detects-unowned-api-prose
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent-lib")]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge)
+                            "--profile" "library" "agent-lib"))))
+      (write-file (fs/path project "README.md")
+                  (str "# Demo\n\n[Manual](docs/manual.md)\n\n"
+                       "[Architecture](ARCHITECTURE.md)\n\n## Quick start\n\nRun it.\n"))
+      (write-file (fs/path project "docs" "manual.md")
+                  (str "# Manual\n\n## Equality\n\n"
+                       "Use `Propositions.equal` and interpret it.\n"))
+      (write-file (fs/path project "docs" "manual-contract.edn")
+                  (pr-str
+                   {:documents {:readme "README.md"
+                                :manual "docs/manual.md"
+                                :architecture "ARCHITECTURE.md"}
+                    :sections
+                    [{:id "quick-start"
+                      :document "README.md"
+                      :heading "## Quick start"
+                      :examples ["quick"]}
+                     {:id "equality"
+                      :document "docs/manual.md"
+                      :heading "## Equality"
+                      :apis ["Propositions.equal"]
+                      :examples ["equality"]}
+                     {:id "architecture"
+                      :document "ARCHITECTURE.md"
+                      :heading "# Architecture decision"
+                      :conceptual true
+                      :reason "the architecture stage owns structural verification"}]
+                    :examples
+                    [{:id "quick"
+                      :section "quick-start"
+                      :command ["sh" "-c" "printf 'ready\\n'"]
+                      :expect ["ready"]}
+                     {:id "equality"
+                      :section "equality"
+                      :command ["sh" "-c" "printf 'true\\n'"]
+                      :expect ["true"]}]}))
+      (let [check (run project "scripts/check-documentation.sh")]
+        (is (zero? (:exit check)) (:err check))
+        (is (str/includes? (:out check) "2 executable examples passed"))
+        (is (fs/regular-file?
+             (fs/path project "target" "documentation" "check.log"))))
+
+      (write-file (fs/path project "docs" "manual.md")
+                  "# Manual\n\n## Equality\n\nUse equality.\n")
+      (let [stale (run project "scripts/check-documentation.sh")]
+        (is (not (zero? (:exit stale))))
+        (is (str/includes? (str (:out stale) (:err stale))
+                           "does not name public API Propositions.equal")))
       (finally
         (stop-agent-session! project)
         (fs/delete-tree forge)))))
