@@ -3,7 +3,8 @@
 (ns upgrade-agent-project
   (:require [babashka.fs :as fs]
             [clojure.edn :as edn]
-            [clojure.pprint :as pprint]))
+            [clojure.pprint :as pprint]
+            [clojure.string :as str]))
 
 (def docs-stage
   {:name "docs"
@@ -12,6 +13,13 @@
    :stamp [:features :sources "README.md" "docs" "ARCHITECTURE.md"
            "scripts/check-documentation.sh"
            "swarmforge/scripts/check-documentation.bb"]})
+
+(defn deploy-stage [command]
+  {:name "deploy"
+   :runs [[command]]
+   :evidence []
+   :stamp [:sources "scripts/publish-snapshot.sh"
+           "scripts/github-packages-token.sh" "swarmforge/deploy.conf"]})
 
 (defn fail! [message]
   (binding [*out* *err*]
@@ -54,6 +62,29 @@
       config)
     (update config :stages insert-before docs-stage #{"deploy" "release"})))
 
+(defn configured-deploy-target [root]
+  (let [file (fs/path root "swarmforge" "deploy.conf")]
+    (when (fs/regular-file? file)
+      (->> (str/split-lines (slurp (str file)))
+           (map str/trim)
+           (remove str/blank?)
+           (remove #(str/starts-with? % "#"))
+           first))))
+
+(defn existing-publish-command [root]
+  (some #(when (fs/regular-file? (fs/path root %)) %)
+        ["scripts/publish-snapshot.sh"
+         "swarmforge/local-scripts/publish-snapshot.sh"]))
+
+(defn ensure-deploy-stage [config stage]
+  (if-let [existing (some #(when (= "deploy" (:name %)) %) (:stages config))]
+    (if (:optional existing)
+      (update config :stages
+              (fn [stages]
+                (mapv #(if (= "deploy" (:name %)) (dissoc % :optional) %) stages)))
+      config)
+    (update config :stages insert-before stage #{"release"})))
+
 (defn -main [& args]
   (let [root (fs/absolutize (or (option args "--root") "."))
         template (fs/absolutize
@@ -68,6 +99,11 @@
         template-wrapper (fs/path template "scripts" "check-documentation.sh")
         upgrade-source (fs/path (fs/parent (fs/absolutize *file*))
                                 "check-documentation.bb")
+        deploy-target (configured-deploy-target root)
+        publish-command (existing-publish-command root)
+        install-publisher? (and deploy-target (nil? publish-command))
+        effective-publish-command (or publish-command
+                                      "scripts/publish-snapshot.sh")
         config (when (fs/regular-file? stages-file)
                  (try
                    (edn/read-string (slurp (str stages-file)))
@@ -76,9 +112,18 @@
                                  (.getMessage cause))))))
         _ (when-not config
             (fail! (str "stages.edn is missing under " root)))
-        upgraded (when config (ensure-docs-stage config))
+        with-deploy (when config
+                      (cond-> config
+                        deploy-target
+                        (ensure-deploy-stage
+                         (deploy-stage effective-publish-command))))
+        upgraded (when with-deploy (ensure-docs-stage with-deploy))
         pending (cond-> []
-                  (and config (not= config upgraded)) (conj "add required docs stage")
+                  (and with-deploy (not= config with-deploy))
+                  (conj "add required deploy stage")
+                  (and upgraded (not= with-deploy upgraded))
+                  (conj "add required docs stage")
+                  install-publisher? (conj "install snapshot publisher")
                   (not (fs/regular-file? checker)) (conj "install check-documentation.bb")
                   (or (not (fs/regular-file? wrapper))
                       (not= (slurp (str wrapper)) (slurp (str template-wrapper))))
@@ -95,6 +140,13 @@
       (do
         (when (and config (not= config upgraded))
           (write-stages! stages-file upgraded))
+        (when install-publisher?
+          (doseq [file ["publish-snapshot.sh" "github-packages-token.sh"]]
+            (let [source (fs/path template "scripts" file)
+                  destination (fs/path root "scripts" file)]
+              (fs/create-dirs (fs/parent destination))
+              (fs/copy source destination {:replace-existing true})
+              (fs/set-posix-file-permissions destination "rwxr-xr-x"))))
         (when-not (= (when (fs/regular-file? checker) (slurp (str checker)))
                      (slurp (str upgrade-source)))
           (fs/create-dirs (fs/parent checker))

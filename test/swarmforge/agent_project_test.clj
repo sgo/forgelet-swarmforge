@@ -323,7 +323,8 @@
         (write-file stages-file
                     (pr-str (update config :stages
                                     #(vec (remove (fn [stage]
-                                                    (= "docs" (:name stage)))
+                                                    (contains? #{"docs" "deploy"}
+                                                               (:name stage)))
                                                   %))))))
       (fs/delete-if-exists (fs/path project "scripts" "check-documentation.sh"))
       (fs/delete-if-exists
@@ -333,18 +334,22 @@
       (let [check (run repo-root composer "--forge" (str forge)
                        "--upgrade" (str project) "--check")]
         (is (not (zero? (:exit check))))
-        (is (str/includes? (:out check) "add required docs stage")))
+        (is (str/includes? (:out check) "add required docs stage"))
+        (is (str/includes? (:out check) "add required deploy stage")))
 
       (let [upgrade (run repo-root composer "--forge" (str forge)
                          "--upgrade" (str project))]
         (is (zero? (:exit upgrade)) (:err upgrade))
-        (is (str/includes? (:out upgrade) "upgraded: add required docs stage")))
+        (is (str/includes? (:out upgrade) "upgraded: add required docs stage"))
+        (is (str/includes? (:out upgrade) "upgraded: add required deploy stage")))
 
       (let [stages (:stages (edn/read-string (slurp (str stages-file))))
             names (mapv :name stages)
             docs-index (.indexOf names "docs")
-            deploy-index (.indexOf names "deploy")]
-        (is (= (dec deploy-index) docs-index))
+            deploy-index (.indexOf names "deploy")
+            release-index (.indexOf names "release")]
+        (is (< docs-index deploy-index))
+        (is (< deploy-index release-index))
         (is (not (:optional (nth stages docs-index)))))
       (is (fs/executable?
            (fs/path project "scripts" "check-documentation.sh")))
