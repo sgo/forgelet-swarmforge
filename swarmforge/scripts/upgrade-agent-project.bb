@@ -130,7 +130,7 @@
                   (conj "install check-documentation.sh")
                   (not (fs/regular-file? contract)) (conj "create docs/manual-contract.edn"))]
     (when (empty? pending)
-      (println (str "get-agent-project: " root " has the documentation-gate upgrade"))
+      (println (str "get-agent-project: " root " has the current single-agent structure"))
       (System/exit 0))
     (if check-only?
       (do
@@ -162,10 +162,10 @@
         (doseq [item pending]
           (println (str "upgraded: " item)))
         (println "")
-        (println "Next, fill docs/manual-contract.edn and docs/manual.md, update")
-        (println "README.md and ARCHITECTURE.md where needed, then run:")
+        (println "Next, review the upgraded project files. If the docs stage was")
+        (println "added, complete its contract and documentation examples. Then run:")
         (println (str "  cd " root))
         (println "  export PATH=\"$PWD/.swarmforge/bin:$PWD/swarmforge/scripts:$PATH\"")
-        (println "  bb swarmforge/scripts/stage.bb check docs --root .")))))
+        (println "  bb swarmforge/scripts/stage.bb list --root .")))))
 
 (apply -main *command-line-args*)
