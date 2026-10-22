@@ -311,6 +311,52 @@
         (stop-agent-session! project)
         (fs/delete-tree forge)))))
 
+(deftest an-existing-project-can-adopt-the-documentation-gate
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent-lib")
+        stages-file (fs/path project "stages.edn")]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge)
+                            "--profile" "library" "agent-lib"))))
+      ;; Make the project look like one composed before the docs gate existed.
+      (let [config (edn/read-string (slurp (str stages-file)))]
+        (write-file stages-file
+                    (pr-str (update config :stages
+                                    #(vec (remove (fn [stage]
+                                                    (= "docs" (:name stage)))
+                                                  %))))))
+      (fs/delete-if-exists (fs/path project "scripts" "check-documentation.sh"))
+      (fs/delete-if-exists
+       (fs/path project "swarmforge" "scripts" "check-documentation.bb"))
+      (fs/delete-if-exists (fs/path project "docs" "manual-contract.edn"))
+
+      (let [check (run repo-root composer "--forge" (str forge)
+                       "--upgrade" (str project) "--check")]
+        (is (not (zero? (:exit check))))
+        (is (str/includes? (:out check) "add required docs stage")))
+
+      (let [upgrade (run repo-root composer "--forge" (str forge)
+                         "--upgrade" (str project))]
+        (is (zero? (:exit upgrade)) (:err upgrade))
+        (is (str/includes? (:out upgrade) "upgraded: add required docs stage")))
+
+      (let [stages (:stages (edn/read-string (slurp (str stages-file))))
+            names (mapv :name stages)
+            docs-index (.indexOf names "docs")
+            deploy-index (.indexOf names "deploy")]
+        (is (= (dec deploy-index) docs-index))
+        (is (not (:optional (nth stages docs-index)))))
+      (is (fs/executable?
+           (fs/path project "scripts" "check-documentation.sh")))
+      (is (fs/regular-file?
+           (fs/path project "swarmforge" "scripts" "check-documentation.bb")))
+      (is (fs/regular-file? (fs/path project "docs" "manual-contract.edn")))
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge)
+                              "--upgrade" (str project) "--check"))))
+      (finally
+        (stop-agent-session! project)
+        (fs/delete-tree forge)))))
+
 (deftest an-old-ready-marker-does-not-deliver-into-a-busy-agent
   (let [forge (fixture-forge)
         project (fs/path forge "projects" "agent")

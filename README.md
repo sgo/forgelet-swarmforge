@@ -139,6 +139,19 @@ Closing the project stops both the relay and the `swarmforge-agent` session;
 `agent-runner.bb --stop-agent` stops only the agent, leaving the phone relay
 running.
 
+An existing single-agent project can adopt structural additions from the
+current template with:
+
+```sh
+get-agent-project --upgrade <project-name-or-path> --forge <forge-root>
+```
+
+`--check` reports what is missing without changing files. The upgrade adds
+only missing template structure: it preserves the project's source, tasks,
+features and existing stages, inserts a new required stage in its template
+position, and refreshes only managed helper files. It then prints the
+project-local work required to make the new gate pass.
+
 The spec stage is the specifier's work: the agent turns the operator's card
 into `tasks/<name>.md` and `features/<name>.feature`, validates the Gherkin,
 and proposes the feature for the operator's approval. The operator does not

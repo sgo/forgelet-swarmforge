@@ -4,9 +4,14 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage: get-agent-project <project-name> [--forge <forge-root>] [--profile standard|library]
+       get-agent-project --upgrade <project-name-or-path> [--forge <forge-root>] [--check]
 
 Compose a single-agent project into an existing forge. The forge root defaults
 to the current directory when it has projects/ and swarmforge/scripts/.
+
+--upgrade applies structural additions to an existing project without
+replacing its source, task, feature or existing stage definitions. --check
+reports whether the upgrade is still needed and changes nothing.
 USAGE
 }
 
@@ -20,9 +25,19 @@ template_dir="$script_dir/swarmforge/templates/agent-project"
 forge_root=""
 name=""
 profile="standard"
+mode=create
+check_only=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --upgrade)
+      mode=upgrade
+      shift
+      ;;
+    --check)
+      check_only=1
+      shift
+      ;;
     --forge)
       [[ $# -ge 2 ]] || fail "--forge needs a directory"
       forge_root="$2"
@@ -49,7 +64,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$name" ]] || { usage >&2; exit 1; }
-[[ "$name" != *[!A-Za-z0-9._-]* ]] || fail "project name must be letters, digits, dot, dash or underscore"
+[[ "$name" != *[!A-Za-z0-9._/-]* ]] || fail "project name must be letters, digits, dot, dash, underscore or slash"
 [[ -d "$template_dir" ]] || fail "template not found: $template_dir"
 case "$profile" in
   standard|library) ;;
@@ -64,6 +79,24 @@ forge_root="$(cd "$forge_root" && pwd)" || fail "forge root not found"
 [[ -d "$forge_root/swarmforge/scripts" ]] || fail "not a composed forge (no swarmforge/scripts/): $forge_root"
 
 dest="$forge_root/projects/$name"
+
+if [[ "$mode" == upgrade ]]; then
+  [[ "$profile" == standard ]] ||
+    fail "--profile is only used when creating a project"
+  if [[ "$name" == */* ]]; then
+    [[ -d "$name" ]] || fail "project path not found: $name"
+    dest="$(cd "$name" && pwd)"
+  fi
+  [[ -f "$dest/.swarmforge/single-agent" ]] ||
+    fail "not a single-agent project: $dest"
+  helper="$script_dir/swarmforge/scripts/upgrade-agent-project.bb"
+  [[ -f "$helper" ]] || fail "upgrade helper not found: $helper"
+  args=(--root "$dest" --template "$template_dir")
+  [[ "$check_only" == 1 ]] && args+=(--check)
+  exec bb "$helper" "${args[@]}"
+fi
+
+[[ "$check_only" == 0 ]] || fail "--check is only valid with --upgrade"
 [[ ! -e "$dest" ]] || fail "project already exists: $dest"
 
 mkdir -p "$dest"
