@@ -152,6 +152,11 @@ features and existing stages, inserts a new required stage in its template
 position, and refreshes only managed helper files. It then prints the
 project-local work required to make the new gate pass.
 
+When a routed card exists on the single-agent board, `stage propose spec`
+binds that card's name and task ID into the proposal and carries the same board
+row through every stage. Older project-named placeholder cards are removed
+when the routed card is bound; they are not the work card.
+
 The spec stage is the specifier's work: the agent turns the operator's card
 into `tasks/<name>.md` and `features/<name>.feature`, validates the Gherkin,
 and proposes the feature for the operator's approval. The operator does not

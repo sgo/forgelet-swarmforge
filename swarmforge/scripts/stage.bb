@@ -139,8 +139,23 @@
 (defn board-columns [line]
   (str/split line #"\t" -1))
 
-(defn update-board! [root config lane]
-  (let [name (:task config)
+(defn board-rows [root]
+  (let [file (board-tasks-file root)]
+    (if (fs/regular-file? file)
+      (->> (str/split-lines (slurp (str file)))
+           (remove str/blank?)
+           (map (fn [line]
+                  (let [[name lane created updated task-id audit]
+                        (board-columns line)]
+                    {:name name :lane lane :created created :updated updated
+                     :id (or (not-empty task-id) name)
+                     :audit (or audit "0")})))
+           vec)
+      [])))
+
+(defn update-board! [root config card lane]
+  (let [name (:name card)
+        card-id (or (:id card) name)
         file (board-tasks-file root)
         now (now)
         rows (if (fs/regular-file? file)
@@ -149,10 +164,20 @@
                [])
         existing (some #(when (= name (first (board-columns %))) %) rows)
         created (if existing (get (board-columns existing) 2 now) now)
-        card (str/join "\t" [name lane created now name 0])
-        kept (remove #(= name (first (board-columns %))) rows)]
+        existing-id (when existing (not-empty (nth (board-columns existing) 4 nil)))
+        audit (or (when existing (nth (board-columns existing) 5 nil)) (:audit card) "0")
+        row (str/join "\t" [name lane created now (or existing-id card-id) audit])
+        project-row (str (:task config))
+        stale-project-row? (fn [line]
+                             (let [[row-name _ _ _ row-id _] (board-columns line)]
+                               (and (not= row-name name)
+                                    (= row-name project-row)
+                                    (= (or row-id row-name) project-row))))
+        kept (->> rows
+                  (remove #(= name (first (board-columns %))))
+                  (remove stale-project-row?))]
     (fs/create-dirs (board-dir root))
-    (spit (str file) (str (str/join "\n" (concat kept [card])) "\n"))
+    (spit (str file) (str (str/join "\n" (concat kept [row])) "\n"))
     (spit (str (board-lanes-file root))
           (str (str/join "\n" (concat (map :name (:stages config)) ["done"])) "\n"))))
 
@@ -177,12 +202,14 @@
 (defn resolved-approval-dir [root]
   (fs/path root ".swarmforge" "approvals" "resolved"))
 
-(defn record-resolution! [root config id resolution]
+(defn record-resolution! [root config card id resolution]
   (let [file (fs/path (resolved-approval-dir root) (str id ".edn"))]
     (fs/create-dirs (fs/parent file))
     (spit (str file)
           (pr-str {:id id
-                   :task (:task config)
+                   :task (or (:display card) (:name card) (:task config))
+                   :card (:name card)
+                   :card_id (:id card)
                    :resolution resolution
                    :at (now)}))))
 
@@ -207,16 +234,68 @@
       (some heading files)
       (:task config))))
 
+(defn fallback-card [root config files]
+  (let [display (card-name root config files)]
+    {:name (:task config)
+     :id (:task config)
+     :display display
+     :lane "agent"}))
+
+(defn select-card [root config state files]
+  (let [active (->> (board-rows root)
+                    (remove #(= "done" (:lane %)))
+                    vec)
+        project-name (:task config)
+        routed (remove #(= project-name (:name %)) active)
+        display (card-name root config files)
+        by-display (some #(when (= display (:name %)) routed) routed)
+        state-card (:card state)
+        state-card (some #(when (= (:name state-card) (:name %)) %) active)
+        card (cond
+               (and state-card (not= project-name (:name state-card)))
+               state-card
+
+               by-display
+               by-display
+
+               (= 1 (count routed))
+               (first routed)
+
+               state-card
+               state-card
+
+               (empty? active)
+               (fallback-card root config files)
+
+               (= 1 (count active))
+               (first active)
+
+               :else
+               (exit! 1 (str "More than one active card: "
+                             (str/join ", " (map :name active))
+                             ". Name the card in the task note or close the others first.")))]
+    (assoc card :display (or (:display card) (:name card)))))
+
+(defn hydrate-state-card [root config state]
+  (if (:card state)
+    state
+    (let [latest (->> (vals (:proposals state))
+                      (filter #(contains? #{:pending :approved} (:status %)))
+                      (sort-by :at)
+                      last)
+          files (or (:files latest) [])]
+      (assoc state :card (select-card root config state files)))))
+
 (defn write-stage-approval! [root config proposal]
   (let [file (stage-approval-file root (:id proposal))
-        card (card-name root config (:files proposal))]
+        card (:card proposal)]
     (fs/create-dirs (fs/parent file))
     (spit (str file)
           (str "from: agent\n"
                "to: operator\n"
                "kind: stage-spec\n"
-               "task: " card "\n"
-               "task_id: " card "\n"
+               "task: " (:display card) "\n"
+               "task_id: " (:id card) "\n"
                "artifacts: " (str/join ", " (:files proposal)) "\n"
                "created_at: " (:at proposal) "\n"
                "\n"
@@ -403,7 +482,9 @@
                               (collect-evidence root patterns)
                               (resolve-inputs root stage)))))]
       (save-state root (:task config) state)
-      (update-board! root config name)
+      (update-board! root config (or (:card state)
+                                     (fallback-card root config []))
+                     name)
       (println (str "stage " name ": done at tree " tree)))))
 
 (defn pending-proposals [state]
@@ -416,7 +497,8 @@
     (when (empty? files)
       (exit! 1 (str "No spec files found for " (str/join ", " patterns))))
     (let [id (str "spec-" (System/currentTimeMillis))
-          pending (pending-proposals state)]
+          pending (pending-proposals state)
+          card (select-card root config state files)]
       (when (and (seq pending) (not replace?))
         (exit! 1
                (str "Spec proposal(s) already pending: "
@@ -424,7 +506,9 @@
                     ". Approve or reject them, or pass --replace to supersede them.")))
       (let [state (if replace?
                     (reduce (fn [result [pending-id proposal]]
-                              (record-resolution! root config pending-id "superseded")
+                              (record-resolution! root config
+                                                  (or (:card proposal) card)
+                                                  pending-id "superseded")
                               (assoc-in result [:proposals pending-id]
                                         (assoc proposal
                                                :status :superseded
@@ -433,6 +517,7 @@
                             state pending)
                     state)
             proposal {:id id
+                      :card card
                       :patterns (vec patterns)
                       :files files
                       :file (first files)
@@ -440,10 +525,11 @@
                       :body (spec-body root files)
                       :at (now)
                       :status :pending}
-            state (assoc-in state [:proposals id] proposal)]
+            state (assoc-in (assoc state :card card)
+                            [:proposals id] proposal)]
         (save-state root (:task config) state)
         (remove-stage-approvals! root)
-        (update-board! root config "spec")
+        (update-board! root config card "spec")
         (write-stage-approval! root config proposal)
         (println (str "spec proposal " id))
         (println (str "files: " (str/join ", " files)))
@@ -480,9 +566,9 @@
                                   :files files}]
                                 files)]
         (save-state root (:task config) state)
-        (record-resolution! root config id "approved")
+        (record-resolution! root config (:card proposal) id "approved")
         (remove-stage-approvals! root)
-        (update-board! root config "spec")
+        (update-board! root config (:card proposal) "spec")
         (println (str "approved " id " at tree " tree))))))
 
 (defn reject! [root config state id words]
@@ -499,9 +585,11 @@
                           :words words)
           state (assoc-in state [:proposals id] rejected)]
       (save-state root (:task config) state)
-      (record-resolution! root config id "sent_back")
+      (record-resolution! root config
+                          (:card proposal)
+                          id "sent_back")
       (remove-stage-approvals! root)
-      (update-board! root config "spec")
+      (update-board! root config (:card proposal) "spec")
       (println (str "sent back " id)))))
 
 (defn stage-status [config state stage tree]
@@ -527,6 +615,8 @@
 (defn list! [root config state]
   (let [tree (worktree-tree root)]
     (println (str "task: " (:task config)))
+    (when-let [card (:card state)]
+      (println (str "card: " (:name card) " (" (:id card) ")")))
     (println (str "tree: " tree))
     (println "Each stage is a gate on the current vertical slice; tests, cleanup and hardening are not later tasks.")
     (when-let [problem (deploy-configuration-problem root config)]
@@ -568,6 +658,7 @@
         head (head-tree root)]
     (json/generate-string
      {:task (:task config)
+      :card (:card state)
       :tree tree
       :head-tree head
       :clean (= tree head)
@@ -602,7 +693,9 @@
         (exit! 1 (str "Stages not current: " (str/join ", " missing))))
       (save-state root (:task config)
                   (assoc state :complete {:tree tree :at (now)}))
-      (update-board! root config "done")
+      (update-board! root config
+                     (or (:card state) (fallback-card root config []))
+                     "done")
       (println (str "complete: " (:task config) " at tree " tree)))))
 
 (defn parse-args [args]
@@ -641,7 +734,8 @@
     (let [{:keys [options args]} (parse-args args)
           root (fs/absolutize (or (:root options) "."))
           config (load-config root)
-          state (load-state root (:task config))]
+          state (hydrate-state-card root config
+                                   (load-state root (:task config)))]
       (case (first args)
         "list" (list! root config state)
         "check" (if-let [name (second args)]

@@ -248,6 +248,37 @@
       (finally
         (fs/delete-tree root)))))
 
+(deftest a-routed-card-is-carried-through-the-stage-tool
+  (let [root (fixture)
+        board-file (fs/path root ".swarmforge" "board" "tasks.tsv")]
+    (try
+      (write-file board-file
+                  (str "routed-card\tspec\t2026-10-24T08:00:00Z\t"
+                       "2026-10-24T08:00:00Z\troute-123\t0\n"
+                       "fixture\tspec\t2026-10-24T08:01:00Z\t"
+                       "2026-10-24T08:01:00Z\tfixture\t0\n"))
+      (let [propose (run-stage root "propose" "spec"
+                               "spec.md" "features/extra.feature")
+            id (latest-proposal-id root)
+            approval (slurp (str (fs/path root ".swarmforge" "handoffs"
+                                          "pending_approval" (str id ".handoff"))))
+            board (slurp (str board-file))]
+        (is (zero? (:exit propose)) (:err propose))
+        (is (str/includes? approval "task: routed-card"))
+        (is (str/includes? approval "task_id: route-123"))
+        (is (re-find #"(?m)^routed-card\tspec\t.*\troute-123\t0$" board))
+        (is (not (re-find #"(?m)^fixture\tspec\t" board)))
+        (is (zero? (:exit (run-stage root "approve" id "--words" "approve")))))
+
+      (doseq [stage ["code" "clean" "architect" "harden" "qa"]]
+        (is (zero? (:exit (run-stage root "check" stage)))))
+      (is (zero? (:exit (run-stage root "complete"))))
+      (let [board (slurp (str board-file))]
+        (is (re-find #"(?m)^routed-card\tdone\t.*\troute-123\t0$" board))
+        (is (not (re-find #"(?m)^fixture\t" board))))
+      (finally
+        (fs/delete-tree root)))))
+
 (deftest a-sent-back-spec-is-not-an-approval
   (let [root (fixture)]
     (try

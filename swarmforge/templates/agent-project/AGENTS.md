@@ -15,6 +15,12 @@ The operator gives the card. You write the task note and Gherkin, validate
 them, and propose the bundle for approval. Do not ask the operator to fill a
 template.
 
+When the card arrived through routing, the stage tool binds that card's board
+name and task ID into the spec proposal and moves that same row through every
+gate. Do not create a project-named card to stand in for the routed card. If
+more than one routed card is active and the task note cannot identify one, stop
+and make the operator choose rather than guessing.
+
 Work in vertical slices: one public behaviour through every gate. Tests,
 cleanup, architecture, hardening and verification are part of that slice, not
 separate backlog items and not gates deferred to a later card.

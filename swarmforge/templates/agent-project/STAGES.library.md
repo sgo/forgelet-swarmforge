@@ -111,5 +111,11 @@ Each `stage check` moves the project's card on `.swarmforge/board/tasks.tsv`,
 which is what the phone's activity room reads. `stage complete` moves it to
 `done`.
 
+`stage propose spec` binds one active board card to the proposal and keeps its
+name and `task_id`. Every later stage moves that same row. A project-named row
+created by older stage tooling is removed when the routed card is bound; it is
+not a second card. If several routed cards are active and the task note cannot
+identify the intended one, the stage tool refuses rather than guessing.
+
 Do not create worktrees or hand work to another role. The project root is the
 checkout.
