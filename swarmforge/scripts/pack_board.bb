@@ -2,6 +2,7 @@
 
 (ns pack-board
   (:require [babashka.fs :as fs]
+            [clojure.edn :as edn]
             [clojure.java.shell :refer [sh]]
             [clojure.string :as str])
   (:import [java.nio.channels FileChannel]
@@ -87,6 +88,15 @@
 
 (defn lanes-file [root]
   (fs/path (board-dir root) "lanes.tsv"))
+
+(defn single-agent? [root]
+  (fs/regular-file? (fs/path root ".swarmforge" "single-agent")))
+
+(defn stage-lanes [root]
+  (let [file (fs/path root "stages.edn")]
+    (when (fs/regular-file? file)
+      (conj (mapv :name (:stages (edn/read-string (slurp (str file)))))
+            "done"))))
 
 (defn with-board-lock [root f]
   (let [dir (board-dir root)
@@ -234,9 +244,16 @@
 (defn lanes! [opts]
   (let [root (resolve-root opts)
         file (lanes-file root)]
-    (if (fs/regular-file? file)
+    (cond
+      (single-agent? root)
+      (doseq [lane (or (stage-lanes root) [])]
+        (println lane))
+
+      (fs/regular-file? file)
       (doseq [line (read-rows file)]
         (println (first (str/split line #"\t"))))
+
+      :else
       (doseq [cols (role-rows root)]
         (println (first cols))))))
 

@@ -225,6 +225,41 @@
         (stop-agent-session! project)
         (fs/delete-tree forge)))))
 
+(deftest a-routed-card-enters-spec-and-wakes-the-single-agent
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent-lib")]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge)
+                            "--profile" "library" "agent-lib"))))
+      (let [created
+            (sh/sh "bb" "-cp" (str (fs/path project "swarmforge" "scripts"))
+                   "-e"
+                   (str "(require (quote pack-web))"
+                        "(pack-web/create-task!"
+                        " " (pr-str (str project))
+                        " \"routed-card\" \"Do the routed work.\")")
+                   :dir (str project))]
+        (is (zero? (:exit created)) (:err created)))
+
+      (is (re-find #"(?m)^routed-card\tspec\t.*\t[^\t]+\t0$"
+                   (slurp (str (fs/path project ".swarmforge" "board"
+                                        "tasks.tsv")))))
+      (let [lanes (run project "swarmforge/scripts/pack_board.sh"
+                       "lanes" "--root" (str project))]
+        (is (zero? (:exit lanes)) (:err lanes))
+        (is (= "spec" (first (str/split-lines (:out lanes))))))
+
+      (let [requests (fs/path project ".swarmforge" "dashboard" "requests" "pending")
+            bodies (mapv #(slurp (str %)) (fs/list-dir requests))]
+        (is (= 1 (count bodies)))
+        (is (str/includes? (first bodies) "New routed card: routed-card"))
+        (is (str/includes? (first bodies) "Do the routed work.")))
+      (is (empty?
+           (fs/glob project ".swarmforge/handoffs/outbox/*_from_New_Task_to_agent.handoff")))
+      (finally
+        (stop-agent-session! project)
+        (fs/delete-tree forge)))))
+
 (deftest a-snapshot-deployment-uses-the-release-gate-and-project-token
   (let [forge (fixture-forge)
         project (fs/path forge "projects" "agent-lib")]

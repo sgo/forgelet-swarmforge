@@ -1097,13 +1097,25 @@
 (defn create-task! [root name text]
   (when (str/blank? name)
     (throw (ex-info "Missing task name" {:http-status 400})))
-  (let [task-id (new-task-id name)]
+  (let [single-agent? (single-agent-project? root)
+        task-id (new-task-id name)
+        lane (if single-agent? "spec" (master-role root))]
   (pack-board root "create"
               "--name" name
-              "--lane" (master-role root)
+              "--lane" lane
               "--task-id" task-id
               "--text" (or text ""))
-    (queue-new-task-note! root task-id name (or text ""))))
+    (if single-agent?
+      (do
+        (write-chat-request!
+         root
+         (str "New routed card: " name "\n"
+              "Task ID: " task-id "\n\n"
+              (or text "")))
+        :dashboard)
+      (do
+        (queue-new-task-note! root task-id name (or text ""))
+        :handoff))))
 
 (defn post-tasks [root body]
   (let [{:keys [name text project]} (json/parse-string (or body "{}") true)
