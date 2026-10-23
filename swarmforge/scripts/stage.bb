@@ -273,7 +273,11 @@
                :else
                (exit! 1 (str "More than one active card: "
                              (str/join ", " (map :name active))
-                             ". Name the card in the task note or close the others first.")))]
+                             ". Name the card in the task note or close the others first.")))
+          card (if (map? card) card (first card))]
+    (when-not (map? card)
+      (exit! 1 (str "Could not select the routed board card from: "
+                    (str/join ", " (map :name active)))))
     (assoc card :display (or (:display card) (:name card)))))
 
 (defn hydrate-state-card [root config state]
