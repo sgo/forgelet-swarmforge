@@ -43,6 +43,20 @@ forge="$(cd "$forge" && pwd -P)"
 template="$(cd "$template" && pwd -P)"
 project="$(basename "$root")"
 
+probe="$(mktemp -d "${TMPDIR:-/tmp}/convert-pack-project.XXXXXX")"
+trap 'rm -rf "$probe"' EXIT
+mkdir -p "$probe/.swarmforge"
+printf 'agent\tmain\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n' "$probe" \
+  > "$probe/.swarmforge/roles.tsv"
+printf 'probe\n' > "$probe/.swarmforge/single-agent"
+if ! probe_lane="$("$forge/swarmforge/scripts/pack_board.sh" master-lane \
+                      --root "$probe" 2>&1)" ||
+   [[ "$probe_lane" != "agent" ]]; then
+  fail "the forge runtime does not support single-agent projects on a non-master branch; upgrade $forge first: $probe_lane"
+fi
+rm -rf "$probe"
+trap - EXIT
+
 [[ -d "$root/.git" ]] || fail "project has no git repository: $root"
 [[ "$root" == "$forge/projects/$project" ]] ||
   fail "project must be a direct child of $forge/projects: $root"

@@ -772,3 +772,20 @@
                  (fs/path archive "tasks.before.tsv")))))))
       (finally
         (fs/delete-tree forge)))))
+
+(deftest conversion-refuses-a-forge-with-the-old-master-only-runtime
+  (let [forge (fixture-forge)
+        package (fs/path forge "swarmforge" "scripts" "pack_board.sh")]
+    (try
+      (fs/create-dirs (fs/path forge "projects" "pack"))
+      (write-file package "#!/bin/sh\nprintf 'master\\n'\n")
+      (fs/set-posix-file-permissions package "rwxr-xr-x")
+      (let [result (run repo-root composer "--forge" (str forge)
+                        "--convert" "pack")]
+        (is (not (zero? (:exit result))))
+        (is (str/includes?
+             (:err result)
+             "does not support single-agent projects on a non-master branch"))
+        (is (str/includes? (:err result) "upgrade")))
+      (finally
+        (fs/delete-tree forge)))))

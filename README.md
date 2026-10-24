@@ -165,7 +165,9 @@ conversion. The project must be a direct child of `<forge-root>/projects`, close
 through that forge, and on a clean primary checkout. Every linked worktree must
 be clean, attached, under `.worktrees`, and already merged into the primary
 branch. The converter also refuses a live handoff daemon, project dashboard or
-tmux socket.
+tmux socket. The target forge must carry the branch-agnostic single-agent
+runtime from layer commit `f5813a0`; an older forge is refused with an upgrade
+instruction rather than producing a mismatched project.
 
 Conversion keeps the source, Git history, tasks, features, QA material, local
 scripts and completed board rows. It archives the old pack metadata, roles,
