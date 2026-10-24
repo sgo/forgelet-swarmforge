@@ -37,6 +37,12 @@
    :evidence ["target/surefire-reports/*.xml"
               "target/acceptance/acceptance.log"]
    :stamp [:features :sources "acceptance" "scripts/run-acceptance-tests.sh"]}
+  {:name "e2e"
+   :runs [["scripts/run-qa-e2e.sh"]]
+   :evidence ["target/e2e/check.log" "qa/e2e.edn" "qa/*.md"
+              "scripts/run-qa-*.sh" "scripts/run-qa-e2e.sh"]
+   :stamp [:features :sources "qa" "scripts/run-qa-e2e.sh"
+           "swarmforge/scripts/check-e2e.bb"]}
   {:name "docs"
    :runs [["scripts/check-documentation.sh"]]
    :evidence ["target/documentation/check.log"]

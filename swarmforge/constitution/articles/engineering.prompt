@@ -95,6 +95,17 @@
   examples, required headings and broken local links. It runs after behavioural verification and before
   snapshot deployment, so documentation about the final tree is what ships.
 
+## End-To-End QA
+- The standard single-agent profile runs `qa`, then the card-specific `e2e` stage, then documentation
+  and deployment. The procedure and script are registered in `qa/e2e.edn`; the script exercises the
+  same user-facing path rather than a private API.
+- Required operator inputs are declared by environment-variable name. Missing values fail the stage,
+  never skip it. Values are read at run time, are never written to the stage record, and are redacted
+  from captured output and evidence.
+- A card with no applicable end-to-end procedure needs an explicit `## E2E waiver` and reason in its
+  approved task note. Library-profile projects use their public-API `verify` gate instead of the
+  standard e2e stage by default.
+
 ## Java Snapshot Deployment
 - A completed card for a project with `swarmforge/deploy.conf` publishes its current `-SNAPSHOT`
   after all verification gates and after the reviewed commit is pushed. Run

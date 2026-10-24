@@ -129,6 +129,9 @@ fi
 if [[ -f "$dest/scripts/check-documentation.sh" ]]; then
   chmod +x "$dest/scripts/check-documentation.sh"
 fi
+if [[ -f "$dest/scripts/run-qa-e2e.sh" ]]; then
+  chmod +x "$dest/scripts/run-qa-e2e.sh"
+fi
 
 mkdir -p "$dest/.swarmforge"
 printf 'agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n' "$dest" \

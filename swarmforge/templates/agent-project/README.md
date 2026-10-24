@@ -65,3 +65,18 @@ files are untouched.
 Projects with custom value formats add `acceptance/value-adapter.sh`; the
 mutation script passes it as `--value-adapter`. The adapter and the step
 handlers must share the same parser, so a mutated value is still executable.
+
+## End-to-end QA
+
+The standard profile adds an `e2e` stage after `qa`. Register the active card in
+`qa/e2e.edn` with its procedure, script and required environment-variable names,
+then run:
+
+```sh
+scripts/run-qa-e2e.sh
+```
+
+The runner validates every named input, fails when one is absent, redacts input
+values from captured output and writes `target/e2e/check.log`. A card whose
+approved task note has an explicit `## E2E waiver` with a reason passes without
+a card-specific entry.

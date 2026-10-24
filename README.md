@@ -160,6 +160,11 @@ The first proposal for each card still asks the operator for approval. After
 that approval, the agent may correct the task note or Gherkin without another
 request; the stage tool records the correction as automatically approved.
 Completing the card resets the policy for the next card.
+The standard profile also carries a required card-specific `e2e` stage after
+`qa`. Cards register their procedure and script in `qa/e2e.edn`; declared input
+names must be present at run time, missing values fail rather than skip, values
+are redacted from evidence, and a card without an applicable procedure needs an
+approved task-note waiver.
 
 The spec stage is the specifier's work: the agent turns the operator's card
 into `tasks/<name>.md` and `features/<name>.feature`, validates the Gherkin,

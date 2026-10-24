@@ -14,6 +14,14 @@
            "scripts/check-documentation.sh"
            "swarmforge/scripts/check-documentation.bb"]})
 
+(def e2e-stage
+  {:name "e2e"
+   :runs [["scripts/run-qa-e2e.sh"]]
+   :evidence ["target/e2e/check.log" "qa/e2e.edn" "qa/*.md"
+              "scripts/run-qa-*.sh" "scripts/run-qa-e2e.sh"]
+   :stamp [:features :sources "qa" "scripts/run-qa-e2e.sh"
+           "swarmforge/scripts/check-e2e.bb"]})
+
 (def policy-begin "<!-- forgelet:single-agent-correction-policy:begin -->")
 (def policy-end "<!-- forgelet:single-agent-correction-policy:end -->")
 (def policy-block
@@ -73,6 +81,17 @@
       config)
     (update config :stages insert-before docs-stage #{"deploy" "release"})))
 
+(defn ensure-e2e-stage [config]
+  (if-let [existing (some #(when (= "e2e" (:name %)) %) (:stages config))]
+    (if (:optional existing)
+      (update config :stages
+              (fn [stages]
+                (mapv #(if (= "e2e" (:name %)) (dissoc % :optional) %) stages)))
+      config)
+    (if (some #(= "qa" (:name %)) (:stages config))
+      (update config :stages insert-before e2e-stage #{"docs" "deploy" "release"})
+      config)))
+
 (defn configured-deploy-target [root]
   (let [file (fs/path root "swarmforge" "deploy.conf")]
     (when (fs/regular-file? file)
@@ -129,13 +148,20 @@
         stages-file (fs/path root "stages.edn")
         contract (fs/path root "docs" "manual-contract.edn")
         checker (fs/path root "swarmforge" "scripts" "check-documentation.bb")
+        e2e-checker (fs/path root "swarmforge" "scripts" "check-e2e.bb")
+        e2e-contract (fs/path root "qa" "e2e.edn")
+        e2e-wrapper (fs/path root "scripts" "run-qa-e2e.sh")
         wrapper (fs/path root "scripts" "check-documentation.sh")
         template-contract (fs/path template "docs" "manual-contract.edn")
+        template-e2e-contract (fs/path template "qa" "e2e.edn")
+        template-e2e-wrapper (fs/path template "scripts" "run-qa-e2e.sh")
         template-wrapper (fs/path template "scripts" "check-documentation.sh")
         policy-files [(fs/path root "AGENTS.md")
                       (fs/path root "STAGES.md")]
         upgrade-source (fs/path (fs/parent (fs/absolutize *file*))
                                 "check-documentation.bb")
+        e2e-upgrade-source (fs/path (fs/parent (fs/absolutize *file*))
+                                    "check-e2e.bb")
         deploy-target (configured-deploy-target root)
         publish-command (existing-publish-command root)
         install-publisher? (and deploy-target (nil? publish-command))
@@ -154,12 +180,28 @@
                         deploy-target
                         (ensure-deploy-stage
                          (deploy-stage effective-publish-command))))
-        upgraded (when with-deploy (ensure-docs-stage with-deploy))
+        with-e2e (when with-deploy (ensure-e2e-stage with-deploy))
+        upgraded (when with-e2e (ensure-docs-stage with-e2e))
+        standard? (some #(= "qa" (:name %)) (:stages config))
         pending (cond-> []
                   (and with-deploy (not= config with-deploy))
                   (conj "add required deploy stage")
-                  (and upgraded (not= with-deploy upgraded))
+                  (and upgraded (not= with-e2e upgraded))
                   (conj "add required docs stage")
+                  (and standard? (not= with-deploy with-e2e))
+                  (conj "add required e2e stage")
+                  (and standard? (not (fs/regular-file? e2e-contract)))
+                  (conj "create qa/e2e.edn")
+                  (and standard?
+                       (or (not (fs/regular-file? e2e-wrapper))
+                           (not= (slurp (str e2e-wrapper))
+                                 (slurp (str template-e2e-wrapper)))))
+                  (conj "install run-qa-e2e.sh")
+                  (and standard?
+                       (or (not (fs/regular-file? e2e-checker))
+                           (not= (slurp (str e2e-checker))
+                                 (slurp (str e2e-upgrade-source)))))
+                  (conj "install check-e2e.bb")
                   install-publisher? (conj "install snapshot publisher")
                   (some #(not (policy-in-place? %)) policy-files)
                   (conj "install single-agent correction policy")
@@ -201,6 +243,21 @@
         (when-not (fs/regular-file? contract)
           (fs/create-dirs (fs/parent contract))
           (fs/copy template-contract contract))
+        (when standard?
+          (when-not (fs/regular-file? e2e-contract)
+            (fs/create-dirs (fs/parent e2e-contract))
+            (fs/copy template-e2e-contract e2e-contract))
+          (when-not (= (when (fs/regular-file? e2e-wrapper)
+                         (slurp (str e2e-wrapper)))
+                       (slurp (str template-e2e-wrapper)))
+            (fs/create-dirs (fs/parent e2e-wrapper))
+            (fs/copy template-e2e-wrapper e2e-wrapper {:replace-existing true})
+            (fs/set-posix-file-permissions e2e-wrapper "rwxr-xr-x"))
+          (when-not (= (when (fs/regular-file? e2e-checker)
+                         (slurp (str e2e-checker)))
+                       (slurp (str e2e-upgrade-source)))
+            (fs/create-dirs (fs/parent e2e-checker))
+            (fs/copy e2e-upgrade-source e2e-checker {:replace-existing true})))
         (doseq [item pending]
           (println (str "upgraded: " item)))
         (println "")

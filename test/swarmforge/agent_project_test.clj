@@ -225,6 +225,53 @@
         (stop-agent-session! project)
         (fs/delete-tree forge)))))
 
+(deftest standard-e2e-runs-the-card-procedure-and-redacts-inputs
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent")]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge) "agent"))))
+      (write-file (fs/path project "features" "agent.feature")
+                  "Feature: agent\n\n  Scenario: agent\n    Given a card\n")
+      (write-file (fs/path project "tasks" "agent.md")
+                  "# agent\n\n## Operator-observed problem\n\nA card.\n")
+      (run-stage project "propose" "spec" "features/*.feature" "tasks/*.md")
+      (let [id (-> (state project) :proposals vals first :id)]
+        (is (zero? (:exit (run-stage project "approve" id "--words" "approve")))))
+
+      (write-file (fs/path project "qa" "agent.md")
+                  "# Agent end-to-end procedure\n\nDrive the user-facing path.\n")
+      (write-file (fs/path project "scripts" "run-qa-agent.sh")
+                  "#!/bin/sh\nprintf 'e2e passed token=%s\\n' \"$E2E_SECRET\"\n")
+      (fs/set-posix-file-permissions
+       (fs/path project "scripts" "run-qa-agent.sh") "rwxr-xr-x")
+      (write-file (fs/path project "qa" "e2e.edn")
+                  (pr-str {:cards
+                           {"agent"
+                            {:procedure "qa/agent.md"
+                             :script "scripts/run-qa-agent.sh"
+                             :required-inputs ["E2E_SECRET"]}}}))
+
+      (let [run (sh/sh (str (fs/path project "scripts" "run-qa-e2e.sh"))
+                       :dir (str project)
+                       :env {"PATH" (System/getenv "PATH")
+                             "E2E_SECRET" "test-only-secret"})
+            report (slurp (str (fs/path project "target" "e2e" "check.log")))]
+        (is (zero? (:exit run)) (:err run))
+        (is (str/includes? report "e2e passed"))
+        (is (str/includes? report "<redacted:E2E_SECRET>"))
+        (is (not (str/includes? report "test-only-secret"))))
+
+      (let [missing (sh/sh (str (fs/path project "scripts" "run-qa-e2e.sh"))
+                           :dir (str project)
+                           :env {"PATH" (System/getenv "PATH")
+                                 "E2E_SECRET" ""})]
+        (is (not (zero? (:exit missing))))
+        (is (str/includes? (str (:out missing) (:err missing))
+                           "missing required inputs: E2E_SECRET")))
+      (finally
+        (stop-agent-session! project)
+        (fs/delete-tree forge)))))
+
 (deftest a-routed-card-enters-spec-and-wakes-the-single-agent
   (let [forge (fixture-forge)
         project (fs/path forge "projects" "agent-lib")]
@@ -401,6 +448,46 @@
                text "forgelet:single-agent-correction-policy:begin"))
           (is (str/includes?
                text "do not create another\napproval request"))))
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge)
+                              "--upgrade" (str project) "--check"))))
+      (finally
+        (stop-agent-session! project)
+        (fs/delete-tree forge)))))
+
+(deftest an-existing-standard-project-can-adopt-the-e2e-gate
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent")
+        stages-file (fs/path project "stages.edn")]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge) "agent"))))
+      (let [config (edn/read-string (slurp (str stages-file)))]
+        (write-file stages-file
+                    (pr-str (update config :stages
+                                    #(vec (remove (fn [stage]
+                                                    (= "e2e" (:name stage)))
+                                                  %))))))
+      (fs/delete-if-exists (fs/path project "qa" "e2e.edn"))
+      (fs/delete-if-exists (fs/path project "scripts" "run-qa-e2e.sh"))
+      (fs/delete-if-exists
+       (fs/path project "swarmforge" "scripts" "check-e2e.bb"))
+
+      (let [check (run repo-root composer "--forge" (str forge)
+                       "--upgrade" (str project) "--check")]
+        (is (not (zero? (:exit check))))
+        (is (str/includes? (:out check) "add required e2e stage")))
+      (let [upgrade (run repo-root composer "--forge" (str forge)
+                         "--upgrade" (str project))]
+        (is (zero? (:exit upgrade)) (:err upgrade))
+        (is (str/includes? (:out upgrade) "upgraded: add required e2e stage")))
+      (let [names (mapv :name (:stages (edn/read-string (slurp (str stages-file)))))
+            qa-index (.indexOf names "qa")]
+        (is (= ["qa" "e2e" "docs"]
+               (subvec names qa-index (+ qa-index 3)))))
+      (is (fs/regular-file? (fs/path project "qa" "e2e.edn")))
+      (is (fs/executable?
+           (fs/path project "scripts" "run-qa-e2e.sh")))
+      (is (fs/regular-file?
+           (fs/path project "swarmforge" "scripts" "check-e2e.bb")))
       (is (zero? (:exit (run repo-root composer "--forge" (str forge)
                               "--upgrade" (str project) "--check"))))
       (finally

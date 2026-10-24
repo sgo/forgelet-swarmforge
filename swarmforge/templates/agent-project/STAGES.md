@@ -22,7 +22,7 @@ Spec-only and bootstrap tasks need an explicit waiver in the approved spec,
 not a deferred gate.
 
 ```
-spec -> code -> clean -> architect -> harden -> clean-final -> qa -> docs -> deploy -> release?
+spec -> code -> clean -> architect -> harden -> clean-final -> qa -> e2e -> docs -> deploy -> release?
 ```
 
 Run `bb swarmforge/scripts/stage.bb list --root .` when you think the work is
@@ -90,6 +90,14 @@ parameterized or have its exemption recorded in the task note.
   `scripts/run-acceptance-tests.sh` parses every feature and dispatches every
   step to a handler under `acceptance/src`. A step with no handler or two
   matching handlers fails the gate.
+- **e2e**: required for every standard-profile card unless its approved task
+  note contains `## E2E waiver` with a reason. Register the card in
+  `qa/e2e.edn` with its procedure, script and required environment-variable
+  names. The procedure is `qa/<card>.md`; the script exercises the same
+  end-to-end path through the user interface. Missing inputs fail, never skip.
+  Input values are not recorded or printed; captured output and
+  `target/e2e/check.log` replace them with `<redacted:NAME>`. Library-profile
+  projects use their public-API `verify` gate instead.
 - **docs**: required for every card. Update `README.md`, `docs/manual.md` and
   `ARCHITECTURE.md` where their audiences require it. `docs/manual-contract.edn`
   links each document section to the public APIs it explains and to executable

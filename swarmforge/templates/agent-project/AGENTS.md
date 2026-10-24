@@ -43,6 +43,13 @@ Write value-driven behaviour as Scenario Outlines with example tables. A plain
 scenario has no mutable cells, so it is not acceptance-mutation evidence; a
 boolean scenario may stay plain, with that choice recorded in the task note.
 
+In the standard profile, the `e2e` stage is part of QA. Register each card in
+`qa/e2e.edn` with its procedure, script and required environment-input names.
+Missing inputs fail the stage rather than skipping it. Never commit or print
+input values; the stage records only names and redacts values from output. If
+no end-to-end procedure applies, put an explicit `## E2E waiver` and reason in
+the approved task note.
+
 End every turn with a line exactly `<<AGENT READY>>`, so the relay knows the
 turn is complete.
 
