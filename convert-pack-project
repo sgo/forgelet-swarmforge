@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+# Plan or apply an in-place conversion from a pack project to one agent.
+#
+# It refuses to act unless the project is closed, the primary checkout is
+# clean, and every linked worktree is clean and merged into HEAD. The default
+# is a dry-run plan; --apply performs the conversion.
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: convert-pack-project --root <project> --forge <forge-root>
+                            --template <agent-template>
+                            [--profile standard|library] [--apply]
+USAGE
+}
+
+fail() { printf 'convert-pack-project: %s\n' "$*" >&2; exit 1; }
+
+root=""
+forge=""
+template=""
+profile=standard
+apply=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --root) [[ $# -ge 2 ]] || fail "--root needs a path"; root=$2; shift 2 ;;
+    --forge) [[ $# -ge 2 ]] || fail "--forge needs a path"; forge=$2; shift 2 ;;
+    --template) [[ $# -ge 2 ]] || fail "--template needs a path"; template=$2; shift 2 ;;
+    --profile) [[ $# -ge 2 ]] || fail "--profile needs a value"; profile=$2; shift 2 ;;
+    --apply) apply=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+case "$profile" in standard|library) ;; *) fail "unknown profile: $profile" ;; esac
+[[ -n "$root" && -d "$root" ]] || fail "project root not found: ${root:-missing}"
+[[ -n "$forge" && -d "$forge/swarmforge/scripts" ]] ||
+  fail "composed forge root not found: ${forge:-missing}"
+[[ -n "$template" && -d "$template" ]] || fail "agent template not found: ${template:-missing}"
+root="$(cd "$root" && pwd -P)"
+forge="$(cd "$forge" && pwd -P)"
+template="$(cd "$template" && pwd -P)"
+project="$(basename "$root")"
+
+[[ -d "$root/.git" ]] || fail "project has no git repository: $root"
+[[ "$root" == "$forge/projects/$project" ]] ||
+  fail "project must be a direct child of $forge/projects: $root"
+[[ -f "$root/.swarmforge/pack" ]] || fail "project has no .swarmforge/pack marker"
+[[ ! -f "$root/.swarmforge/single-agent" ]] || fail "project is already single-agent"
+if [[ -f "$forge/.swarmforge/open-projects" ]] &&
+   awk -v p="$project" '$0 == p { found=1 } END { exit !found }' \
+       "$forge/.swarmforge/open-projects"; then
+  fail "close $project through $forge before converting it"
+fi
+
+top="$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)" ||
+  fail "project is not a git worktree: $root"
+top="$(cd "$top" && pwd -P)"
+[[ "$top" == "$root" ]] || fail "project path is not its git top level: $root (Git says $top)"
+
+refuse-running-pid() {
+  local file="$1" label="$2" pid
+  [[ -f "$file" ]] || return 0
+  pid="$(tr -d '[:space:]' < "$file")"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    fail "$label $pid is still running; close the project first"
+  fi
+}
+
+refuse-running-pid "$root/.swarmforge/daemon/handoffd.pid" "handoff daemon"
+refuse-running-pid "$root/.swarmforge/pack_web.pid" "project dashboard"
+
+tmux_socket="$root/.swarmforge/tmux-socket"
+if [[ -f "$tmux_socket" ]]; then
+  socket_path="$(tr -d '\r\n' < "$tmux_socket")"
+  if [[ -n "$socket_path" ]] &&
+     tmux -S "$socket_path" list-sessions >/dev/null 2>&1; then
+    fail "project tmux sessions are still running; close the project first"
+  fi
+fi
+
+branch="$(git -C "$root" branch --show-current)"
+[[ -n "$branch" ]] || fail "the primary checkout is detached"
+[[ -z "$(git -C "$root" status --porcelain)" ]] ||
+  fail "the primary checkout is not clean"
+
+worktree_paths=()
+worktree_branches=()
+while IFS=$'\t' read -r path linked_branch; do
+  [[ -n "$path" && "$path" != "$root" ]] || continue
+  path="$(cd "$path" && pwd -P)" || fail "cannot enter linked worktree: $path"
+  [[ "$path" == "$root"/.worktrees/* ]] ||
+    fail "linked worktree outside $root/.worktrees: $path"
+  [[ -n "$linked_branch" ]] || fail "worktree $path is detached"
+  [[ -z "$(git -C "$path" status --porcelain --untracked-files=all)" ]] ||
+    fail "worktree is not clean: $path"
+  git -C "$root" merge-base --is-ancestor "$linked_branch" HEAD ||
+    fail "worktree branch is not merged into HEAD: $linked_branch"
+  worktree_paths+=("$path")
+  worktree_branches+=("$linked_branch")
+done < <(git -C "$root" worktree list --porcelain | awk '
+  /^worktree / { path=substr($0,10); branch="" }
+  /^branch / { branch=substr($0,8); sub(/^refs\/heads\//,"",branch) }
+  /^$/ { if (path != "") print path "\t" branch; path=""; branch="" }
+  END { if (path != "") print path "\t" branch }
+')
+
+stages=()
+while IFS= read -r stage; do
+  [[ -n "$stage" ]] || continue
+  stages+=("$stage")
+done < <(
+  stage_file="$template/stages.edn"
+  [[ "$profile" == library ]] && stage_file="$template/stages.library.edn"
+  bb -e '
+    (require (quote [clojure.edn :as edn]))
+    (let [config (edn/read-string (slurp (first *command-line-args*)))]
+      (doseq [stage (:stages config)] (println (:name stage)))
+      (println "done"))
+  ' "$stage_file"
+)
+
+active=0
+board="$root/.swarmforge/board/tasks.tsv"
+if [[ -f "$board" ]]; then
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    lane="$(printf '%s\n' "$line" | cut -f2)"
+    [[ "$lane" == done ]] || active=$((active + 1))
+  done < "$board"
+fi
+
+printf 'Conversion plan for %s\n' "$root"
+printf '  branch:           %s\n' "$branch"
+printf '  profile:          %s\n' "$profile"
+printf '  linked worktrees: %s\n' "${#worktree_paths[@]}"
+for i in "${!worktree_paths[@]}"; do
+  printf '    %s (%s, clean, merged)\n' "${worktree_paths[$i]}" "${worktree_branches[$i]}"
+done
+printf '  board:            %s active card(s) will move to spec; done history is preserved\n' "$active"
+printf '  preserve:         source, git history, tasks, features, qa, local scripts\n'
+printf '  archive:          handoffs, daemon/dashboard/stage state, sessions/prompts, pack metadata, completion hook\n'
+printf '  add:              single-agent marker/roles/stages, shared runtime, docs and e2e contracts, hooks\n'
+
+if (( ! apply )); then
+  printf '\nDRY RUN: nothing changed. Re-run with --apply to convert.\n'
+  exit 0
+fi
+
+stamp="$(date +%Y%m%dT%H%M%S)"
+archive="$root/.swarmforge/archive/pack-conversion-$stamp"
+mkdir -p "$archive"
+
+archive_path() {
+  local path="$1"
+  [[ -e "$path" ]] || return 0
+  mkdir -p "$archive/$(dirname "${path#$root/}")"
+  mv "$path" "$archive/${path#$root/}"
+}
+
+if [[ -f "$board" ]]; then
+  cp "$board" "$archive/tasks.before.tsv"
+fi
+archive_path "$root/.swarmforge/handoffs"
+archive_path "$root/.swarmforge/daemon"
+archive_path "$root/.swarmforge/dashboard"
+archive_path "$root/.swarmforge/notify"
+archive_path "$root/.swarmforge/stages"
+archive_path "$root/.swarmforge/prompts"
+archive_path "$root/.swarmforge/sessions.tsv"
+archive_path "$root/.swarmforge/windows.tsv"
+archive_path "$root/.swarmforge/window-ids"
+archive_path "$root/.swarmforge/tmux-socket"
+archive_path "$root/.swarmforge/tmux-env"
+archive_path "$root/.swarmforge/pack_web.pid"
+archive_path "$root/.swarmforge/pack"
+archive_path "$root/.swarmforge/roles.tsv"
+archive_path "$root/.swarmforge/board/lanes.tsv"
+archive_path "$root/swarmforge/roles"
+archive_path "$root/swarmforge/swarmforge.conf"
+archive_path "$root/swarmforge/constitution.prompt"
+archive_path "$root/swarmforge/constitution"
+archive_path "$root/swarmforge/hooks/card-complete.sh"
+archive_path "$root/AGENTS.md"
+archive_path "$root/STAGES.md"
+archive_path "$root/stages.edn"
+archive_path "$root/swarm"
+
+for i in "${!worktree_paths[@]}"; do
+  git -C "$root" worktree remove --force "${worktree_paths[$i]}"
+  git -C "$root" branch -d "${worktree_branches[$i]}"
+done
+if [[ -d "$root/.worktrees" ]] &&
+   [[ -z "$(find "$root/.worktrees" -mindepth 1 -print -quit)" ]]; then
+  rmdir "$root/.worktrees"
+fi
+
+if [[ -f "$board" ]]; then
+  awk -F '\t' 'BEGIN { OFS="\t" }
+    NF >= 2 { if ($2 != "done") $2="spec"; print }
+    NF < 2 { print }' "$archive/tasks.before.tsv" > "$board"
+fi
+mkdir -p "$root/.swarmforge/board"
+printf '%s\n' "${stages[@]}" > "$root/.swarmforge/board/lanes.tsv"
+
+source_stages="$template/stages.edn"
+[[ "$profile" == library ]] && source_stages="$template/stages.library.edn"
+sed "s/:task \"agent-project\"/:task \"$project\"/" "$source_stages" > "$root/stages.edn"
+cp "$template/STAGES.md" "$root/STAGES.md"
+[[ "$profile" == library ]] && cp "$template/STAGES.library.md" "$root/STAGES.md"
+cp "$template/AGENTS.md" "$root/AGENTS.md"
+[[ -f "$root/ARCHITECTURE.md" ]] || cp "$template/ARCHITECTURE.md" "$root/ARCHITECTURE.md"
+[[ -f "$root/mission.md" ]] || cp "$template/mission.md" "$root/mission.md"
+
+mkdir -p "$root/acceptance" "$root/scripts" "$root/docs" "$root/qa"
+cp -Rn "$template/acceptance/." "$root/acceptance/" 2>/dev/null || true
+cp -Rn "$template/scripts/." "$root/scripts/" 2>/dev/null || true
+cp -Rn "$template/docs/." "$root/docs/" 2>/dev/null || true
+cp -Rn "$template/qa/." "$root/qa/" 2>/dev/null || true
+cp "$template/swarm" "$root/swarm"
+chmod +x "$root/swarm"
+
+mkdir -p "$root/swarmforge/scripts" "$root/swarmforge/constitution/articles"
+cp -R "$forge/swarmforge/scripts/." "$root/swarmforge/scripts/"
+if [[ -d "$archive/swarmforge/constitution/articles" ]]; then
+  find "$archive/swarmforge/constitution/articles" -maxdepth 1 \
+    -type f -name 'local-*.prompt' -exec cp {} "$root/swarmforge/constitution/articles/" \;
+fi
+if [[ -f "$forge/swarmforge/constitution/articles/engineering.prompt" ]]; then
+  cp "$forge/swarmforge/constitution/articles/engineering.prompt" \
+     "$root/swarmforge/constitution/articles/engineering.prompt"
+fi
+
+printf 'agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n' "$root" \
+  > "$root/.swarmforge/roles.tsv"
+printf '%s\n' "$project" > "$root/.swarmforge/single-agent"
+printf '%s\n' "$profile" > "$root/.swarmforge/profile"
+
+for file in scripts/run-acceptance-tests.sh scripts/run-acceptance-mutation.sh \
+            scripts/run-qa-e2e.sh scripts/publish-snapshot.sh \
+            scripts/github-packages-token.sh scripts/check-documentation.sh; do
+  [[ -f "$root/$file" ]] && chmod +x "$root/$file"
+done
+
+installer="$root/swarmforge/scripts/install-agent-hooks.sh"
+[[ -f "$installer" ]] && bash "$installer" "$root"
+
+{
+  printf 'converted-at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf 'project: %s\nprofile: %s\narchive: %s\n' "$root" "$profile" "$archive"
+  printf 'active-cards-moved-to-spec: %s\n' "$active"
+} > "$archive/manifest.txt"
+
+printf '\nCONVERTED: %s\n' "$root"
+printf 'Review and commit the conversion. Archived pack state: %s\n' "$archive"
+printf 'Next: %s/swarm\n' "$root"

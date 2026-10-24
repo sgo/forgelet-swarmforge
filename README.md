@@ -152,6 +152,35 @@ features and existing stages, inserts a new required stage in its template
 position, and refreshes only managed helper files. It then prints the
 project-local work required to make the new gate pass.
 
+A six-pack project can be converted in place with:
+
+```sh
+get-agent-project --convert <forge-root>/projects/<name> \
+  --forge <forge-root> [--profile standard|library]
+```
+
+The default is a dry run: it checks the project and reports the worktrees,
+branches, pack runtime and cards it will handle. `--apply` performs the
+conversion. The project must be a direct child of `<forge-root>/projects`, closed
+through that forge, and on a clean primary checkout. Every linked worktree must
+be clean, attached, under `.worktrees`, and already merged into the primary
+branch. The converter also refuses a live handoff daemon, project dashboard or
+tmux socket.
+
+Conversion keeps the source, Git history, tasks, features, QA material, local
+scripts and completed board rows. It archives the old pack metadata, roles,
+daemon/dashboard/stage state, session files, configuration and completion hook
+under `.swarmforge/archive/pack-conversion-<timestamp>/`, then removes the
+merged worktrees and their branches. Active board rows move to `spec` with their
+names and task IDs unchanged; done rows stay in `done`. It installs the
+single-agent marker, one-agent roles, current `stages.edn` profile, shared
+scripts, instructions, documentation/e2e contracts and hooks.
+
+Review the resulting tree and open the first real card before committing the
+conversion. The single-agent pre-commit hook requires that card's spec to be
+proposed and approved, so conversion does not create a fake approval or bypass
+the hook with `--no-verify`.
+
 When a routed card exists on the single-agent board, `stage propose spec`
 binds that card's name and task ID into the proposal and carries the same board
 row through every stage. Older project-named placeholder cards are removed

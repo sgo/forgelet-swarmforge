@@ -607,3 +607,155 @@
       (finally
         (stop-agent-session! project)
         (fs/delete-tree forge)))))
+
+(deftest a-pack-project-converts-in-place-after-a-safe-dry-run
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "pack")
+        worktree (fs/path project ".worktrees" "qa")
+        board (fs/path project ".swarmforge" "board" "tasks.tsv")
+        git (fn [dir & args]
+              (apply sh/sh "git" "-c" "user.name=Converter Test"
+                     "-c" "user.email=converter@test.invalid"
+                     (concat ["-C" (str dir)] args)))
+        convert (fn [& extra]
+                  (apply run repo-root composer "--forge" (str forge)
+                         "--convert" "pack" extra))]
+    (try
+      (write-file (fs/path project ".gitignore")
+                  ".swarmforge/\n.worktrees/\ntarget/\n")
+      (write-file (fs/path project "src" "main" "java" "Demo.java")
+                  "package demo; final class Demo {}\n")
+      (write-file (fs/path project "features" "existing.feature")
+                  "Feature: existing\n")
+      (write-file (fs/path project "tasks" "existing.md")
+                  "# Existing card\n")
+      (write-file (fs/path project "qa" "existing.md")
+                  "# Existing QA procedure\n")
+      (write-file (fs/path project "scripts" "local-check.sh")
+                  "#!/bin/sh\nexit 0\n")
+      (write-file (fs/path project "swarmforge" "roles" "specifier.prompt")
+                  "pack role\n")
+      (write-file (fs/path project "swarmforge" "constitution" "articles"
+                           "local-project.prompt")
+                  "project-local rule\n")
+      (write-file (fs/path project "swarmforge" "swarmforge.conf")
+                  "window specifier codex specifier\n")
+      (write-file (fs/path project "swarmforge" "hooks" "card-complete.sh")
+                  "#!/bin/sh\necho old completion hook\n")
+      (write-file (fs/path project ".swarmforge" "pack") "six-pack\n")
+      (write-file (fs/path project ".swarmforge" "roles.tsv")
+                  "specifier\tspecifier\t/tmp/specifier\tswarmforge-specifier\n")
+      (write-file board
+                  (str "finished\tdone\t2026-10-20T00:00:00Z\t2026-10-20T01:00:00Z\ttask-finished\t1\n"
+                       "active\tcoder\t2026-10-21T00:00:00Z\t2026-10-21T01:00:00Z\ttask-active\t0\n"))
+      (write-file (fs/path project ".swarmforge" "board" "lanes.tsv")
+                  "specifier\ncoder\nQA\ndone\n")
+      (write-file (fs/path project ".swarmforge" "stages" "old.edn")
+                  "{:pack-state true}\n")
+      (is (zero? (:exit (git project "init" "-q" "-b" "main"))))
+      (is (zero? (:exit (git project "add" "."))))
+      (is (zero? (:exit (git project "commit" "-q" "-m" "pack project"))))
+      (is (zero? (:exit (git project "branch" "swarmforge-qa"))))
+      (is (zero? (:exit (git project "worktree" "add" "-q"
+                          (str worktree) "swarmforge-qa"))))
+      (write-file (fs/path worktree "qa" "from-worktree.md")
+                  "# Work landed by QA\n")
+      (is (zero? (:exit (git worktree "add" "qa/from-worktree.md"))))
+      (is (zero? (:exit (git worktree "commit" "-q" "-m" "QA result"))))
+
+      (testing "an unmerged worktree blocks conversion"
+        (let [plan (convert)]
+          (is (not (zero? (:exit plan))))
+          (is (str/includes? (:err plan) "not merged into HEAD"))
+          (is (fs/regular-file? (fs/path project ".swarmforge" "pack")))))
+      (is (zero? (:exit (git project "merge" "--no-ff" "-q"
+                          "-m" "merge QA" "swarmforge-qa"))))
+      (let [head (str/trim (:out (git project "rev-parse" "HEAD")))]
+
+        (testing "an open project or dirty checkout blocks conversion"
+          (write-file (fs/path forge ".swarmforge" "open-projects") "pack\n")
+          (let [open (convert)]
+            (is (not (zero? (:exit open))))
+            (is (str/includes? (:err open) "close pack through")))
+          (fs/delete (fs/path forge ".swarmforge" "open-projects"))
+          (write-file (fs/path project "README.md") "dirty\n")
+          (let [dirty (convert)]
+            (is (not (zero? (:exit dirty))))
+            (is (str/includes? (:err dirty) "not clean")))
+          (fs/delete (fs/path project "README.md")))
+
+        (testing "the default is a non-mutating plan"
+          (let [plan (convert)]
+            (is (zero? (:exit plan)) (:err plan))
+            (is (str/includes? (:out plan) "Conversion plan for"))
+            (is (str/includes? (:out plan) "1 active card(s) will move to spec"))
+            (is (str/includes? (:out plan) "DRY RUN: nothing changed"))
+            (is (fs/regular-file? (fs/path project ".swarmforge" "pack")))
+            (is (fs/directory? worktree))
+            (is (not (fs/exists?
+                      (fs/path project ".swarmforge" "single-agent")))))
+
+        (testing "apply preserves the project and converts its runtime"
+          (let [result (convert "--apply")]
+            (is (zero? (:exit result)) (:err result)))
+          (is (= "main\n" (:out (git project "branch" "--show-current"))))
+          (is (zero? (:exit (git project "merge-base" "--is-ancestor" head "HEAD"))))
+          (is (fs/regular-file?
+               (fs/path project "src" "main" "java" "Demo.java")))
+          (is (fs/regular-file? (fs/path project "features" "existing.feature")))
+          (is (fs/regular-file? (fs/path project "tasks" "existing.md")))
+          (is (fs/regular-file? (fs/path project "qa" "existing.md")))
+          (is (fs/regular-file? (fs/path project "qa" "from-worktree.md")))
+          (is (fs/regular-file? (fs/path project "scripts" "local-check.sh")))
+          (is (fs/regular-file?
+               (fs/path project "swarmforge" "constitution" "articles"
+                        "local-project.prompt")))
+          (let [rows (str/split-lines (slurp (str board)))]
+            (is (re-find #"^finished\tdone\t.*\ttask-finished\t1$" (first rows)))
+            (is (re-find #"^active\tspec\t.*\ttask-active\t0$" (second rows))))
+          (let [lanes (str/split-lines
+                       (:out (run project "swarmforge/scripts/pack_board.sh"
+                                  "lanes" "--root" (str project))))]
+            (is (= "spec" (first lanes)))
+            (is (= "done" (last lanes)))
+            (is (some #{"qa"} lanes))
+            (is (some #{"e2e"} lanes))
+            (is (some #{"docs"} lanes)))
+          (is (not (fs/exists? worktree)))
+          (is (not (zero? (:exit (git project "show-ref" "--verify" "--quiet"
+                                  "refs/heads/swarmforge-qa")))))
+          (is (= "standard\n"
+                 (slurp (str (fs/path project ".swarmforge" "profile")))))
+          (is (fs/regular-file?
+               (fs/path project ".swarmforge" "single-agent")))
+          (is (fs/regular-file? (fs/path project "swarmforge" "scripts" "stage.bb")))
+          (is (fs/regular-file? (fs/path project "qa" "e2e.edn")))
+          (is (fs/regular-file? (fs/path project ".git" "hooks" "pre-commit")))
+          (is (fs/executable? (fs/path project ".git" "hooks" "pre-commit")))
+          (let [stages (edn/read-string
+                        (slurp (str (fs/path project "stages.edn"))))
+                names (mapv :name (:stages stages))]
+            (is (= "pack" (:task stages)))
+            (is (= ["qa" "e2e" "docs"]
+                   (subvec names (.indexOf names "qa")
+                           (+ (.indexOf names "qa") 3)))))
+          (let [archives (sort (fs/glob project
+                                        ".swarmforge/archive/pack-conversion-*"))
+                archive (last archives)]
+            (is (= 1 (count archives)))
+            (is (fs/regular-file?
+                 (fs/path archive ".swarmforge" "pack")))
+            (is (fs/regular-file?
+                 (fs/path archive ".swarmforge" "roles.tsv")))
+            (is (fs/regular-file?
+                 (fs/path archive "swarmforge" "roles" "specifier.prompt")))
+            (is (fs/regular-file?
+                 (fs/path archive "swarmforge" "hooks" "card-complete.sh")))
+            (is (fs/regular-file?
+                 (fs/path archive "swarmforge" "swarmforge.conf")))
+            (is (fs/regular-file?
+                 (fs/path archive ".swarmforge" "stages" "old.edn")))
+            (is (fs/regular-file?
+                 (fs/path archive "tasks.before.tsv")))))))
+      (finally
+        (fs/delete-tree forge)))))
