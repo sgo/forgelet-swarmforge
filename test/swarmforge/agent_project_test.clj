@@ -365,18 +365,22 @@
       (fs/delete-if-exists
        (fs/path project "swarmforge" "scripts" "check-documentation.bb"))
       (fs/delete-if-exists (fs/path project "docs" "manual-contract.edn"))
+      (write-file (fs/path project "AGENTS.md") "# Old agent instructions\n")
+      (write-file (fs/path project "STAGES.md") "# Old stages\n")
 
       (let [check (run repo-root composer "--forge" (str forge)
                        "--upgrade" (str project) "--check")]
         (is (not (zero? (:exit check))))
         (is (str/includes? (:out check) "add required docs stage"))
-        (is (str/includes? (:out check) "add required deploy stage")))
+        (is (str/includes? (:out check) "add required deploy stage"))
+        (is (str/includes? (:out check) "install single-agent correction policy")))
 
       (let [upgrade (run repo-root composer "--forge" (str forge)
                          "--upgrade" (str project))]
         (is (zero? (:exit upgrade)) (:err upgrade))
         (is (str/includes? (:out upgrade) "upgraded: add required docs stage"))
-        (is (str/includes? (:out upgrade) "upgraded: add required deploy stage")))
+        (is (str/includes? (:out upgrade) "upgraded: add required deploy stage"))
+        (is (str/includes? (:out upgrade) "upgraded: install single-agent correction policy")))
 
       (let [stages (:stages (edn/read-string (slurp (str stages-file))))
             names (mapv :name stages)
@@ -391,6 +395,12 @@
       (is (fs/regular-file?
            (fs/path project "swarmforge" "scripts" "check-documentation.bb")))
       (is (fs/regular-file? (fs/path project "docs" "manual-contract.edn")))
+      (doseq [file ["AGENTS.md" "STAGES.md"]]
+        (let [text (slurp (str (fs/path project file)))]
+          (is (str/includes?
+               text "forgelet:single-agent-correction-policy:begin"))
+          (is (str/includes?
+               text "do not create another\napproval request"))))
       (is (zero? (:exit (run repo-root composer "--forge" (str forge)
                               "--upgrade" (str project) "--check"))))
       (finally

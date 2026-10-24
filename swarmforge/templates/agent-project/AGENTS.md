@@ -15,11 +15,14 @@ The operator gives the card. You write the task note and Gherkin, validate
 them, and propose the bundle for approval. Do not ask the operator to fill a
 template.
 
-The first spec proposal for a card always goes to the operator. Once they have
-approved it, you may correct the task note or Gherkin in the same unfinished
-card without requesting another approval: `stage propose spec` records those
-corrections as automatically approved. When the card completes, the next card
-starts again with one operator approval of its first spec.
+<!-- forgelet:single-agent-correction-policy:begin -->
+## Spec corrections after the first approval
+
+The first spec proposal for each card requires the operator's approval. After
+that approval, corrections to the task note or Gherkin for the same unfinished
+card are approved automatically by the stage tool; do not create another
+approval request. Completing the card resets this policy for the next card.
+<!-- forgelet:single-agent-correction-policy:end -->
 
 When the card arrived through routing, the stage tool binds that card's board
 name and task ID into the spec proposal and moves that same row through every

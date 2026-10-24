@@ -69,11 +69,6 @@ parameterized or have its exemption recorded in the task note.
   the proposal; `stage approve <id> --words
   "<their words>"` records the exact answer. Approval is single-use and stale
   when any file in the bundle changes.
-  The first proposal for each card requires the operator's approval. After
-  that first approval, corrections to the same unfinished card are recorded as
-  automatically approved under the single-agent correction policy; they need
-  no second approval request. Finishing the card resets this policy, so the
-  first proposal for the next card requires the operator again.
   The pre-commit hook refuses a commit until the current bundle is approved.
   The proposal is also posted to the project dashboard and the phone's
   approvals room; `stage approve` or `stage reject` clears it. Only the
@@ -113,6 +108,15 @@ parameterized or have its exemption recorded in the task note.
 Each `stage check` moves the project's card on `.swarmforge/board/tasks.tsv`,
 which is what the phone's activity room reads. `stage complete` moves it to
 `done`.
+
+<!-- forgelet:single-agent-correction-policy:begin -->
+## Spec corrections after the first approval
+
+The first spec proposal for each card requires the operator's approval. After
+that approval, corrections to the task note or Gherkin for the same unfinished
+card are approved automatically by the stage tool; do not create another
+approval request. Completing the card resets this policy for the next card.
+<!-- forgelet:single-agent-correction-policy:end -->
 
 `stage propose spec` binds one active board card to the proposal and keeps its
 name and `task_id`. Every later stage moves that same row. A project-named row

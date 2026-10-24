@@ -14,6 +14,17 @@
            "scripts/check-documentation.sh"
            "swarmforge/scripts/check-documentation.bb"]})
 
+(def policy-begin "<!-- forgelet:single-agent-correction-policy:begin -->")
+(def policy-end "<!-- forgelet:single-agent-correction-policy:end -->")
+(def policy-block
+  (str policy-begin "\n"
+       "## Spec corrections after the first approval\n\n"
+       "The first spec proposal for each card requires the operator's approval. After\n"
+       "that approval, corrections to the task note or Gherkin for the same unfinished\n"
+       "card are approved automatically by the stage tool; do not create another\n"
+       "approval request. Completing the card resets this policy for the next card.\n"
+       policy-end))
+
 (defn deploy-stage [command]
   {:name "deploy"
    :runs [[command]]
@@ -85,6 +96,30 @@
       config)
     (update config :stages insert-before stage #{"release"})))
 
+(defn policy-in-place? [file]
+  (and (fs/regular-file? file)
+       (= 1 (count (re-seq (re-pattern (java.util.regex.Pattern/quote policy-begin))
+                           (slurp (str file)))))
+       (= 1 (count (re-seq (re-pattern (java.util.regex.Pattern/quote policy-end))
+                           (slurp (str file)))))))
+
+(defn install-policy! [file]
+  (let [text (if (fs/regular-file? file)
+               (slurp (str file))
+               (str "# " (fs/file-name file) "\n"))
+        managed (re-pattern
+                 (str "(?s)"
+                      (java.util.regex.Pattern/quote policy-begin)
+                      ".*?"
+                      (java.util.regex.Pattern/quote policy-end)))
+        updated (if (re-find managed text)
+                  (str/replace text managed policy-block)
+                  (str text
+                       (when-not (str/ends-with? text "\n") "\n")
+                       "\n" policy-block "\n"))]
+    (fs/create-dirs (fs/parent file))
+    (spit (str file) updated)))
+
 (defn -main [& args]
   (let [root (fs/absolutize (or (option args "--root") "."))
         template (fs/absolutize
@@ -97,6 +132,8 @@
         wrapper (fs/path root "scripts" "check-documentation.sh")
         template-contract (fs/path template "docs" "manual-contract.edn")
         template-wrapper (fs/path template "scripts" "check-documentation.sh")
+        policy-files [(fs/path root "AGENTS.md")
+                      (fs/path root "STAGES.md")]
         upgrade-source (fs/path (fs/parent (fs/absolutize *file*))
                                 "check-documentation.bb")
         deploy-target (configured-deploy-target root)
@@ -124,6 +161,8 @@
                   (and upgraded (not= with-deploy upgraded))
                   (conj "add required docs stage")
                   install-publisher? (conj "install snapshot publisher")
+                  (some #(not (policy-in-place? %)) policy-files)
+                  (conj "install single-agent correction policy")
                   (not (fs/regular-file? checker)) (conj "install check-documentation.bb")
                   (or (not (fs/regular-file? wrapper))
                       (not= (slurp (str wrapper)) (slurp (str template-wrapper))))
@@ -147,6 +186,9 @@
               (fs/create-dirs (fs/parent destination))
               (fs/copy source destination {:replace-existing true})
               (fs/set-posix-file-permissions destination "rwxr-xr-x"))))
+        (doseq [file policy-files]
+          (when-not (policy-in-place? file)
+            (install-policy! file)))
         (when-not (= (when (fs/regular-file? checker) (slurp (str checker)))
                      (slurp (str upgrade-source)))
           (fs/create-dirs (fs/parent checker))
