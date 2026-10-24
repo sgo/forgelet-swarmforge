@@ -290,6 +290,22 @@
           files (or (:files latest) [])]
       (assoc state :card (select-card root config state files)))))
 
+(defn card-completed? [state card]
+  (and card
+       (= (:id card) (:id (:card (:complete state))))))
+
+(defn first-approval-recorded? [state card]
+  (and card
+       (some (fn [proposal]
+               (and (= :approved (:status proposal))
+                    (= (:id card) (:id (:card proposal)))))
+             (vals (:proposals state)))))
+
+(defn auto-approve-correction? [root state card]
+  (and (fs/regular-file? (fs/path root ".swarmforge" "single-agent"))
+       (first-approval-recorded? state card)
+       (not (card-completed? state card))))
+
 (defn write-stage-approval! [root config proposal]
   (let [file (stage-approval-file root (:id proposal))
         card (:card proposal)]
@@ -502,7 +518,10 @@
       (exit! 1 (str "No spec files found for " (str/join ", " patterns))))
     (let [id (str "spec-" (System/currentTimeMillis))
           pending (pending-proposals state)
-          card (select-card root config state files)]
+          card (select-card root config state files)
+          auto-approve? (and (not replace?)
+                             (auto-approve-correction? root state card))
+          tree (worktree-tree root)]
       (when (and (seq pending) (not replace?))
         (exit! 1
                (str "Spec proposal(s) already pending: "
@@ -528,22 +547,39 @@
                       :hash (spec-hash root files)
                       :body (spec-body root files)
                       :at (now)
-                      :status :pending}
+                      :status (if auto-approve? :approved :pending)
+                      :approved-at (when auto-approve? (now))
+                      :approval-policy (when auto-approve?
+                                         "correction after first operator approval")
+                      :words (when auto-approve?
+                               "single-agent correction after first approval")}
             state (assoc-in (assoc state :card card)
-                            [:proposals id] proposal)]
+                            [:proposals id] proposal)
+            state (if auto-approve?
+                    (record-stage state "spec" tree
+                                  [{:proposal id :hash (:hash proposal)
+                                    :files files}]
+                                  files)
+                    state)]
         (save-state root (:task config) state)
         (remove-stage-approvals! root)
         (update-board! root config card "spec")
-        (write-stage-approval! root config proposal)
-        (println (str "spec proposal " id))
+        (when auto-approve?
+          (record-resolution! root config card id "auto_approved"))
+        (when-not auto-approve?
+          (write-stage-approval! root config proposal))
+        (println (str (if auto-approve? "spec correction " "spec proposal ") id))
         (println (str "files: " (str/join ", " files)))
         (println (str "sha256: " (:hash proposal)))
         (println "---")
         (println (:body proposal))
         (println "---")
-        (println (str "Ask the operator to approve this exact text with: "
-                      "stage approve " id " --words \"<their words>\""))
-        (println "The proposal is also in the project dashboard and the phone's approvals room.")))))
+        (if auto-approve?
+          (println "Auto-approved under the single-agent correction policy; this card already has its first operator approval.")
+          (do
+            (println (str "Ask the operator to approve this exact text with: "
+                          "stage approve " id " --words \"<their words>\""))
+            (println "The proposal is also in the project dashboard and the phone's approvals room.")))))))
 
 (defn approve! [root config state id words]
   (let [proposal (get-in state [:proposals id])]
@@ -696,7 +732,8 @@
       (when (seq missing)
         (exit! 1 (str "Stages not current: " (str/join ", " missing))))
       (save-state root (:task config)
-                  (assoc state :complete {:tree tree :at (now)}))
+                  (assoc state :complete {:tree tree :at (now)
+                                          :card (:card state)}))
       (update-board! root config
                      (or (:card state) (fallback-card root config []))
                      "done")

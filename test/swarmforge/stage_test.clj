@@ -199,6 +199,49 @@
       (finally
         (fs/delete-tree root)))))
 
+(deftest a-single-agent-auto-approves-corrections-until-the-card-finishes
+  (let [root (fixture)
+        approval-file (fn [id]
+                        (fs/path root ".swarmforge" "handoffs"
+                                 "pending_approval" (str id ".handoff")))]
+    (try
+      (write-file (fs/path root ".swarmforge" "single-agent") "agent\n")
+      (run-stage root "propose" "spec" "spec.md" "features/extra.feature")
+      (let [first-id (latest-proposal-id root)]
+        (is (= :pending (get-in (state root) [:proposals first-id :status])))
+        (is (fs/regular-file? (approval-file first-id)))
+        (is (zero? (:exit (run-stage root "approve" first-id "--words" "approve"))))
+
+        (write-file (fs/path root "spec.md")
+                    "# Fixture spec\n\nA correction found during implementation.\n")
+        (let [correction (run-stage root "propose" "spec"
+                                    "spec.md" "features/extra.feature")
+              correction-id (latest-proposal-id root)]
+          (is (zero? (:exit correction)) (:err correction))
+          (is (str/includes? (:out correction) "Auto-approved"))
+          (is (= :approved (get-in (state root) [:proposals correction-id :status])))
+          (is (= "correction after first operator approval"
+                 (get-in (state root) [:proposals correction-id :approval-policy])))
+          (is (not (fs/exists? (approval-file correction-id)))))
+
+        (let [current (state root)
+              completed (assoc current :complete
+                               {:tree "completed-tree"
+                                :at (str (System/currentTimeMillis))
+                                :card (:card current)})]
+          (write-file (fs/path root ".swarmforge" "stages" "fixture.edn")
+                      (pr-str completed)))
+        (write-file (fs/path root "spec.md")
+                    "# Fixture spec\n\nA new card changes the contract again.\n")
+        (let [next-card (run-stage root "propose" "spec"
+                                   "spec.md" "features/extra.feature")
+              next-id (latest-proposal-id root)]
+          (is (zero? (:exit next-card)) (:err next-card))
+          (is (= :pending (get-in (state root) [:proposals next-id :status])))
+          (is (fs/regular-file? (approval-file next-id)))))
+      (finally
+        (fs/delete-tree root)))))
+
 (deftest a-spec-proposal-reaches-the-dashboard-and-the-board
   (let [root (fixture)
         approval-file (fn [id]

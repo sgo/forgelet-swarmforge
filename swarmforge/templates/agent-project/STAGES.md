@@ -69,6 +69,11 @@ parameterized or have its exemption recorded in the task note.
   the proposal; `stage approve <id> --words
   "<their words>"` records the exact answer. Approval is single-use and stale
   when any file in the bundle changes.
+  The first proposal for each card requires the operator's approval. After
+  that first approval, corrections to the same unfinished card are recorded as
+  automatically approved under the single-agent correction policy; they need
+  no second approval request. Finishing the card resets this policy, so the
+  first proposal for the next card requires the operator again.
   The pre-commit hook refuses a commit until the current bundle is approved.
   The proposal is also posted to the project dashboard and the phone's
   approvals room; `stage approve` or `stage reject` clears it. Only the

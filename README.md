@@ -156,6 +156,10 @@ When a routed card exists on the single-agent board, `stage propose spec`
 binds that card's name and task ID into the proposal and carries the same board
 row through every stage. Older project-named placeholder cards are removed
 when the routed card is bound; they are not the work card.
+The first proposal for each card still asks the operator for approval. After
+that approval, the agent may correct the task note or Gherkin without another
+request; the stage tool records the correction as automatically approved.
+Completing the card resets the policy for the next card.
 
 The spec stage is the specifier's work: the agent turns the operator's card
 into `tasks/<name>.md` and `features/<name>.feature`, validates the Gherkin,

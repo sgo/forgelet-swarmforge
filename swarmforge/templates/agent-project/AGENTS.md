@@ -15,6 +15,12 @@ The operator gives the card. You write the task note and Gherkin, validate
 them, and propose the bundle for approval. Do not ask the operator to fill a
 template.
 
+The first spec proposal for a card always goes to the operator. Once they have
+approved it, you may correct the task note or Gherkin in the same unfinished
+card without requesting another approval: `stage propose spec` records those
+corrections as automatically approved. When the card completes, the next card
+starts again with one operator approval of its first spec.
+
 When the card arrived through routing, the stage tool binds that card's board
 name and task ID into the spec proposal and moves that same row through every
 gate. Do not create a project-named card to stand in for the routed card. If

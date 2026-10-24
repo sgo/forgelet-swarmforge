@@ -63,6 +63,9 @@
   a gate to a later card, and do not mark a slice complete because its code compiles.
 - A slice has its own spec/task note/Gherkin, implementation, unit/property/architecture coverage,
   and every required gate. `stage complete` at the slice's tree is its completion.
+- In a single-agent project, the first spec proposal for each card requires the operator's approval.
+  After that first approval, corrections to the same unfinished card's task note or Gherkin are
+  automatically approved by the stage tool. Completing the card resets the policy for the next card.
 - A spec-only or bootstrap task is not a slice that skips gates. It needs an explicit waiver in its
   approved spec (and a `waived` record where the tool supports one), never a deferred gate.
 
