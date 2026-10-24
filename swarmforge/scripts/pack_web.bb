@@ -65,7 +65,7 @@
          in-process-for-row in-process-task-names approvals
          handoff-files batch-dirs in-process-dir allowed-doc?
          delete-approval! retry-approval! parse-message pane-status-for role-rows
-         recorded-pane)
+         recorded-pane single-agent-project?)
 
 (defn usage []
   (binding [*out* *err*]
@@ -123,7 +123,9 @@
       [])))
 
 (defn master-row [root]
-  (some #(when (= "master" (nth % 1 nil)) %) (role-rows root)))
+  (if (single-agent-project? root)
+    (first (role-rows root))
+    (some #(when (= "master" (nth % 1 nil)) %) (role-rows root))))
 
 (defn master-session [root]
   (when-let [row (master-row root)]

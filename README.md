@@ -174,7 +174,9 @@ under `.swarmforge/archive/pack-conversion-<timestamp>/`, then removes the
 merged worktrees and their branches. Active board rows move to `spec` with their
 names and task IDs unchanged; done rows stay in `done`. It installs the
 single-agent marker, one-agent roles, current `stages.edn` profile, shared
-scripts, instructions, documentation/e2e contracts and hooks.
+scripts, instructions, documentation/e2e contracts and hooks. The one-agent
+role row names the project's actual checked-out branch, so projects on `main`,
+`master` or another branch retain that branch without a rename.
 
 Review the resulting tree and open the first real card before committing the
 conversion. The single-agent pre-commit hook requires that card's spec to be

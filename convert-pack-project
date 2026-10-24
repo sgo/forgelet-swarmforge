@@ -232,7 +232,7 @@ if [[ -f "$forge/swarmforge/constitution/articles/engineering.prompt" ]]; then
      "$root/swarmforge/constitution/articles/engineering.prompt"
 fi
 
-printf 'agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n' "$root" \
+printf 'agent\t%s\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n' "$branch" "$root" \
   > "$root/.swarmforge/roles.tsv"
 printf '%s\n' "$project" > "$root/.swarmforge/single-agent"
 printf '%s\n' "$profile" > "$root/.swarmforge/profile"

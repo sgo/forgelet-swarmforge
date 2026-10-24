@@ -258,9 +258,15 @@
         (println (first cols))))))
 
 (defn master-lane! [opts]
-  (let [masters (filterv #(= "master" (second %)) (role-rows (resolve-root opts)))]
+  (let [root (resolve-root opts)
+        rows (vec (role-rows root))
+        masters (if (single-agent? root)
+                  rows
+                  (filterv #(= "master" (second %)) rows))]
     (when-not (= 1 (count masters))
-      (exit! 1 "Config must name exactly one master worktree"))
+      (exit! 1 (if (single-agent? root)
+                 "A single-agent project must name exactly one role"
+                 "Config must name exactly one master worktree")))
     (println (ffirst masters))))
 
 (defn tmux-socket [root]

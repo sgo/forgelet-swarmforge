@@ -726,6 +726,19 @@
                                   "refs/heads/swarmforge-qa")))))
           (is (= "standard\n"
                  (slurp (str (fs/path project ".swarmforge" "profile")))))
+          (is (re-find #"(?m)^agent\tmain\t.*\tswarmforge-agent\t"
+                       (slurp (str (fs/path project ".swarmforge" "roles.tsv")))))
+          (is (= "agent\n"
+                 (:out (run project "swarmforge/scripts/pack_board.sh"
+                            "master-lane" "--root" (str project)))))
+          (let [probe (run project "bb" "-cp"
+                           (str (fs/path project "swarmforge" "scripts"))
+                           "-e"
+                           (str "(require (quote pack-web)) "
+                                "(println (first (pack-web/master-row "
+                                (pr-str (str project)) ")))"))]
+            (is (zero? (:exit probe)) (:err probe))
+            (is (= "agent\n" (:out probe))))
           (is (fs/regular-file?
                (fs/path project ".swarmforge" "single-agent")))
           (is (fs/regular-file? (fs/path project "swarmforge" "scripts" "stage.bb")))
