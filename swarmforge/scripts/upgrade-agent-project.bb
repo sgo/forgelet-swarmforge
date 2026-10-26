@@ -33,6 +33,22 @@
        "approval request. Completing the card resets this policy for the next card.\n"
        policy-end))
 
+(def commit-policy-begin "<!-- forgelet:single-agent-commit-policy:begin -->")
+(def commit-policy-end "<!-- forgelet:single-agent-commit-policy:end -->")
+(def commit-policy-block
+  (str commit-policy-begin "\n"
+       "## Commit working checkpoints\n\n"
+       "After the current spec is approved, commit the approved spec before\n"
+       "implementation and commit coherent working checkpoints as they are completed.\n"
+       "Do not wait for every gate or for deployment to make your first commit, and do\n"
+       "not defer the whole card to one final pre-deploy commit. Keep each checkpoint\n"
+       "reviewable and free of unrelated or generated files.\n\n"
+       "The pre-commit hook checks only that the current spec bundle is approved. Stage\n"
+       "evidence is tied to the Git tree, so committing unchanged contents does not\n"
+       "invalidate a stage that has passed. Before deployment, commit and push the final\n"
+       "reviewed tree.\n"
+       commit-policy-end))
+
 (defn deploy-stage [command]
   {:name "deploy"
    :runs [[command]]
@@ -115,27 +131,27 @@
       config)
     (update config :stages insert-before stage #{"release"})))
 
-(defn policy-in-place? [file]
+(defn managed-block-in-place? [file begin end]
   (and (fs/regular-file? file)
-       (= 1 (count (re-seq (re-pattern (java.util.regex.Pattern/quote policy-begin))
+       (= 1 (count (re-seq (re-pattern (java.util.regex.Pattern/quote begin))
                            (slurp (str file)))))
-       (= 1 (count (re-seq (re-pattern (java.util.regex.Pattern/quote policy-end))
+       (= 1 (count (re-seq (re-pattern (java.util.regex.Pattern/quote end))
                            (slurp (str file)))))))
 
-(defn install-policy! [file]
+(defn install-managed-block! [file begin end block]
   (let [text (if (fs/regular-file? file)
                (slurp (str file))
                (str "# " (fs/file-name file) "\n"))
         managed (re-pattern
                  (str "(?s)"
-                      (java.util.regex.Pattern/quote policy-begin)
+                      (java.util.regex.Pattern/quote begin)
                       ".*?"
-                      (java.util.regex.Pattern/quote policy-end)))
+                      (java.util.regex.Pattern/quote end)))
         updated (if (re-find managed text)
-                  (str/replace text managed policy-block)
+                  (str/replace text managed block)
                   (str text
                        (when-not (str/ends-with? text "\n") "\n")
-                       "\n" policy-block "\n"))]
+                       "\n" block "\n"))]
     (fs/create-dirs (fs/parent file))
     (spit (str file) updated)))
 
@@ -203,8 +219,12 @@
                                  (slurp (str e2e-upgrade-source)))))
                   (conj "install check-e2e.bb")
                   install-publisher? (conj "install snapshot publisher")
-                  (some #(not (policy-in-place? %)) policy-files)
+                  (some #(not (managed-block-in-place?
+                               % policy-begin policy-end)) policy-files)
                   (conj "install single-agent correction policy")
+                  (some #(not (managed-block-in-place?
+                               % commit-policy-begin commit-policy-end)) policy-files)
+                  (conj "install single-agent commit policy")
                   (not (fs/regular-file? checker)) (conj "install check-documentation.bb")
                   (or (not (fs/regular-file? wrapper))
                       (not= (slurp (str wrapper)) (slurp (str template-wrapper))))
@@ -229,8 +249,12 @@
               (fs/copy source destination {:replace-existing true})
               (fs/set-posix-file-permissions destination "rwxr-xr-x"))))
         (doseq [file policy-files]
-          (when-not (policy-in-place? file)
-            (install-policy! file)))
+          (when-not (managed-block-in-place? file policy-begin policy-end)
+            (install-managed-block! file policy-begin policy-end policy-block))
+          (when-not (managed-block-in-place?
+                     file commit-policy-begin commit-policy-end)
+            (install-managed-block!
+             file commit-policy-begin commit-policy-end commit-policy-block)))
         (when-not (= (when (fs/regular-file? checker) (slurp (str checker)))
                      (slurp (str upgrade-source)))
           (fs/create-dirs (fs/parent checker))

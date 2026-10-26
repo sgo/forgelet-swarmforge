@@ -57,6 +57,10 @@
         (is (fs/regular-file? (fs/path project "stages.edn")))
         (is (fs/regular-file? (fs/path project "STAGES.md")))
         (is (fs/regular-file? (fs/path project "AGENTS.md")))
+        (doseq [file ["AGENTS.md" "STAGES.md"]]
+          (is (str/includes?
+               (slurp (str (fs/path project file)))
+               "forgelet:single-agent-commit-policy:begin")))
         (is (fs/regular-file?
              (fs/path project "swarmforge" "scripts" "agent-pre-commit.sh")))
         (is (fs/regular-file? (fs/path project ".git" "hooks" "pre-commit")))
@@ -420,14 +424,16 @@
         (is (not (zero? (:exit check))))
         (is (str/includes? (:out check) "add required docs stage"))
         (is (str/includes? (:out check) "add required deploy stage"))
-        (is (str/includes? (:out check) "install single-agent correction policy")))
+        (is (str/includes? (:out check) "install single-agent correction policy"))
+        (is (str/includes? (:out check) "install single-agent commit policy")))
 
       (let [upgrade (run repo-root composer "--forge" (str forge)
                          "--upgrade" (str project))]
         (is (zero? (:exit upgrade)) (:err upgrade))
         (is (str/includes? (:out upgrade) "upgraded: add required docs stage"))
         (is (str/includes? (:out upgrade) "upgraded: add required deploy stage"))
-        (is (str/includes? (:out upgrade) "upgraded: install single-agent correction policy")))
+        (is (str/includes? (:out upgrade) "upgraded: install single-agent correction policy"))
+        (is (str/includes? (:out upgrade) "upgraded: install single-agent commit policy")))
 
       (let [stages (:stages (edn/read-string (slurp (str stages-file))))
             names (mapv :name stages)
@@ -448,6 +454,14 @@
                text "forgelet:single-agent-correction-policy:begin"))
           (is (str/includes?
                text "do not create another\napproval request"))))
+      (doseq [file ["AGENTS.md" "STAGES.md"]]
+        (let [text (slurp (str (fs/path project file)))]
+          (is (str/includes?
+               text "forgelet:single-agent-commit-policy:begin"))
+          (is (str/includes?
+               text "Do not wait for every gate or for deployment"))
+          (is (str/includes?
+               text "does not\ninvalidate a stage that has passed"))))
       (is (zero? (:exit (run repo-root composer "--forge" (str forge)
                               "--upgrade" (str project) "--check"))))
       (finally

@@ -185,6 +185,13 @@ conversion. The single-agent pre-commit hook requires that card's spec to be
 proposed and approved, so conversion does not create a fake approval or bypass
 the hook with `--no-verify`.
 
+Single agents commit the approved spec before implementation and then make
+coherent checkpoint commits as work lands. They do not wait for every gate or
+deploy before the first commit. The pre-commit hook checks only the approved
+spec; stage evidence is tied to the Git tree, so committing unchanged contents
+does not invalidate a gate that already passed. The upgrader installs this
+policy into existing projects' `AGENTS.md` and `STAGES.md`.
+
 When a routed card exists on the single-agent board, `stage propose spec`
 binds that card's name and task ID into the proposal and carries the same board
 row through every stage. Older project-named placeholder cards are removed

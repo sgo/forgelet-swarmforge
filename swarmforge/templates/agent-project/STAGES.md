@@ -33,6 +33,21 @@ The template's `stages.edn` assumes a Maven reactor with an `architecture`
 module and the acceptance script under `scripts/`. Adjust the commands and
 evidence paths to the project before the first `stage check`.
 
+<!-- forgelet:single-agent-commit-policy:begin -->
+## Commit working checkpoints
+
+After the current spec is approved, commit the approved spec before
+implementation and commit coherent working checkpoints as they are completed.
+Do not wait for every gate or for deployment to make your first commit, and do
+not defer the whole card to one final pre-deploy commit. Keep each checkpoint
+reviewable and free of unrelated or generated files.
+
+The pre-commit hook checks only that the current spec bundle is approved. Stage
+evidence is tied to the Git tree, so committing unchanged contents does not
+invalidate a stage that has passed. Before deployment, commit and push the final
+reviewed tree.
+<!-- forgelet:single-agent-commit-policy:end -->
+
 ## Specifier workflow
 
 The operator gives a card or chat request with the observed problem. You are

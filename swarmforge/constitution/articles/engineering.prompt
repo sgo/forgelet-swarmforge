@@ -120,6 +120,14 @@
   deploy target removes `deploy.conf` and the deploy stage deliberately rather than leaving a
   configured target unimplemented.
 
+## Git Checkpoints
+- In a single-agent project, commit the approved spec before implementation, then commit coherent
+  working checkpoints rather than waiting for every gate or collapsing the whole card into one
+  pre-deploy commit. The pre-commit hook requires only an approved current spec.
+- Stage evidence is tied to the Git tree, so committing unchanged contents does not invalidate a
+  passing stage. The final deployment still requires every gate current on the exact committed and
+  pushed tree.
+
 ## Java Releases
 - A Java project's release is `mvn release:prepare` and then `mvn release:perform`, with the exact
   release version and the exact next development version the task names - never derived, never

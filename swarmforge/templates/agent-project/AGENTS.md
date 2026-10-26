@@ -62,6 +62,21 @@ Do not use `--no-verify`; run `stage propose spec` and `stage approve` first.
 The proposal also appears in the project dashboard and the phone's approvals
 room; only the operator approves it, with their own words.
 
+<!-- forgelet:single-agent-commit-policy:begin -->
+## Commit working checkpoints
+
+After the current spec is approved, commit the approved spec before
+implementation and commit coherent working checkpoints as they are completed.
+Do not wait for every gate or for deployment to make your first commit, and do
+not defer the whole card to one final pre-deploy commit. Keep each checkpoint
+reviewable and free of unrelated or generated files.
+
+The pre-commit hook checks only that the current spec bundle is approved. Stage
+evidence is tied to the Git tree, so committing unchanged contents does not
+invalidate a stage that has passed. Before deployment, commit and push the final
+reviewed tree.
+<!-- forgelet:single-agent-commit-policy:end -->
+
 Documentation is part of the slice. Before `stage check docs`, review all three
 surfaces: `README.md` for installation, coordinates, quick start and project
 status; `docs/manual.md` for detailed public behaviour and extension guidance;
