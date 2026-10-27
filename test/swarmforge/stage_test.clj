@@ -95,7 +95,11 @@
         (let [propose (run-stage root "propose" "spec"
                                  "spec.md" "features/extra.feature")]
           (is (zero? (:exit propose)) (:err propose))
-          (is (str/includes? (:out propose) "spec proposal")))
+          (is (str/includes? (:out propose) "spec proposal"))
+          (is (not (contains? (get-in (state root)
+                                      [:proposals (latest-proposal-id root)])
+                              :body))
+              "proposal bodies are transient, not stage state"))
         (let [approve (run-stage root "approve" (latest-proposal-id root)
                                  "--words" "approve")]
           (is (zero? (:exit approve)) (:err approve))))
@@ -242,6 +246,24 @@
       (finally
         (fs/delete-tree root)))))
 
+(deftest an-old-proposal-body-is-compacted-when-state-is-loaded
+  (let [root (fixture)
+        state-file (fs/path root ".swarmforge" "stages" "fixture.edn")]
+    (try
+      (run-stage root "propose" "spec" "spec.md" "features/extra.feature")
+      (let [id (latest-proposal-id root)
+            current (state root)
+            legacy (assoc-in current [:proposals id :body]
+                             (apply str (repeat 100000 "old proposal text\n")))]
+        (write-file state-file (pr-str legacy))
+        (is (> (fs/size state-file) 100000))
+        (let [listing (run-stage root "list")]
+          (is (zero? (:exit listing)) (:err listing)))
+        (is (not (contains? (get-in (state root) [:proposals id]) :body)))
+        (is (< (fs/size state-file) 20000)))
+      (finally
+        (fs/delete-tree root)))))
+
 (deftest a-spec-proposal-reaches-the-dashboard-and-the-board
   (let [root (fixture)
         approval-file (fn [id]
@@ -259,7 +281,8 @@
           (let [approval (slurp (str (approval-file id)))]
             (is (str/includes? approval "kind: stage-spec"))
             (is (str/includes? approval "to: operator"))
-            (is (str/includes? approval "features/extra.feature")))
+            (is (str/includes? approval "features/extra.feature"))
+            (is (str/includes? approval "Fixture spec")))
           (is (re-find #"(?m)^fixture\tspec\t" (slurp (str board-file))))
           (is (str/includes?
                (slurp (str (fs/path root ".swarmforge" "board" "lanes.tsv")))

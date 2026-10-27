@@ -118,10 +118,24 @@
 (defn state-file [root task]
   (fs/path root ".swarmforge" "stages" (str task ".edn")))
 
+(defn compact-state [state]
+  (if (map? (:proposals state))
+    (update state :proposals
+            (fn [proposals]
+              (into {}
+                    (map (fn [[id proposal]]
+                           [id (dissoc proposal :body)]))
+                    proposals)))
+    state))
+
 (defn load-state [root task]
   (let [file (state-file root task)]
     (if (fs/regular-file? file)
-      (read-edn file)
+      (let [stored (read-edn file)
+            compacted (compact-state stored)]
+        (when-not (= stored compacted)
+          (write-edn file compacted))
+        compacted)
       {:task task :proposals {} :stages {}})))
 
 (defn save-state [root task state]
@@ -539,13 +553,13 @@
                                                :superseded-by id)))
                             state pending)
                     state)
+            body (spec-body root files)
             proposal {:id id
                       :card card
                       :patterns (vec patterns)
                       :files files
                       :file (first files)
                       :hash (spec-hash root files)
-                      :body (spec-body root files)
                       :at (now)
                       :status (if auto-approve? :approved :pending)
                       :approved-at (when auto-approve? (now))
@@ -567,12 +581,12 @@
         (when auto-approve?
           (record-resolution! root config card id "auto_approved"))
         (when-not auto-approve?
-          (write-stage-approval! root config proposal))
+          (write-stage-approval! root config (assoc proposal :body body)))
         (println (str (if auto-approve? "spec correction " "spec proposal ") id))
         (println (str "files: " (str/join ", " files)))
         (println (str "sha256: " (:hash proposal)))
         (println "---")
-        (println (:body proposal))
+        (println body)
         (println "---")
         (if auto-approve?
           (println "Auto-approved under the single-agent correction policy; this card already has its first operator approval.")
