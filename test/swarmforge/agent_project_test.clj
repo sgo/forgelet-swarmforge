@@ -577,6 +577,48 @@
         (sh/sh "tmux" "-S" sock "kill-server")
         (fs/delete-tree forge)))))
 
+(deftest an-idle-agent-with-a-request-in-its-composer-is-given-enter
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent")
+        sock (str (fs/path project ".swarmforge" "agent-tmux.sock"))
+        fake (fs/path project ".swarmforge" "fake-composer.sh")
+        request "req-composer"]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge) "agent"))))
+      (write-file (fs/path project ".swarmforge" "dashboard" "requests" "pending"
+                           (str request ".request"))
+                  (str "id: " request "\nstatus: pending\n"
+                       "created_at: 2026-10-29T20:00:00Z\n\nQueued card.\n"))
+      ;; A non-empty composer removes Codex's "Ask Codex to do anything"
+      ;; placeholder and its previous ready marker is no longer visible.
+      (write-file fake
+                  (str "#!/bin/sh\n"
+                       "printf '› [phone " request "] Queued card\\n'\n"
+                       "IFS= read -r line\n"
+                       "mkdir -p .swarmforge/dashboard/requests/done\n"
+                       "printf 'id: " request "\\nstatus: done\\n\\nreceived\\n' "
+                       "> .swarmforge/dashboard/requests/done/" request ".request\n"
+                       "printf '• Working (1s • esc to interrupt)\\n'\n"
+                       "sleep 30\n"))
+      (fs/set-posix-file-permissions fake "rwxr-xr-x")
+      (fs/create-dirs (fs/parent sock))
+      (is (zero? (:exit
+                  (sh/sh "tmux" "-S" sock "new-session" "-d" "-s" "swarmforge-agent"
+                         "-c" (str project) (str fake)))))
+      (let [once (run project
+                      "bb" (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
+                      "--root" (str project)
+                      "--once" "--no-serve"
+                      "--agent-command" "unused")]
+        (is (zero? (:exit once)) (:err once))
+        (is (str/includes? (:out once) "ringing request already in the composer"))
+        (is (fs/regular-file?
+             (fs/path project ".swarmforge" "dashboard" "requests" "done"
+                      (str request ".request")))))
+      (finally
+        (sh/sh "tmux" "-S" sock "kill-server")
+        (fs/delete-tree forge)))))
+
 (deftest a-single-agent-window-is-named-for-its-project
   (let [forge (fixture-forge)
         project (fs/path forge "projects" "propositions")

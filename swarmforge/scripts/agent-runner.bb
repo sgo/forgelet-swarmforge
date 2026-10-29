@@ -196,14 +196,22 @@
 (defn busy? [text]
   (str/includes? (str/lower-case (or text "")) "esc to interrupt"))
 
-(defn ready? [root]
+(declare request-in-composer?)
+
+(defn ready?
+  ([root] (ready? root nil))
+  ([root request-id]
   ;; Scrollback is not readiness. Once a previous turn left its ready marker
   ;; above the visible screen, that old marker says nothing about this moment;
-  ;; Codex's current pane says it is busy explicitly while a turn runs.
+  ;; Codex's current pane says it is busy explicitly while a turn runs. A
+  ;; request already in the idle composer replaces the placeholder that would
+  ;; otherwise say "Ask Codex to do anything", so that request is readiness too.
   (let [text (or (visible-pane root) "")]
     (and (not (busy? text))
          (or (str/includes? text ready-marker)
-             (str/includes? text "Ask Codex to do anything")))))
+             (str/includes? text "Ask Codex to do anything")
+             (and request-id
+                  (request-in-composer? root request-id)))))))
 
 (defn default-agent-command [root]
   (str "codex -C " (sq (str root))
@@ -298,6 +306,10 @@
     (tmux root "set-buffer" "-b" "agent-request" text)
     (tmux root "paste-buffer" "-d" "-p" "-b" "agent-request"
           "-t" session-name)
+    ;; Give the terminal UI time to consume the bracketed paste before sending
+    ;; Enter. Sending both back-to-back lets the paste handler swallow Enter and
+    ;; leaves the request silently waiting in the composer.
+    (Thread/sleep 200)
     (tmux root "send-keys" "-t" session-name "C-m")
     id))
 
@@ -341,7 +353,7 @@
   (settle-agent-session! root)
   (if-let [request (pending-request root)]
     (let [id (:id request)]
-      (if-not (ready? root)
+      (if-not (ready? root id)
         (println "request" id "waits: the agent is still in a turn")
         (do
           (println (if (request-in-composer? root id)
