@@ -66,27 +66,29 @@
 (defn latest-proposal-id [root]
   (last (sort (keys (:proposals (state root))))))
 
+(defn fixture-at [root]
+  (sh/sh "git" "init" "-q" :dir (str root))
+  (sh/sh "git" "config" "user.email" "test@example.com" :dir (str root))
+  (sh/sh "git" "config" "user.name" "Test User" :dir (str root))
+  (write-file (fs/path root ".gitignore") "target/\n.swarmforge/\n")
+  (write-file (fs/path root "pom.xml")
+              "<project><modules><module>core</module></modules></project>\n")
+  (write-file (fs/path root "core" "pom.xml") "<project/>\n")
+  (write-file (fs/path root "core" "src" "main" "Main.java") "class Main {}\n")
+  (write-file (fs/path root "core" "src" "test" "MainTest.java")
+              "class MainTest {}\n")
+  (write-file (fs/path root "spec.md") "# Fixture spec\n\nA fixture.\n")
+  (write-file (fs/path root "features" "extra.feature")
+              "Feature: extra\n\n  Scenario: extra\n    Given a fixture\n")
+  (write-file (fs/path root ".swarmforge" "roles.tsv")
+              (format "agent\tmaster\t%s\tfixture-agent\tAgent\tcodex\ttask\n" root))
+  (write-file (fs/path root "stages.edn") (pr-str stage-config))
+  (sh/sh "git" "add" "-A" :dir (str root))
+  (sh/sh "git" "commit" "-q" "-m" "fixture" :dir (str root))
+  root)
+
 (defn fixture []
-  (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage."})]
-    (sh/sh "git" "init" "-q" :dir (str root))
-    (sh/sh "git" "config" "user.email" "test@example.com" :dir (str root))
-    (sh/sh "git" "config" "user.name" "Test User" :dir (str root))
-    (write-file (fs/path root ".gitignore") "target/\n.swarmforge/\n")
-    (write-file (fs/path root "pom.xml")
-                "<project><modules><module>core</module></modules></project>\n")
-    (write-file (fs/path root "core" "pom.xml") "<project/>\n")
-    (write-file (fs/path root "core" "src" "main" "Main.java") "class Main {}\n")
-    (write-file (fs/path root "core" "src" "test" "MainTest.java")
-                "class MainTest {}\n")
-    (write-file (fs/path root "spec.md") "# Fixture spec\n\nA fixture.\n")
-    (write-file (fs/path root "features" "extra.feature")
-                "Feature: extra\n\n  Scenario: extra\n    Given a fixture\n")
-    (write-file (fs/path root ".swarmforge" "roles.tsv")
-                (format "agent\tmaster\t%s\tfixture-agent\tAgent\tcodex\ttask\n" root))
-    (write-file (fs/path root "stages.edn") (pr-str stage-config))
-    (sh/sh "git" "add" "-A" :dir (str root))
-    (sh/sh "git" "commit" "-q" "-m" "fixture" :dir (str root))
-    root))
+  (fixture-at (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage."})))
 
 (deftest a-fixture-walks-every-stage
   (let [root (fixture)]
@@ -203,7 +205,7 @@
       (finally
         (fs/delete-tree root)))))
 
-(deftest a-single-agent-auto-approves-corrections-until-the-card-finishes
+(deftest a-single-agent-auto-approves-specs-by-default
   (let [root (fixture)
         approval-file (fn [id]
                         (fs/path root ".swarmforge" "handoffs"
@@ -212,9 +214,17 @@
       (write-file (fs/path root ".swarmforge" "single-agent") "agent\n")
       (run-stage root "propose" "spec" "spec.md" "features/extra.feature")
       (let [first-id (latest-proposal-id root)]
-        (is (= :pending (get-in (state root) [:proposals first-id :status])))
-        (is (fs/regular-file? (approval-file first-id)))
-        (is (zero? (:exit (run-stage root "approve" first-id "--words" "approve"))))
+        (is (= :approved (get-in (state root) [:proposals first-id :status])))
+        (is (= "forge policy: automatic spec approval"
+               (get-in (state root) [:proposals first-id :approval-policy])))
+        (is (not (fs/exists? (approval-file first-id))))
+        (is (str/includes? (:out (run-stage root "list"))
+                           "(automatic approval)"))
+        (is (= "automatic"
+               (-> (run-stage root "status" "--json")
+                   :out
+                   (json/parse-string true)
+                   :spec_approval_mode)))
 
         (write-file (fs/path root "spec.md")
                     "# Fixture spec\n\nA correction found during implementation.\n")
@@ -224,7 +234,7 @@
           (is (zero? (:exit correction)) (:err correction))
           (is (str/includes? (:out correction) "Auto-approved"))
           (is (= :approved (get-in (state root) [:proposals correction-id :status])))
-          (is (= "correction after first operator approval"
+          (is (= "forge policy: automatic spec approval"
                  (get-in (state root) [:proposals correction-id :approval-policy])))
           (is (not (fs/exists? (approval-file correction-id)))))
 
@@ -241,10 +251,53 @@
                                    "spec.md" "features/extra.feature")
               next-id (latest-proposal-id root)]
           (is (zero? (:exit next-card)) (:err next-card))
-          (is (= :pending (get-in (state root) [:proposals next-id :status])))
-          (is (fs/regular-file? (approval-file next-id)))))
+          (is (= :approved (get-in (state root) [:proposals next-id :status])))
+          (is (not (fs/exists? (approval-file next-id))))))
       (finally
         (fs/delete-tree root)))))
+
+(deftest a-forge-can-opt-a-single-agent-back-into-spec-approval
+  (let [forge (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-forge."})
+        root (fs/path forge "projects" "fixture")]
+    (try
+      (fs/create-dirs root)
+      (fixture-at root)
+      (write-file (fs/path root ".swarmforge" "single-agent") "agent\n")
+      (write-file (fs/path forge "swarmforge" "local-spec-approval.conf")
+                  "# Restore the explicit operator gate.\nspec=operator\n")
+      (let [proposal (run-stage root "propose" "spec"
+                                "spec.md" "features/extra.feature")
+            id (latest-proposal-id root)
+            approval (fs/path root ".swarmforge" "handoffs"
+                             "pending_approval" (str id ".handoff"))]
+        (is (zero? (:exit proposal)) (:err proposal))
+        (is (= :pending (get-in (state root) [:proposals id :status])))
+        (is (fs/regular-file? approval))
+        (is (str/includes? (:out (run-stage root "list"))
+                           "(operator approval)"))
+        (is (= "operator"
+               (-> (run-stage root "status" "--json")
+                   :out
+                   (json/parse-string true)
+                   :spec_approval_mode))))
+      (finally
+        (fs/delete-tree forge)))))
+
+(deftest a-pack-project-ignores-the-single-agent-approval-policy
+  (let [forge (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-pack-forge."})
+        root (fs/path forge "projects" "fixture")]
+    (try
+      (fs/create-dirs root)
+      (fixture-at root)
+      (write-file (fs/path forge "swarmforge" "local-spec-approval.conf")
+                  "spec=automatic\n")
+      (run-stage root "propose" "spec" "spec.md" "features/extra.feature")
+      (let [id (latest-proposal-id root)]
+        (is (= :pending (get-in (state root) [:proposals id :status])))
+        (is (str/includes? (:out (run-stage root "list"))
+                           "(operator approval)")))
+      (finally
+        (fs/delete-tree forge)))))
 
 (deftest an-old-proposal-body-is-compacted-when-state-is-loaded
   (let [root (fixture)

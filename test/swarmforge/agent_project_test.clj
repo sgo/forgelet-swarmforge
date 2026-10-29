@@ -134,9 +134,8 @@
                     "# agent\n\n## Operator-observed problem\n\nA card.\n")
         (run-stage project "propose" "spec"
                    "features/*.feature" "tasks/*.md")
-        (let [id (-> (state project) :proposals vals first :id)
-              approve (run-stage project "approve" id "--words" "approve")]
-          (is (zero? (:exit approve)) (:err approve)))
+        (is (= :approved
+               (-> (state project) :proposals vals first :status)))
         (let [fake-bin (fs/path forge "fake-bin")
               mvn (fs/path fake-bin "mvn")]
           (write-file mvn
@@ -239,8 +238,8 @@
       (write-file (fs/path project "tasks" "agent.md")
                   "# agent\n\n## Operator-observed problem\n\nA card.\n")
       (run-stage project "propose" "spec" "features/*.feature" "tasks/*.md")
-      (let [id (-> (state project) :proposals vals first :id)]
-        (is (zero? (:exit (run-stage project "approve" id "--words" "approve")))))
+      (is (= :approved
+             (-> (state project) :proposals vals first :status)))
 
       (write-file (fs/path project "qa" "agent.md")
                   "# Agent end-to-end procedure\n\nDrive the user-facing path.\n")
@@ -453,7 +452,8 @@
           (is (str/includes?
                text "forgelet:single-agent-correction-policy:begin"))
           (is (str/includes?
-               text "do not create another\napproval request"))))
+               text "approves its spec automatically by default"))
+          (is (str/includes? text "spec=operator"))))
       (doseq [file ["AGENTS.md" "STAGES.md"]]
         (let [text (slurp (str (fs/path project file)))]
           (is (str/includes?
@@ -504,6 +504,37 @@
            (fs/path project "swarmforge" "scripts" "check-e2e.bb")))
       (is (zero? (:exit (run repo-root composer "--forge" (str forge)
                               "--upgrade" (str project) "--check"))))
+      (finally
+        (stop-agent-session! project)
+        (fs/delete-tree forge)))))
+
+(deftest an-outdated-managed-spec-approval-block-is-refreshed
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent-lib")
+        old (str "<!-- forgelet:single-agent-correction-policy:begin -->\n"
+                 "## Spec corrections after the first approval\n\n"
+                 "The first spec proposal for each card requires the operator's approval.\n"
+                 "<!-- forgelet:single-agent-correction-policy:end -->")]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge)
+                            "--profile" "library" "agent-lib"))))
+      (doseq [file ["AGENTS.md" "STAGES.md"]]
+        (let [path (fs/path project file)
+              updated (str/replace
+                       (slurp (str path))
+                       #"(?s)<!-- forgelet:single-agent-correction-policy:begin -->.*?<!-- forgelet:single-agent-correction-policy:end -->"
+                       old)]
+          (write-file path updated)))
+      (let [check (run repo-root composer "--forge" (str forge)
+                       "--upgrade" (str project) "--check")]
+        (is (not (zero? (:exit check))))
+        (is (str/includes? (:out check) "install single-agent correction policy")))
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge)
+                              "--upgrade" (str project)))))
+      (doseq [file ["AGENTS.md" "STAGES.md"]]
+        (is (str/includes?
+             (slurp (str (fs/path project file)))
+             "approves its spec automatically by default")))
       (finally
         (stop-agent-session! project)
         (fs/delete-tree forge)))))
@@ -612,6 +643,8 @@
                   "Feature: agent\n\n  Scenario: agent\n    Given a card\n")
       (write-file (fs/path project "tasks" "agent.md")
                   "# agent\n\n## Operator-observed problem\n\nA card.\n")
+      (write-file (fs/path forge "swarmforge" "local-spec-approval.conf")
+                  "spec=operator\n")
       (run-stage project "propose" "spec" "features/*.feature" "tasks/*.md")
       (let [id (-> (state project) :proposals vals first :id)]
         (is (zero? (:exit (run-stage project "approve" id "--words" "approve")))))

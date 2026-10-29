@@ -315,8 +315,40 @@
                     (= (:id card) (:id (:card proposal)))))
              (vals (:proposals state)))))
 
+(defn single-agent? [root]
+  (fs/regular-file? (fs/path root ".swarmforge" "single-agent")))
+
+(defn owning-forge [root]
+  (let [projects-dir (fs/parent (fs/canonicalize (fs/absolutize root)))]
+    (when (and projects-dir
+               (= "projects" (str (fs/file-name projects-dir))))
+      (fs/parent projects-dir))))
+
+(defn configured-spec-approval [root]
+  (when-let [forge (owning-forge root)]
+    (let [file (fs/path forge "swarmforge" "local-spec-approval.conf")]
+      (when (fs/regular-file? file)
+        (let [setting (->> (str/split-lines (slurp (str file)))
+                           (map str/trim)
+                           (remove #(or (str/blank? %)
+                                        (str/starts-with? % "#")))
+                           (keep #(second (re-matches #"spec\s*=\s*(\S+)" %)))
+                           last)]
+          (case setting
+            nil nil
+            "automatic" :automatic
+            "operator" :operator
+            (exit! 1 (str "Invalid spec approval mode in " file
+                          ": expected operator or automatic"))))))))
+
+(defn spec-approval-mode [root]
+  (if (single-agent? root)
+    (or (configured-spec-approval root) :automatic)
+    :operator))
+
 (defn auto-approve-correction? [root state card]
-  (and (fs/regular-file? (fs/path root ".swarmforge" "single-agent"))
+  (and (single-agent? root)
+       (= :operator (spec-approval-mode root))
        (first-approval-recorded? state card)
        (not (card-completed? state card))))
 
@@ -533,15 +565,22 @@
     (let [id (str "spec-" (System/currentTimeMillis))
           pending (pending-proposals state)
           card (select-card root config state files)
-          auto-approve? (and (not replace?)
-                             (auto-approve-correction? root state card))
+          automatic-spec? (= :automatic (spec-approval-mode root))
+          correction-auto? (and (not automatic-spec?)
+                                (not replace?)
+                                (auto-approve-correction? root state card))
+          auto-approve? (or automatic-spec? correction-auto?)
+          supersede-pending? (or replace? automatic-spec?)
+          approval-policy (cond
+                            automatic-spec? "forge policy: automatic spec approval"
+                            correction-auto? "correction after first operator approval")
           tree (worktree-tree root)]
-      (when (and (seq pending) (not replace?))
+      (when (and (seq pending) (not supersede-pending?))
         (exit! 1
                (str "Spec proposal(s) already pending: "
                     (str/join ", " (map first pending))
                     ". Approve or reject them, or pass --replace to supersede them.")))
-      (let [state (if replace?
+      (let [state (if supersede-pending?
                     (reduce (fn [result [pending-id proposal]]
                               (record-resolution! root config
                                                   (or (:card proposal) card)
@@ -563,9 +602,11 @@
                       :at (now)
                       :status (if auto-approve? :approved :pending)
                       :approved-at (when auto-approve? (now))
-                      :approval-policy (when auto-approve?
-                                         "correction after first operator approval")
-                      :words (when auto-approve?
+                      :approval-policy approval-policy
+                      :words (cond
+                               automatic-spec?
+                               "automatic spec approval under forge policy"
+                               correction-auto?
                                "single-agent correction after first approval")}
             state (assoc-in (assoc state :card card)
                             [:proposals id] proposal)
@@ -579,21 +620,26 @@
         (remove-stage-approvals! root)
         (update-board! root config card "spec")
         (when auto-approve?
-          (record-resolution! root config card id "auto_approved"))
+          (record-resolution! root config card id
+                              (if automatic-spec?
+                                "automatic_spec_approval"
+                                "auto_approved")))
         (when-not auto-approve?
           (write-stage-approval! root config (assoc proposal :body body)))
-        (println (str (if auto-approve? "spec correction " "spec proposal ") id))
+        (println (str (if correction-auto? "spec correction " "spec proposal ") id))
         (println (str "files: " (str/join ", " files)))
         (println (str "sha256: " (:hash proposal)))
         (println "---")
         (println body)
         (println "---")
-        (if auto-approve?
+        (if automatic-spec?
+          (println "Auto-approved by forge policy; this single-agent forge does not request exact-spec approval.")
+          (if correction-auto?
           (println "Auto-approved under the single-agent correction policy; this card already has its first operator approval.")
           (do
             (println (str "Ask the operator to approve this exact text with: "
                           "stage approve " id " --words \"<their words>\""))
-            (println "The proposal is also in the project dashboard and the phone's approvals room.")))))))
+            (println "The proposal is also in the project dashboard and the phone's approvals room."))))))))
 
 (defn approve! [root config state id words]
   (let [proposal (get-in state [:proposals id])]
@@ -657,11 +703,13 @@
       (seq blocked) "blocked"
       :else "todo")))
 
-(defn stage-command [stage]
+(defn stage-command [root stage]
   (if (seq (:runs stage))
     (str/join "; " (map #(if (string? %) % (str/join " " %)) (:runs stage)))
     (if (= :operator (:approval stage))
-      "(operator approval)"
+      (case (spec-approval-mode root)
+        :automatic "(automatic approval)"
+        "(operator approval)")
       "")))
 
 (declare deploy-configuration-problem)
@@ -679,7 +727,7 @@
       (println (format "%-10s %-8s %s"
                        (:name stage)
                        (stage-status config state stage tree)
-                       (stage-command stage)))
+                       (stage-command root stage)))
       (let [inputs (resolve-inputs root stage)]
         (when (seq inputs)
           (println (str "           inputs: " (str/join ", " inputs))))))))
@@ -716,6 +764,7 @@
       :tree tree
       :head-tree head
       :clean (= tree head)
+      :spec_approval_mode (name (spec-approval-mode root))
       :spec_approved (spec-approved? root config state)
       :complete (get-in state [:complete :tree])
       :stages (mapv (fn [stage]

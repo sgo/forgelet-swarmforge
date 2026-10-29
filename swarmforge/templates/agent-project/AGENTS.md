@@ -12,16 +12,19 @@ The runner puts `.swarmforge/bin` and `swarmforge/scripts` first on `PATH`. Do
 the same in a manual shell before running a stage.
 
 The operator gives the card. You write the task note and Gherkin, validate
-them, and propose the bundle for approval. Do not ask the operator to fill a
-template.
+them, and record the spec bundle. It is approved automatically by default, or
+proposed for operator approval when the forge opts back into that policy. Do
+not ask the operator to fill a template.
 
 <!-- forgelet:single-agent-correction-policy:begin -->
-## Spec corrections after the first approval
+## Spec approval
 
-The first spec proposal for each card requires the operator's approval. After
-that approval, corrections to the task note or Gherkin for the same unfinished
-card are approved automatically by the stage tool; do not create another
-approval request. Completing the card resets this policy for the next card.
+A single-agent project approves its spec automatically by default and proceeds
+to implementation without an approval request. To restore explicit first-spec
+approval for every single-agent project in a forge, create
+`<forge>/swarmforge/local-spec-approval.conf` containing `spec=operator`.
+In that explicit mode, corrections to the same unfinished card's task note or
+Gherkin remain automatically approved after the first operator approval.
 <!-- forgelet:single-agent-correction-policy:end -->
 
 When the card arrived through routing, the stage tool binds that card's board

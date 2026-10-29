@@ -80,14 +80,14 @@ copies under `tmp/`, so it never rewrites the approved feature files.
 Scenario Outlines, and a non-waived feature that reports zero mutations must be
 parameterized or have its exemption recorded in the task note.
 
-- **spec**: the approved feature bundle. `stage propose spec <file>...` prints
-  the proposal; `stage approve <id> --words
-  "<their words>"` records the exact answer. Approval is single-use and stale
-  when any file in the bundle changes.
+- **spec**: the recorded feature bundle. `stage propose spec <file>...` records
+  it and, by default, approves it automatically for a single-agent project. A
+  forge with `spec=operator` instead prints a proposal that
+  `stage approve <id> --words "<their words>"` must approve explicitly.
+  Approval is tied to the exact bundle and is stale when any file in it changes.
   The pre-commit hook refuses a commit until the current bundle is approved.
-  The proposal is also posted to the project dashboard and the phone's
-  approvals room; `stage approve` or `stage reject` clears it. Only the
-  operator's words approve a spec.
+  In explicit mode the proposal is also posted to the project dashboard and
+  phone's approvals room; `stage approve` or `stage reject` clears it.
   While a proposal is pending, a new proposal is refused; decide it, or pass
   `--replace` to supersede it explicitly. The old proposal is recorded as
   superseded and the bridge reports that ending.
@@ -133,12 +133,14 @@ which is what the phone's activity room reads. `stage complete` moves it to
 `done`.
 
 <!-- forgelet:single-agent-correction-policy:begin -->
-## Spec corrections after the first approval
+## Spec approval
 
-The first spec proposal for each card requires the operator's approval. After
-that approval, corrections to the task note or Gherkin for the same unfinished
-card are approved automatically by the stage tool; do not create another
-approval request. Completing the card resets this policy for the next card.
+A single-agent project approves its spec automatically by default and proceeds
+to implementation without an approval request. To restore explicit first-spec
+approval for every single-agent project in a forge, create
+`<forge>/swarmforge/local-spec-approval.conf` containing `spec=operator`.
+In that explicit mode, corrections to the same unfinished card's task note or
+Gherkin remain automatically approved after the first operator approval.
 <!-- forgelet:single-agent-correction-policy:end -->
 
 `stage propose spec` binds one active board card to the proposal and keeps its

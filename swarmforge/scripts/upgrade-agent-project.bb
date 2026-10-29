@@ -26,11 +26,13 @@
 (def policy-end "<!-- forgelet:single-agent-correction-policy:end -->")
 (def policy-block
   (str policy-begin "\n"
-       "## Spec corrections after the first approval\n\n"
-       "The first spec proposal for each card requires the operator's approval. After\n"
-       "that approval, corrections to the task note or Gherkin for the same unfinished\n"
-       "card are approved automatically by the stage tool; do not create another\n"
-       "approval request. Completing the card resets this policy for the next card.\n"
+       "## Spec approval\n\n"
+       "A single-agent project approves its spec automatically by default and proceeds\n"
+       "to implementation without an approval request. To restore explicit first-spec\n"
+       "approval for every single-agent project in a forge, create\n"
+       "`<forge>/swarmforge/local-spec-approval.conf` containing `spec=operator`.\n"
+       "In that explicit mode, corrections to the same unfinished card's task note or\n"
+       "Gherkin remain automatically approved after the first operator approval.\n"
        policy-end))
 
 (def commit-policy-begin "<!-- forgelet:single-agent-commit-policy:begin -->")
@@ -131,12 +133,19 @@
       config)
     (update config :stages insert-before stage #{"release"})))
 
-(defn managed-block-in-place? [file begin end]
-  (and (fs/regular-file? file)
-       (= 1 (count (re-seq (re-pattern (java.util.regex.Pattern/quote begin))
-                           (slurp (str file)))))
-       (= 1 (count (re-seq (re-pattern (java.util.regex.Pattern/quote end))
-                           (slurp (str file)))))))
+(defn managed-block-in-place? [file begin end block]
+  (when (fs/regular-file? file)
+    (let [text (slurp (str file))
+          managed (re-pattern
+                   (str "(?s)"
+                        (java.util.regex.Pattern/quote begin)
+                        ".*?"
+                        (java.util.regex.Pattern/quote end)))]
+      (and (= 1 (count (re-seq (re-pattern
+                               (java.util.regex.Pattern/quote begin)) text)))
+           (= 1 (count (re-seq (re-pattern
+                               (java.util.regex.Pattern/quote end)) text)))
+           (= block (re-find managed text))))))
 
 (defn install-managed-block! [file begin end block]
   (let [text (if (fs/regular-file? file)
@@ -220,10 +229,11 @@
                   (conj "install check-e2e.bb")
                   install-publisher? (conj "install snapshot publisher")
                   (some #(not (managed-block-in-place?
-                               % policy-begin policy-end)) policy-files)
+                               % policy-begin policy-end policy-block)) policy-files)
                   (conj "install single-agent correction policy")
                   (some #(not (managed-block-in-place?
-                               % commit-policy-begin commit-policy-end)) policy-files)
+                               % commit-policy-begin commit-policy-end
+                               commit-policy-block)) policy-files)
                   (conj "install single-agent commit policy")
                   (not (fs/regular-file? checker)) (conj "install check-documentation.bb")
                   (or (not (fs/regular-file? wrapper))
@@ -249,10 +259,12 @@
               (fs/copy source destination {:replace-existing true})
               (fs/set-posix-file-permissions destination "rwxr-xr-x"))))
         (doseq [file policy-files]
-          (when-not (managed-block-in-place? file policy-begin policy-end)
+          (when-not (managed-block-in-place?
+                     file policy-begin policy-end policy-block)
             (install-managed-block! file policy-begin policy-end policy-block))
           (when-not (managed-block-in-place?
-                     file commit-policy-begin commit-policy-end)
+                     file commit-policy-begin commit-policy-end
+                     commit-policy-block)
             (install-managed-block!
              file commit-policy-begin commit-policy-end commit-policy-block)))
         (when-not (= (when (fs/regular-file? checker) (slurp (str checker)))

@@ -196,10 +196,13 @@ When a routed card exists on the single-agent board, `stage propose spec`
 binds that card's name and task ID into the proposal and carries the same board
 row through every stage. Older project-named placeholder cards are removed
 when the routed card is bound; they are not the work card.
-The first proposal for each card still asks the operator for approval. After
-that approval, the agent may correct the task note or Gherkin without another
-request; the stage tool records the correction as automatically approved.
-Completing the card resets the policy for the next card.
+Single-agent specs are automatically approved by default: the agent records the
+task note, Gherkin and spec-stage evidence, then proceeds to implementation
+without an approval request. A forge can put `spec=operator` in
+`swarmforge/local-spec-approval.conf` to restore explicit first-spec approval
+for all of its single-agent projects. In that mode, corrections to the same
+unfinished card remain automatically approved after the first operator
+decision. Pack projects always retain their existing operator gate.
 The standard profile also carries a required card-specific `e2e` stage after
 `qa`. Cards register their procedure and script in `qa/e2e.edn`; declared input
 names must be present at run time, missing values fail rather than skip, values
@@ -208,8 +211,8 @@ approved task-note waiver.
 
 The spec stage is the specifier's work: the agent turns the operator's card
 into `tasks/<name>.md` and `features/<name>.feature`, validates the Gherkin,
-and proposes the feature for the operator's approval. The operator does not
-fill a template.
+and records the feature for approval under the forge policy. The operator does
+not fill a template.
 
 The project carries an `AGENTS.md` that points at `STAGES.md` and the forge's
 copied `swarmforge/constitution/articles/engineering.prompt`, so the build,
@@ -244,6 +247,7 @@ session — and the next forge of the family — can see it is ours.
 |---|---|
 | A helper script for this forge | `swarmforge/local-scripts/`, which is on every session's `PATH` |
 | Rules for this forge's lieutenant | `swarmforge/roles/local-lieutenant.prompt`, read after the shared lieutenant prompt |
+| Single-agent spec approval policy | `swarmforge/local-spec-approval.conf`, with `spec=operator` to opt out of automatic approval |
 | A project's language | the project's own `swarmforge/language.conf`, and nothing else decides it |
 | Rules for one project | that project's `local-*.prompt` articles, beside the shared articles |
 | What runs when one of its cards lands | that project's `swarmforge/hooks/card-complete.sh` |
