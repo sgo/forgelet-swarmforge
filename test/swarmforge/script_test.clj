@@ -1804,6 +1804,9 @@
       (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"]]
         (write-file (fs/path base "swarmforge/scripts" name) (str name "\n")))
       (write-file (fs/path base "swarmforge/skills/forge-requests-by-issue/SKILL.md") "LAYER-SKILL\n")
+      (write-file
+       (fs/path base "swarmforge/skills/convert-pack-project-to-single-agent/SKILL.md")
+       "CONVERSION-SKILL\n")
       (write-file (fs/path base "swarmforge/packs/six-pack/gitignore") "build/\n.idea/\n")
       (write-file (fs/path base "swarmforge/packs/gitignore") ".DS_Store\n")
       (write-file (fs/path base "swarmforge/packs/six-pack/language.conf") "Kotlin\n")
@@ -1882,6 +1885,8 @@
         ;; and a skill of the forge's own is left where it is.
         (is (= "LAYER-SKILL\n"
                (slurp (str (fs/path host "swarmforge/skills/forge-requests-by-issue/SKILL.md")))))
+        (is (= "CONVERSION-SKILL\n"
+               (slurp (str (fs/path host "swarmforge/skills/convert-pack-project-to-single-agent/SKILL.md")))))
         (is (= "OWN\n" (slurp (str (fs/path host "swarmforge/skills/a-forges-own/SKILL.md")))))
         (is (fs/exists? (fs/path host "swarm"))))
       (finally

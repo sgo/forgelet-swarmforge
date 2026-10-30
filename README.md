@@ -269,6 +269,12 @@ layer carries, so a forge's own — anything it keeps in `swarmforge/skills/` th
 ship — survives an update. The shared skills are the layer's to change; a forge's extras are the
 forge's.
 
+The layer currently ships:
+
+- `forge-requests-by-issue` for cross-forge work requests.
+- `convert-pack-project-to-single-agent` for in-place pack conversion and the
+  project-specific audit that must follow the converter's dry run.
+
 Codex reads skills from `~/.codex/skills`, not from the forge tree, so a composed skill reaches a
 role only once it is linked there. The dev box's provisioning does that (`devbox/skills/link.sh`,
 from `sgo/forgelet-forge`), and a running session picks a new link up the next time it starts.
