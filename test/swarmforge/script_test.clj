@@ -1888,6 +1888,13 @@
         (is (= "CONVERSION-SKILL\n"
                (slurp (str (fs/path host "swarmforge/skills/convert-pack-project-to-single-agent/SKILL.md")))))
         (is (= "OWN\n" (slurp (str (fs/path host "swarmforge/skills/a-forges-own/SKILL.md")))))
+        (is (= "../../swarmforge/skills/forge-requests-by-issue"
+               (str/trim (:out (sh/sh "readlink"
+                                      (str (fs/path host ".agents/skills/forge-requests-by-issue")))))))
+        (is (= "../../swarmforge/skills/convert-pack-project-to-single-agent"
+               (str/trim (:out (sh/sh "readlink"
+                                      (str (fs/path host ".agents/skills/convert-pack-project-to-single-agent")))))))
+        (is (not (fs/exists? (fs/path host ".agents/skills/a-forges-own"))))
         (is (fs/exists? (fs/path host "swarm"))))
       (finally
         (fs/delete-tree host)

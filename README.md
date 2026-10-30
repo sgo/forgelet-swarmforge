@@ -275,10 +275,13 @@ The layer currently ships:
 - `convert-pack-project-to-single-agent` for in-place pack conversion and the
   project-specific audit that must follow the converter's dry run.
 
-Codex reads user-scoped skills from `~/.agents/skills`, not from the forge tree, and follows
-symlinked skill folders. The dev box's provisioning links them there and keeps compatibility links
-in `~/.codex/skills` and `~/.claude/skills` (`devbox/skills/link.sh`, from
-`sgo/forgelet-forge`). A running session picks a new link up the next time it starts.
+Composition also creates repo-scoped `.agents/skills/<name>` symlinks in the forge root, pointing at
+`swarmforge/skills/<name>`. A lieutenant launched in the forge therefore discovers the shared skills
+without a user-scoped link. Project directories are separate Git repositories, so they do not
+inherit the forge root's repo scope; the dev box's provisioning links the same skills into
+`~/.agents/skills` for those agents and keeps compatibility links in `~/.codex/skills` and
+`~/.claude/skills` (`devbox/skills/link.sh`, from `sgo/forgelet-forge`). A running session picks a
+new link up the next time it starts.
 
 ### The agent's command shell, and where the helpers come from
 

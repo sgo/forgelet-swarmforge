@@ -220,12 +220,17 @@ seed_local_lieutenant_prompt() {
 copy_shared_skills() {
   local src="$1" skill name
   [[ -d "$src/swarmforge/skills" ]] || return 0
-  mkdir -p swarmforge/skills
+  mkdir -p swarmforge/skills .agents/skills
   for skill in "$src/swarmforge/skills"/*; do
     [[ -d "$skill" ]] || continue
     name="${skill:t}"
     rm -rf "swarmforge/skills/$name"
     cp -R "$skill" "swarmforge/skills/$name"
+    if [[ -e ".agents/skills/$name" && ! -L ".agents/skills/$name" ]]; then
+      echo "get-swarm-forge: refusing to replace forge-owned skill .agents/skills/$name" >&2
+      exit 1
+    fi
+    ln -sfn "../../swarmforge/skills/$name" ".agents/skills/$name"
   done
 }
 
