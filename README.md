@@ -275,9 +275,10 @@ The layer currently ships:
 - `convert-pack-project-to-single-agent` for in-place pack conversion and the
   project-specific audit that must follow the converter's dry run.
 
-Codex reads skills from `~/.codex/skills`, not from the forge tree, so a composed skill reaches a
-role only once it is linked there. The dev box's provisioning does that (`devbox/skills/link.sh`,
-from `sgo/forgelet-forge`), and a running session picks a new link up the next time it starts.
+Codex reads user-scoped skills from `~/.agents/skills`, not from the forge tree, and follows
+symlinked skill folders. The dev box's provisioning links them there and keeps compatibility links
+in `~/.codex/skills` and `~/.claude/skills` (`devbox/skills/link.sh`, from
+`sgo/forgelet-forge`). A running session picks a new link up the next time it starts.
 
 ### The agent's command shell, and where the helpers come from
 
