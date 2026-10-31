@@ -50,10 +50,9 @@
            "scripts/check-documentation.sh"
            "swarmforge/scripts/check-documentation.bb"]}
   {:name "deploy"
-   :runs [["scripts/publish-snapshot.sh"]]
+   :runs [["scripts/install-snapshot.sh"]]
    :evidence []
-   :stamp [:sources "scripts/publish-snapshot.sh"
-           "scripts/github-packages-token.sh" "swarmforge/deploy.conf"]}
+   :stamp [:sources "scripts/install-snapshot.sh" "pom.xml" ".mvn"]}
   {:name "release"
    :optional true
    :runs [["scripts/release_preflight.sh"]]

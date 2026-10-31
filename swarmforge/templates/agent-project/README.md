@@ -21,20 +21,23 @@ to executable examples. `scripts/check-documentation.sh` checks the documents,
 headings, API ownership, local links and example output. A section without an
 example must be explicitly conceptual and carry its reason.
 
-## Snapshot deployment
+## Local snapshot installation
 
-A completed card deploys its current `-SNAPSHOT` after every quality gate and
+A completed card installs its current `-SNAPSHOT` after every quality gate and
 after its reviewed commit has been pushed:
 
 ```sh
 stage check deploy
 ```
 
-The stage runs `scripts/publish-snapshot.sh` through
-`GITHUB_PACKAGES_TOKEN` and the `with-release-tests` profile.
-`swarmforge/deploy.conf` names the target, and `stage complete` refuses while
-the required deploy stage is absent or stale. The optional `release` stage is
-separate.
+The stage runs `scripts/install-snapshot.sh` and the `with-release-tests`
+profile. Maven writes into the operator's standard `~/.m2`, so another project
+on the same devbox can resolve the current SNAPSHOT without a remote publish.
+`stage complete` refuses while the required deploy stage is absent or stale.
+
+GitHub Packages belongs exclusively to the optional release path.
+`swarmforge/release.conf` names that target; ordinary card completion does not
+write to it.
 
 ## Acceptance
 

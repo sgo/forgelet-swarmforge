@@ -193,6 +193,7 @@ archive_path "$root/.swarmforge/roles.tsv"
 archive_path "$root/.swarmforge/board/lanes.tsv"
 archive_path "$root/swarmforge/roles"
 archive_path "$root/swarmforge/swarmforge.conf"
+archive_path "$root/swarmforge/deploy.conf"
 archive_path "$root/swarmforge/constitution.prompt"
 archive_path "$root/swarmforge/constitution"
 archive_path "$root/swarmforge/hooks/card-complete.sh"
@@ -234,6 +235,10 @@ cp -Rn "$template/docs/." "$root/docs/" 2>/dev/null || true
 cp -Rn "$template/qa/." "$root/qa/" 2>/dev/null || true
 cp "$template/swarm" "$root/swarm"
 chmod +x "$root/swarm"
+mkdir -p "$root/swarmforge"
+if [[ -f "$template/swarmforge/release.conf" ]]; then
+  cp "$template/swarmforge/release.conf" "$root/swarmforge/release.conf"
+fi
 
 mkdir -p "$root/swarmforge/scripts" "$root/swarmforge/constitution/articles"
 cp -R "$forge/swarmforge/scripts/." "$root/swarmforge/scripts/"
@@ -252,10 +257,27 @@ printf '%s\n' "$project" > "$root/.swarmforge/single-agent"
 printf '%s\n' "$profile" > "$root/.swarmforge/profile"
 
 for file in scripts/run-acceptance-tests.sh scripts/run-acceptance-mutation.sh \
-            scripts/run-qa-e2e.sh scripts/publish-snapshot.sh \
+            scripts/run-qa-e2e.sh scripts/install-snapshot.sh \
             scripts/github-packages-token.sh scripts/check-documentation.sh; do
   [[ -f "$root/$file" ]] && chmod +x "$root/$file"
 done
+
+if [[ -f "$root/pom.xml" ]]; then
+  maven_configs=("$root/.mvn/maven.config")
+  while IFS= read -r config; do
+    maven_configs+=("$config")
+  done < <(
+    find "$root" \
+      \( -name .git -o -name .swarmforge -o -name .worktrees \
+         -o -name target -o -name tmp \) -prune -o \
+      -path '*/.mvn/maven.config' -type f -print
+  )
+  for config in "${maven_configs[@]}"; do
+    [[ -f "$config" ]] || continue
+    awk '!/^[[:space:]]*-Dmaven\.repo\.local=/' "$config" > "$config.tmp"
+    mv "$config.tmp" "$config"
+  done
+fi
 
 installer="$root/swarmforge/scripts/install-agent-hooks.sh"
 [[ -f "$installer" ]] && bash "$installer" "$root"

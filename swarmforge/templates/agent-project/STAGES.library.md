@@ -100,11 +100,12 @@ parameterized or have its exemption recorded in the task note.
   links. The task report records what changed or why a surface was unchanged.
 - **deploy**: required for every completed card. After every earlier gate is
   current, commit and push the card, then run `stage check deploy`. The stage
-  executes `scripts/publish-snapshot.sh`, which requires a `-SNAPSHOT` version,
-  uses `GITHUB_PACKAGES_TOKEN` through the project helper, activates
-  `with-release-tests`, and deploys to the target named by
-  `swarmforge/deploy.conf`. `stage complete` refuses while this stage is absent,
-  optional or stale. No GitHub Actions workflow is involved.
+  executes `scripts/install-snapshot.sh`, which requires a `-SNAPSHOT` version,
+  activates `with-release-tests`, and installs into the operator's standard
+  `~/.m2`. Other projects on this devbox resolve that local snapshot normally.
+  `stage complete` refuses while this stage is absent, optional or stale.
+  GitHub Packages is written only by the separate release path, configured by
+  `swarmforge/release.conf`.
 - **release**: optional; `n/a` is not a pass for a release that was skipped.
 
 Each `stage check` moves the project's card on `.swarmforge/board/tasks.tsv`,

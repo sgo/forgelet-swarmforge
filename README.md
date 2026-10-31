@@ -34,7 +34,7 @@ in this repository's `docs/`, a project's are in that project's `docs/`, and a f
 that forge's — so the reading copy comes with the values filled in.
 
 - [What a project owns](docs/what-a-project-owns.md) — the files a project provides rather
-  than receives: `swarmforge/language.conf`, `swarmforge/deploy.conf`,
+  than receives: `swarmforge/language.conf`, `swarmforge/release.conf`,
   `swarmforge/hooks/card-complete.sh`, its local articles and helpers, and what reads each of
   them.
 - [Adding a forge](https://github.com/sgo/forgelet-bridge/blob/master/docs/adding-a-forge.md)
@@ -223,10 +223,12 @@ README, consumer manual and architecture document are linked through
 `docs/manual-contract.edn` to public APIs and executable examples, so changed
 behaviour makes the owning section fail instead of leaving stale prose in the
 tree.
-The template's required `deploy` stage runs `scripts/publish-snapshot.sh` after
-the quality gates. It deploys the current `-SNAPSHOT` through the configured
-Maven target, so `stage complete` cannot finish the card while the snapshot is
-unpublished or the deployment stage is absent, optional or stale.
+The template's required `deploy` stage runs `scripts/install-snapshot.sh` after
+the quality gates. It installs the current `-SNAPSHOT` into the operator's
+standard `~/.m2`, where all projects on the same devbox can resolve it.
+GitHub Packages is reserved for deliberate releases through
+`swarmforge/release.conf`, so ordinary card completion cannot mutate a registry
+shared with other operators.
 
 For a library, pass `--profile library`: the template replaces the acceptance
 QA gate with an explicit `verify` stage (property tests, plus the library's API
@@ -274,6 +276,8 @@ The layer currently ships:
 - `forge-requests-by-issue` for cross-forge work requests.
 - `convert-pack-project-to-single-agent` for in-place pack conversion and the
   project-specific audit that must follow the converter's dry run.
+- `java-maven-project` for Maven build wiring, local SNAPSHOT installation and
+  release-only registry publishing.
 
 Composition also creates repo-scoped `.agents/skills/<name>` symlinks in the forge root, pointing at
 `swarmforge/skills/<name>`. A lieutenant launched in the forge therefore discovers the shared skills

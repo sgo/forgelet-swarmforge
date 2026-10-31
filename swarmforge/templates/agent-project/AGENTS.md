@@ -92,12 +92,17 @@ with a reason. The example command runs against the current tree and must print
 the declared text; a removed or changed API therefore makes the documenting
 section fail rather than leaving stale prose behind.
 
-Snapshot deployment is part of card completion, not an optional release:
-after the reviewed tree is committed and pushed, run `stage check deploy`.
-It executes `scripts/publish-snapshot.sh` and deploys the current
-`-SNAPSHOT`. When `swarmforge/deploy.conf` names a target, `stage complete`
-refuses if `stages.edn` has no required `deploy` stage or if that stage is
-stale. Do not use a GitHub Actions workflow as a substitute.
+Local snapshot installation is part of card completion, not an optional
+release: after the reviewed tree is committed and pushed, run
+`stage check deploy`. It executes `scripts/install-snapshot.sh` and installs
+the current `-SNAPSHOT` into the operator's standard `~/.m2`, where other
+projects on the same devbox can resolve it. `stage complete` refuses if a Maven
+project has no required `deploy` stage or if that stage is stale.
+
+GitHub Packages is the release boundary, not the card-completion boundary.
+Publish there only through the deliberate `release:prepare` /
+`release:perform` path after the optional release gate. `swarmforge/release.conf`
+names that release target.
 
 Do not create worktrees or hand work to another role. The project root is the
 checkout.

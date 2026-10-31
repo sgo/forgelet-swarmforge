@@ -732,26 +732,16 @@
         (when (seq inputs)
           (println (str "           inputs: " (str/join ", " inputs))))))))
 
-(defn configured-deploy-target [root]
-  (let [file (fs/path root "swarmforge" "deploy.conf")]
-    (when (fs/regular-file? file)
-      (->> (str/split-lines (slurp (str file)))
-           (map str/trim)
-           (remove str/blank?)
-           (remove #(str/starts-with? % "#"))
-           first))))
-
 (defn deploy-configuration-problem [root config]
-  (when-let [target (configured-deploy-target root)]
+  (when (and (single-agent? root)
+             (fs/regular-file? (fs/path root "pom.xml")))
     (let [stage (some #(when (= "deploy" (:name %)) %) (:stages config))]
       (cond
         (nil? stage)
-        (str "snapshot deployment is configured as " target
-             " but stages.edn has no deploy stage")
+        "a single-agent Maven project needs a required deploy stage for local SNAPSHOT installation"
 
         (:optional stage)
-        (str "snapshot deployment is configured as " target
-             " but the deploy stage is optional")
+        "the Maven project's local SNAPSHOT deploy stage must not be optional"
 
         :else nil))))
 

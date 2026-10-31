@@ -25,7 +25,7 @@
        "still a -SNAPSHOT at HEAD, a release tag nobody has taken, no dependency on a\n"
        "-SNAPSHOT this project does not build itself, the with-release-tests profile the\n"
        "release activates, and the wiring the release runs through - a <scm> block, which\n"
-       "mvn release:prepare needs before it does anything, and, when swarmforge/deploy.conf\n"
+       "mvn release:prepare needs before it does anything, and, when swarmforge/release.conf\n"
        "names a target, a <distributionManagement> repository and the project's own token\n"
        "helper. The snapshot check is the one this exists for - mvn versions:set rewrites\n"
        "this project's own version and looks at nothing else, so a release can ship\n"
@@ -176,10 +176,12 @@
       (finally
         (fs/delete-if-exists out)))))
 
-(defn deploy-target [root]
-  (let [file (fs/path root "swarmforge" "deploy.conf")]
-    (when (fs/regular-file? file)
-      (not-empty (str/trim (slurp (str file)))))))
+(defn release-target [root]
+  (some (fn [name]
+          (let [file (fs/path root "swarmforge" name)]
+            (when (fs/regular-file? file)
+              (not-empty (str/trim (slurp (str file)))))))
+        ["release.conf" "deploy.conf"]))
 
 (defn pom-text
   "The project's own pom, as text: the wiring checks below are about what a release
@@ -285,9 +287,9 @@
     (when-not version
       (exit! 1 "  the pom has no version of its own; this project's version is inherited"))
     (println (str "  version at HEAD: " version))
-    (println (str "  deploy gate: " (or (deploy-target root)
-                                        "no target in swarmforge/deploy.conf - this release will not deploy")))
-    (let [target (deploy-target root)
+    (println (str "  release target: " (or (release-target root)
+                                            "no target in swarmforge/release.conf - this release will not publish")))
+    (let [target (release-target root)
           text (pom-text root)
           scm (scm-connection text)
           dist (distribution-repositories text)
@@ -326,11 +328,11 @@
                                 "does anything without one: \"Missing required setting: scm connection or "
                                 "developerConnection must be specified\""))
                      (and target (empty? dist))
-                     (conj (str "swarmforge/deploy.conf names " target " but the pom's <distributionManagement> "
+                     (conj (str "swarmforge/release.conf names " target " but the pom's <distributionManagement> "
                                 "names no repository with an id and a url, so release:perform would have "
                                 "nowhere to deploy"))
                      (and target (not helper))
-                     (conj (str "swarmforge/deploy.conf names " target " but the project has no token helper "
+                     (conj (str "swarmforge/release.conf names " target " but the project has no token helper "
                                 "at scripts/" target "-token.sh (or swarmforge/local-scripts/"
                                 target "-token.sh)"))
                      (not (contains? (profile-ids text) release-gate))
@@ -418,7 +420,7 @@
                           " -Darguments=\"-P" release-gate "\""))
             (println (str "  mvn release:perform -DlocalCheckout=true -Darguments=\"-DskipTests\""
                           (when-not target
-                            "   # only when swarmforge/deploy.conf names a target")))
+                            "   # only when swarmforge/release.conf names a target")))
             (println "  then push the branch and the tag, as the release steps say")
             (System/exit 0)))))))
 

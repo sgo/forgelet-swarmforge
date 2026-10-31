@@ -77,8 +77,8 @@
   - `-Pwith-mutation-tests` - PIT, differential, with its history file kept.
    - `-Pwith-property-tests` - property tests, where the project has them, and never part of the unit
      suite.
-   - `-Pwith-release-tests` - the gate a release activates: unit and property tests with no
-     exclusion, and the profile the deploy step goes through.
+   - `-Pwith-release-tests` - the gate the local install and release paths activate: unit and
+     property tests with no exclusion.
    - the project's own acceptance profile - `with-acceptance-tests` or `acceptance`, whichever its
      scripts name - for the Gherkin acceptance suite.
   - `human-mode` - the gates together, for a person running the build by hand.
@@ -94,7 +94,7 @@
   may omit an example only by declaring itself conceptual with a reason.
 - The required `docs` stage runs `scripts/check-documentation.sh`, which rejects missing sections, APIs,
   examples, required headings and broken local links. It runs after behavioural verification and before
-  snapshot deployment, so documentation about the final tree is what ships.
+  local snapshot installation, so documentation about the final tree is what ships.
 
 ## End-To-End QA
 - The standard single-agent profile runs `qa`, then the card-specific `e2e` stage, then documentation
@@ -107,19 +107,19 @@
   approved task note. Library-profile projects use their public-API `verify` gate instead of the
   standard e2e stage by default.
 
-## Java Snapshot Deployment
-- A completed card for a project with `swarmforge/deploy.conf` publishes its current `-SNAPSHOT`
-  after all verification gates and after the reviewed commit is pushed. Run
-  `scripts/publish-snapshot.sh` through the required `deploy` stage; `stage complete` must refuse
-  while that stage is absent, optional or stale.
-- Snapshot deployment is not a release. It uses `-Pwith-release-tests deploy`, the project's
-  token helper and the configured Maven repository, and it does not create a release tag or advance
-  the development version. The optional `release` stage remains the separate `release:prepare` /
-  `release:perform` path above.
-- Every publishable template ships `scripts/publish-snapshot.sh`,
-  `scripts/github-packages-token.sh` and `swarmforge/deploy.conf`. A project that genuinely has no
-  deploy target removes `deploy.conf` and the deploy stage deliberately rather than leaving a
-  configured target unimplemented.
+## Java Snapshot Installation and Release
+- A completed single-agent card installs its current `-SNAPSHOT` into the operator's standard
+  `~/.m2` after all verification gates and after the reviewed commit is pushed. Run
+  `scripts/install-snapshot.sh` through the required `deploy` stage; it requires a SNAPSHOT and uses
+  `-Pwith-release-tests install`. Other projects on the devbox resolve that local artifact normally.
+  `stage complete` must refuse while the stage is absent, optional or stale.
+- GitHub Packages is not part of ordinary card completion. It is the release boundary: only the
+  deliberate `release:prepare` / `release:perform` path publishes there, using the release target in
+  `swarmforge/release.conf`. A release does not run merely because a card reaches `done`.
+- Do not pass a project-local `-Dmaven.repo.local` for a single-agent project. Its `.mvn` settings
+  may configure registries and credentials, but the local artifact repository is `~/.m2`. The local
+  repository is shared by all projects for one operator; do not run concurrent writers for the same
+  GAV.
 
 ## Git Checkpoints
 - In a single-agent project, commit the approved spec before implementation, then commit coherent
@@ -140,7 +140,7 @@
   `-SNAPSHOT` at HEAD, a release tag nobody has taken, no dependency on a SNAPSHOT this project
   does not build itself, a `<scm>` block (without one `mvn release:prepare` stops before it does
   anything), the `with-release-tests` profile the release activates, and, when
-  `swarmforge/deploy.conf` names a target, a `<distributionManagement>` repository and the
+  `swarmforge/release.conf` names a target, a `<distributionManagement>` repository and the
   project's own token helper. When it passes it prints the two commands with the numbers the task
   named. The same two questions are the enforcer's `requireReleaseDeps` and
   `requireReleaseVersion` if a project wants its build to refuse on its own; the parent-snapshot
@@ -159,9 +159,9 @@
   is why the gate belongs on that side. `release:perform` then checks the tag out and runs `deploy`,
   which would run the same suite a second time; cut that one with `-Darguments="-DskipTests"` and let
   the prepare half be the one that counts.
-- Deploy only when `swarmforge/deploy.conf` names a target, through the project's own token
-  helper, the way the deploy step does everywhere. A deploy that fails means no tag and no next
-  development version: report it instead of continuing.
+- Publish a release only when `swarmforge/release.conf` names a target, through the project's own
+  token helper. A release deploy that fails means no next development version: report it instead
+  of continuing. This is distinct from the ordinary `deploy` stage, which installs locally.
 
 ## Kotlin Gate Tasks
 - A Kotlin project's build provides these tasks through its own wrapper, and these names are the

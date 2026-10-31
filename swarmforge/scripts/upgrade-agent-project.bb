@@ -51,12 +51,11 @@
        "reviewed tree.\n"
        commit-policy-end))
 
-(defn deploy-stage [command]
+(def install-stage
   {:name "deploy"
-   :runs [[command]]
+   :runs [["scripts/install-snapshot.sh"]]
    :evidence []
-   :stamp [:sources "scripts/publish-snapshot.sh"
-           "scripts/github-packages-token.sh" "swarmforge/deploy.conf"]})
+   :stamp [:sources "scripts/install-snapshot.sh" "pom.xml" ".mvn"]})
 
 (defn fail! [message]
   (binding [*out* *err*]
@@ -110,28 +109,50 @@
       (update config :stages insert-before e2e-stage #{"docs" "deploy" "release"})
       config)))
 
-(defn configured-deploy-target [root]
-  (let [file (fs/path root "swarmforge" "deploy.conf")]
-    (when (fs/regular-file? file)
-      (->> (str/split-lines (slurp (str file)))
-           (map str/trim)
-           (remove str/blank?)
-           (remove #(str/starts-with? % "#"))
-           first))))
+(defn configured-release-target [root]
+  (some (fn [name]
+          (let [file (fs/path root "swarmforge" name)]
+            (when (fs/regular-file? file)
+              (->> (str/split-lines (slurp (str file)))
+                   (map str/trim)
+                   (remove str/blank?)
+                   (remove #(str/starts-with? % "#"))
+                   first))))
+        ["release.conf" "deploy.conf"]))
 
-(defn existing-publish-command [root]
-  (some #(when (fs/regular-file? (fs/path root %)) %)
-        ["scripts/publish-snapshot.sh"
-         "swarmforge/local-scripts/publish-snapshot.sh"]))
-
-(defn ensure-deploy-stage [config stage]
+(defn ensure-deploy-stage [config]
   (if-let [existing (some #(when (= "deploy" (:name %)) %) (:stages config))]
-    (if (:optional existing)
-      (update config :stages
-              (fn [stages]
-                (mapv #(if (= "deploy" (:name %)) (dissoc % :optional) %) stages)))
-      config)
-    (update config :stages insert-before stage #{"release"})))
+    (update config :stages
+            (fn [stages]
+              (mapv #(if (= "deploy" (:name %))
+                       (merge (dissoc % :optional) install-stage)
+                       %)
+                    stages)))
+    (update config :stages insert-before install-stage #{"release"})))
+
+(defn excluded-maven-config? [root file]
+  (let [parts (set (map str (fs/components (fs/relativize root file))))]
+    (boolean (some parts ["target" "tmp" ".worktrees" ".git" ".swarmforge"]))))
+
+(defn maven-config-files [root]
+  (->> (cons (fs/path root ".mvn" "maven.config")
+             (fs/glob root "**/.mvn/maven.config" {:hidden true}))
+       distinct
+       (remove #(excluded-maven-config? root %))
+       (filter fs/regular-file?)
+       vec))
+
+(defn local-repo-line? [line]
+  (str/starts-with? (str/trim line) "-Dmaven.repo.local="))
+
+(defn local-repo-config? [file]
+  (some local-repo-line? (str/split-lines (slurp (str file)))))
+
+(defn remove-local-repo! [file]
+  (let [kept (->> (str/split-lines (slurp (str file)))
+                  (remove local-repo-line?))]
+    (spit (str file)
+          (if (seq kept) (str (str/join "\n" kept) "\n") ""))))
 
 (defn managed-block-in-place? [file begin end block]
   (when (fs/regular-file? file)
@@ -187,11 +208,18 @@
                                 "check-documentation.bb")
         e2e-upgrade-source (fs/path (fs/parent (fs/absolutize *file*))
                                     "check-e2e.bb")
-        deploy-target (configured-deploy-target root)
-        publish-command (existing-publish-command root)
-        install-publisher? (and deploy-target (nil? publish-command))
-        effective-publish-command (or publish-command
-                                      "scripts/publish-snapshot.sh")
+        maven? (or (fs/regular-file? (fs/path root "pom.xml"))
+                   (fs/regular-file? (fs/path root ".mvn" "maven.config")))
+        release-target (configured-release-target root)
+        release-file (fs/path root "swarmforge" "release.conf")
+        legacy-deploy-file (fs/path root "swarmforge" "deploy.conf")
+        rename-release-file? (and (fs/regular-file? legacy-deploy-file)
+                                  (not (fs/regular-file? release-file)))
+        install-script (fs/path root "scripts" "install-snapshot.sh")
+        token-helper (fs/path root "scripts" "github-packages-token.sh")
+        template-install-script (fs/path template "scripts" "install-snapshot.sh")
+        template-token-helper (fs/path template "scripts" "github-packages-token.sh")
+        repo-configs (when maven? (maven-config-files root))
         config (when (fs/regular-file? stages-file)
                  (try
                    (edn/read-string (slurp (str stages-file)))
@@ -200,17 +228,15 @@
                                  (.getMessage cause))))))
         _ (when-not config
             (fail! (str "stages.edn is missing under " root)))
-        with-deploy (when config
-                      (cond-> config
-                        deploy-target
-                        (ensure-deploy-stage
-                         (deploy-stage effective-publish-command))))
+        with-deploy (if (and config maven?)
+                      (ensure-deploy-stage config)
+                      config)
         with-e2e (when with-deploy (ensure-e2e-stage with-deploy))
         upgraded (when with-e2e (ensure-docs-stage with-e2e))
         standard? (some #(= "qa" (:name %)) (:stages config))
         pending (cond-> []
-                  (and with-deploy (not= config with-deploy))
-                  (conj "add required deploy stage")
+                  (and maven? (not= config with-deploy))
+                  (conj "install local-snapshot deploy stage")
                   (and upgraded (not= with-e2e upgraded))
                   (conj "add required docs stage")
                   (and standard? (not= with-deploy with-e2e))
@@ -227,7 +253,19 @@
                            (not= (slurp (str e2e-checker))
                                  (slurp (str e2e-upgrade-source)))))
                   (conj "install check-e2e.bb")
-                  install-publisher? (conj "install snapshot publisher")
+                  (and maven?
+                       (or (not (fs/regular-file? install-script))
+                           (not= (slurp (str install-script))
+                                 (slurp (str template-install-script)))))
+                  (conj "install install-snapshot.sh")
+                  (and release-target
+                       (or (not (fs/regular-file? token-helper))
+                           (not= (slurp (str token-helper))
+                                 (slurp (str template-token-helper)))))
+                  (conj "install release token helper")
+                  rename-release-file? (conj "rename deploy.conf to release.conf")
+                  (some local-repo-config? repo-configs)
+                  (conj "use the shared Maven repository")
                   (some #(not (managed-block-in-place?
                                % policy-begin policy-end policy-block)) policy-files)
                   (conj "install single-agent correction policy")
@@ -251,13 +289,25 @@
       (do
         (when (and config (not= config upgraded))
           (write-stages! stages-file upgraded))
-        (when install-publisher?
-          (doseq [file ["publish-snapshot.sh" "github-packages-token.sh"]]
-            (let [source (fs/path template "scripts" file)
-                  destination (fs/path root "scripts" file)]
-              (fs/create-dirs (fs/parent destination))
-              (fs/copy source destination {:replace-existing true})
-              (fs/set-posix-file-permissions destination "rwxr-xr-x"))))
+        (when rename-release-file?
+          (fs/move legacy-deploy-file release-file))
+        (when (and maven?
+                   (or (not (fs/regular-file? install-script))
+                       (not= (slurp (str install-script))
+                             (slurp (str template-install-script)))))
+          (fs/create-dirs (fs/parent install-script))
+          (fs/copy template-install-script install-script {:replace-existing true})
+          (fs/set-posix-file-permissions install-script "rwxr-xr-x"))
+        (when (and release-target
+                   (or (not (fs/regular-file? token-helper))
+                       (not= (slurp (str token-helper))
+                             (slurp (str template-token-helper)))))
+          (fs/create-dirs (fs/parent token-helper))
+          (fs/copy template-token-helper token-helper {:replace-existing true})
+          (fs/set-posix-file-permissions token-helper "rwxr-xr-x"))
+        (doseq [file repo-configs
+                :when (local-repo-config? file)]
+          (remove-local-repo! file))
         (doseq [file policy-files]
           (when-not (managed-block-in-place?
                      file policy-begin policy-end policy-block)

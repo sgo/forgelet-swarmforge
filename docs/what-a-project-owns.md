@@ -9,7 +9,7 @@ them, and what happens when one is missing.
 | the project's ... | lives at | what reads it |
 |---|---|---|
 | its language | `swarmforge/language.conf` | the engineering article's language table, and every rule that is written per language |
-| its deploy target | `swarmforge/deploy.conf` | whatever finishes a card, and the release steps |
+| its release target | `swarmforge/release.conf` | the deliberate release path; legacy packs may still use `deploy.conf` |
 | what happens when a card finishes | `swarmforge/hooks/card-complete.sh` | the tooling, once per card |
 | its own rules, beside the shared ones | `swarmforge/constitution/articles/local-*.prompt` | every agent, every session |
 | its own helper scripts | `swarmforge/local-scripts/`, on every session's `PATH` | the roles that call them |
@@ -28,18 +28,19 @@ template. It is written once - a project re-languaged by hand keeps its answer t
 refresh and update - and a project that does not have one has not said what it is written in
 yet. Ask the operator and write the answer here rather than assuming.
 
-## `swarmforge/deploy.conf` - where the project publishes
+## `swarmforge/release.conf` - where a release publishes
 
-The gate, not the deploy: it names a deployment target (this family uses `github-packages`),
-and everything that deploys reads it first. Absent or empty means *do not deploy*, which is
-the right state for a project that ships nowhere.
+The target, not the ordinary card completion. A single-agent Java project installs its card's
+Maven SNAPSHOT into the operator's shared `~/.m2`; it does not publish that SNAPSHOT to a
+registry. Deliberate releases read `swarmforge/release.conf` first and fall back to the legacy
+`swarmforge/deploy.conf` while older projects migrate. This family uses `github-packages`.
+Absent or empty means the project ships no release, which is the right state for a project
+that is never released.
 
-What the deploy itself is depends on the project: its build, its artifact, the credentials
-it needs. That is why the file names a target rather than a command, and why the deploy
-steps live with the project - a token helper under `scripts/`, Maven settings under `.mvn/`,
-the `distributionManagement` in the `pom.xml` - instead of in the layer. A project with
-`deploy.conf` and no way to deploy fails loudly when something tries; a project without
-`deploy.conf` deploys nothing and is not asked to.
+What the release publication is depends on the project: its build, artifact and credentials.
+A token helper lives under `scripts/`, Maven settings under `.mvn/`, and the
+`distributionManagement` in the `pom.xml`. A configured release with no way to publish fails
+loudly when the release is attempted.
 
 ## `swarmforge/hooks/card-complete.sh` - what happens when a card finishes
 
@@ -69,10 +70,11 @@ present but not executable is ignored with `HOOK_IGNORED`, which looks like a wo
 finishing step and is not one.
 
 What should be in it is the project's decision, and so is whether it exists at all: a project
-without the file simply has no finishing step. Push the branch the card landed on, deploy
-when `swarmforge/deploy.conf` names a target, publish something somewhere else - all of that
-is the project's policy, which is why the layer ships no default. A release finishes without a
-merge, so this hook does not run for one; a release does its own deploy and push deliberately.
+without the file simply has no finishing step. Push the branch the card landed on, run the
+project's local install, publish a release when `swarmforge/release.conf` names a target, or
+publish something somewhere else - all of that is the project's policy, which is why the layer
+ships no default. A release finishes without a merge, so this hook does not run for one; a
+release does its own publication and push deliberately.
 
 ## The rest of what a project owns
 

@@ -60,7 +60,7 @@ Do not create a second runner when one already works.
 
 ```sh
 find swarmforge/hooks -maxdepth 2 -type f -print 2>/dev/null
-cat swarmforge/deploy.conf 2>/dev/null || true
+cat swarmforge/release.conf 2>/dev/null || cat swarmforge/deploy.conf 2>/dev/null || true
 find scripts -maxdepth 2 -type f -iname '*deploy*' -o -iname '*publish*'
 ```
 

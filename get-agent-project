@@ -145,8 +145,8 @@ chmod +x "$dest/swarm"
 if [[ -f "$dest/scripts/run-acceptance-tests.sh" ]]; then
   chmod +x "$dest/scripts/run-acceptance-tests.sh"
 fi
-if [[ -f "$dest/scripts/publish-snapshot.sh" ]]; then
-  chmod +x "$dest/scripts/publish-snapshot.sh"
+if [[ -f "$dest/scripts/install-snapshot.sh" ]]; then
+  chmod +x "$dest/scripts/install-snapshot.sh"
 fi
 if [[ -f "$dest/scripts/github-packages-token.sh" ]]; then
   chmod +x "$dest/scripts/github-packages-token.sh"
