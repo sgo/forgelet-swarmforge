@@ -1941,8 +1941,8 @@
                          ;; A release tags what the pom's own SCM block points at,
                          ;; and mvn release:prepare refuses before it does anything
                          ;; without one - so a fixture called "ready to release"
-                         ;; carries it. This project ships nowhere: no deploy.conf,
-                         ;; so the deploy wiring is not asked of it.
+                         ;; carries it. This project has no release.conf, so release
+                         ;; publishing wiring is not asked of it.
                          "<scm><connection>scm:git:https://github.com/example/demo.git</connection></scm>\n"
                          "<profiles><profile><id>with-release-tests</id>"
                          "<properties><skipTests>false</skipTests></properties></profile></profiles>\n"
@@ -2048,12 +2048,12 @@
 
 (deftest release-preflight-refuses-a-release-that-is-not-wired
   ;; Given a project whose numbers are all in order - clean tree, a -SNAPSHOT at
-  ;; HEAD, a free tag, no foreign snapshot dependency - with a deploy target and
+  ;; HEAD, a free tag, no foreign snapshot dependency - with a release target and
   ;; nothing behind it that can reach the target
   ;; When the preflight runs
   ;; Then it refuses for the wiring and not for the numbers: mvn release:prepare
   ;; cannot tag without <scm>, release:perform has nowhere to deploy without a
-  ;; distributionManagement repository, and the deploy step has no token helper
+  ;; distributionManagement repository, and the release step has no token helper
   ;; to run. All three were silent before this: every number checked out, so the
   ;; tool said READY and the release stopped at its own first command.
   (let [root (tmp-dir)
@@ -2075,7 +2075,7 @@
     (try
       (init-repo! root)
       (write-file pom bare)
-      (write-file (fs/path root "swarmforge" "deploy.conf") "github-packages\n")
+      (write-file (fs/path root "swarmforge" "release.conf") "github-packages\n")
       (run {:dir root} "git" "add" "-A")
       (run {:dir root} "git" "commit" "-q" "-m" "the project")
       (let [result (run {:dir root :ok? false} preflight "--no-maven" "1.1.0" "1.1.1-SNAPSHOT")]
@@ -2115,13 +2115,13 @@
         (is (zero? (:exit result)) (text result))
         (is (str/includes? (text result) "3.3.1 (pinned in the pom)"))
         (is (not (str/includes? (text result) "warning:")) "a pinned plugin warns about nothing"))
-      ;; A project that ships nowhere is not asked for deploy wiring
-      (fs/delete-if-exists (fs/path root "swarmforge" "deploy.conf"))
+      ;; A project that ships nowhere is not asked for release wiring
+      (fs/delete-if-exists (fs/path root "swarmforge" "release.conf"))
       (run {:dir root} "git" "add" "-A")
       (run {:dir root} "git" "commit" "-q" "-m" "no deploy target")
       (let [result (run {:dir root :ok? false} preflight "--no-maven" "1.1.0" "1.1.1-SNAPSHOT")]
         (is (zero? (:exit result)) (text result))
-        (is (str/includes? (text result) "no target in swarmforge/deploy.conf")))
+        (is (str/includes? (text result) "no target in swarmforge/release.conf")))
       (finally
         (fs/delete-tree root)))))
 

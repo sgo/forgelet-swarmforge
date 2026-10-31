@@ -12,6 +12,20 @@
   (fs/create-dirs (fs/parent path))
   (spit (str path) text))
 
+(defn delete-tree! [path]
+  (loop [attempt 0]
+    (let [retry?
+          (try
+            (fs/delete-tree path)
+            false
+            (catch java.nio.file.NoSuchFileException _
+              false)
+            (catch java.nio.file.DirectoryNotEmptyException _
+              true))]
+      (when (and retry? (< attempt 20))
+        (Thread/sleep 50)
+        (recur (inc attempt))))))
+
 (defn run
   [dir & args]
   (apply sh/sh (concat args [:dir (str dir)])))
@@ -79,7 +93,9 @@
         (is (fs/executable?
              (fs/path project "scripts" "run-acceptance-mutation.sh")))
         (is (fs/executable?
-             (fs/path project "scripts" "publish-snapshot.sh")))
+             (fs/path project "scripts" "install-snapshot.sh")))
+        (is (not (fs/exists?
+                  (fs/path project "scripts" "publish-snapshot.sh"))))
         (is (fs/executable?
              (fs/path project "scripts" "github-packages-token.sh")))
         (is (fs/executable?
@@ -87,7 +103,8 @@
         (is (fs/regular-file?
              (fs/path project "docs" "manual-contract.edn")))
         (is (= "github-packages\n"
-               (slurp (str (fs/path project "swarmforge" "deploy.conf")))))
+               (slurp (str (fs/path project "swarmforge" "release.conf")))))
+        (is (not (fs/exists? (fs/path project "swarmforge" "deploy.conf"))))
         (is (fs/regular-file?
              (fs/path project "acceptance" "runner-worker.sh")))
         (is (fs/executable?
@@ -193,7 +210,7 @@
             (is (str/starts-with? (slurp (str url-file)) "http://")))))
       (finally
         (stop-agent-session! project)
-        (fs/delete-tree forge)))))
+        (delete-tree! forge)))))
 
 (deftest a-library-project-uses-the-verify-profile-instead-of-qa
   (let [forge (fixture-forge)
@@ -213,7 +230,7 @@
           (is (= ["verify" "docs" "deploy" "release"]
                  (subvec names (- (count names) 4))))
           (is (not (:optional deploy)))
-          (is (= [["scripts/publish-snapshot.sh"]] (:runs deploy))))
+          (is (= [["scripts/install-snapshot.sh"]] (:runs deploy))))
         (is (str/includes? stages "scripts/run-acceptance-tests.sh"))
         (is (str/includes? stages "target/acceptance/acceptance.log"))
         (is (str/includes? stages "scripts/run-acceptance-mutation.sh"))
@@ -226,7 +243,7 @@
         (is (not (str/includes? (:out listing) "qa"))))
       (finally
         (stop-agent-session! project)
-        (fs/delete-tree forge)))))
+        (delete-tree! forge)))))
 
 (deftest standard-e2e-runs-the-card-procedure-and-redacts-inputs
   (let [forge (fixture-forge)
@@ -273,7 +290,7 @@
                            "missing required inputs: E2E_SECRET")))
       (finally
         (stop-agent-session! project)
-        (fs/delete-tree forge)))))
+        (delete-tree! forge)))))
 
 (deftest a-routed-card-enters-spec-and-wakes-the-single-agent
   (let [forge (fixture-forge)
@@ -308,9 +325,9 @@
            (fs/glob project ".swarmforge/handoffs/outbox/*_from_New_Task_to_agent.handoff")))
       (finally
         (stop-agent-session! project)
-        (fs/delete-tree forge)))))
+        (delete-tree! forge)))))
 
-(deftest a-snapshot-deployment-uses-the-release-gate-and-project-token
+(deftest a-card-installs-its-snapshot-in-the-shared-local-repository
   (let [forge (fixture-forge)
         project (fs/path forge "projects" "agent-lib")]
     (try
@@ -322,22 +339,31 @@
                     (str "#!/bin/sh\n"
                          "case \" $* \" in\n"
                          "  *\" help:evaluate \"*) printf '0.1.0-SNAPSHOT\\n' ;;\n"
-                         "  *\" deploy \"*) mkdir -p target; "
-                         "printf 'token=%s args=%s\\n' \"$GITHUB_PACKAGES_TOKEN\" \"$*\" "
-                         "> target/deploy.args ;;\n"
+                         "  *\" install \"*) mkdir -p target; "
+                         "printf 'args=%s\\n' \"$*\" > target/install.args ;;\n"
                          "  *) printf 'unexpected mvn: %s\\n' \"$*\" >&2; exit 2 ;;\n"
                          "esac\n"))
         (fs/set-posix-file-permissions mvn "rwxr-xr-x")
-        (let [publish (sh/sh (str (fs/path project "scripts" "publish-snapshot.sh"))
+        (let [install (sh/sh (str (fs/path project "scripts" "install-snapshot.sh"))
                              :dir (str project)
-                             :env {"PATH" (str fake-bin ":" (System/getenv "PATH"))
-                                   "GITHUB_PACKAGES_TOKEN" "test-packages-token"})]
-          (is (zero? (:exit publish)) (:err publish))
-          (is (= "token=test-packages-token args=-B -Pwith-release-tests deploy\n"
-                 (slurp (str (fs/path project "target" "deploy.args")))))))
+                             :env {"PATH" (str fake-bin ":" (System/getenv "PATH"))})]
+          (is (zero? (:exit install)) (:err install))
+          (is (= "args=-B -Pwith-release-tests install\n"
+                 (slurp (str (fs/path project "target" "install.args"))))))
+        (write-file mvn
+                    (str "#!/bin/sh\n"
+                         "case \" $* \" in\n"
+                         "  *\" help:evaluate \"*) printf '1.0.0\\n' ;;\n"
+                         "  *) exit 99 ;;\n"
+                         "esac\n"))
+        (let [refused (sh/sh (str (fs/path project "scripts" "install-snapshot.sh"))
+                             :dir (str project)
+                             :env {"PATH" (str fake-bin ":" (System/getenv "PATH"))})]
+          (is (not (zero? (:exit refused))))
+          (is (str/includes? (:err refused) "is not a snapshot"))))
       (finally
         (stop-agent-session! project)
-        (fs/delete-tree forge)))))
+        (delete-tree! forge)))))
 
 (deftest a-manual-contract-runs-examples-and-detects-unowned-api-prose
   (let [forge (fixture-forge)
@@ -394,7 +420,7 @@
                            "does not name public API Propositions.equal")))
       (finally
         (stop-agent-session! project)
-        (fs/delete-tree forge)))))
+        (delete-tree! forge)))))
 
 (deftest an-existing-project-can-adopt-the-documentation-gate
   (let [forge (fixture-forge)
@@ -415,6 +441,12 @@
       (fs/delete-if-exists
        (fs/path project "swarmforge" "scripts" "check-documentation.bb"))
       (fs/delete-if-exists (fs/path project "docs" "manual-contract.edn"))
+      (fs/delete-if-exists (fs/path project "swarmforge" "release.conf"))
+      (write-file (fs/path project "swarmforge" "deploy.conf") "github-packages\n")
+      (write-file (fs/path project ".mvn" "maven.config")
+                  "-Dmaven.repo.local=.m2/repository\n-s\n.mvn/settings.xml\n")
+      (write-file (fs/path project "core" ".mvn" "maven.config")
+                  "-Dmaven.repo.local=../.m2/repository\n-s\n../.mvn/settings.xml\n")
       (write-file (fs/path project "AGENTS.md") "# Old agent instructions\n")
       (write-file (fs/path project "STAGES.md") "# Old stages\n")
 
@@ -422,7 +454,9 @@
                        "--upgrade" (str project) "--check")]
         (is (not (zero? (:exit check))))
         (is (str/includes? (:out check) "add required docs stage"))
-        (is (str/includes? (:out check) "add required deploy stage"))
+        (is (str/includes? (:out check) "install local-snapshot deploy stage"))
+        (is (str/includes? (:out check) "rename deploy.conf to release.conf"))
+        (is (str/includes? (:out check) "use the shared Maven repository"))
         (is (str/includes? (:out check) "install single-agent correction policy"))
         (is (str/includes? (:out check) "install single-agent commit policy")))
 
@@ -430,7 +464,9 @@
                          "--upgrade" (str project))]
         (is (zero? (:exit upgrade)) (:err upgrade))
         (is (str/includes? (:out upgrade) "upgraded: add required docs stage"))
-        (is (str/includes? (:out upgrade) "upgraded: add required deploy stage"))
+        (is (str/includes? (:out upgrade) "upgraded: install local-snapshot deploy stage"))
+        (is (str/includes? (:out upgrade) "upgraded: rename deploy.conf to release.conf"))
+        (is (str/includes? (:out upgrade) "upgraded: use the shared Maven repository"))
         (is (str/includes? (:out upgrade) "upgraded: install single-agent correction policy"))
         (is (str/includes? (:out upgrade) "upgraded: install single-agent commit policy")))
 
@@ -441,12 +477,21 @@
             release-index (.indexOf names "release")]
         (is (< docs-index deploy-index))
         (is (< deploy-index release-index))
-        (is (not (:optional (nth stages docs-index)))))
+        (is (not (:optional (nth stages docs-index))))
+        (is (= [["scripts/install-snapshot.sh"]]
+               (:runs (nth stages deploy-index)))))
       (is (fs/executable?
            (fs/path project "scripts" "check-documentation.sh")))
       (is (fs/regular-file?
            (fs/path project "swarmforge" "scripts" "check-documentation.bb")))
       (is (fs/regular-file? (fs/path project "docs" "manual-contract.edn")))
+      (is (fs/executable? (fs/path project "scripts" "install-snapshot.sh")))
+      (is (fs/regular-file? (fs/path project "swarmforge" "release.conf")))
+      (is (not (fs/exists? (fs/path project "swarmforge" "deploy.conf"))))
+      (is (= "-s\n.mvn/settings.xml\n"
+             (slurp (str (fs/path project ".mvn" "maven.config")))))
+      (is (= "-s\n../.mvn/settings.xml\n"
+             (slurp (str (fs/path project "core" ".mvn" "maven.config")))))
       (doseq [file ["AGENTS.md" "STAGES.md"]]
         (let [text (slurp (str (fs/path project file)))]
           (is (str/includes?
@@ -466,7 +511,7 @@
                               "--upgrade" (str project) "--check"))))
       (finally
         (stop-agent-session! project)
-        (fs/delete-tree forge)))))
+        (delete-tree! forge)))))
 
 (deftest an-existing-standard-project-can-adopt-the-e2e-gate
   (let [forge (fixture-forge)
@@ -506,7 +551,7 @@
                               "--upgrade" (str project) "--check"))))
       (finally
         (stop-agent-session! project)
-        (fs/delete-tree forge)))))
+        (delete-tree! forge)))))
 
 (deftest an-outdated-managed-spec-approval-block-is-refreshed
   (let [forge (fixture-forge)
@@ -537,7 +582,7 @@
              "approves its spec automatically by default")))
       (finally
         (stop-agent-session! project)
-        (fs/delete-tree forge)))))
+        (delete-tree! forge)))))
 
 (deftest an-old-ready-marker-does-not-deliver-into-a-busy-agent
   (let [forge (fixture-forge)
@@ -575,7 +620,7 @@
             (str "runner output: " (:out once-ready) (:err once-ready))))
       (finally
         (sh/sh "tmux" "-S" sock "kill-server")
-        (fs/delete-tree forge)))))
+        (delete-tree! forge)))))
 
 (deftest an-idle-agent-with-a-request-in-its-composer-is-given-enter
   (let [forge (fixture-forge)
@@ -617,7 +662,7 @@
                       (str request ".request")))))
       (finally
         (sh/sh "tmux" "-S" sock "kill-server")
-        (fs/delete-tree forge)))))
+        (delete-tree! forge)))))
 
 (deftest a-single-agent-window-is-named-for-its-project
   (let [forge (fixture-forge)
@@ -649,7 +694,7 @@
         (is (= "propositions:0:0\n" (:out windows))))
       (finally
         (sh/sh "tmux" "-S" sock "kill-server")
-        (fs/delete-tree forge)))))
+        (delete-tree! forge)))))
 
 (deftest stop-closes-the-agent-session
   (let [forge (fixture-forge)
@@ -669,7 +714,7 @@
       (is (not (fs/exists? pointer)))
       (finally
         (stop-agent-session! project)
-        (fs/delete-tree forge)))))
+        (delete-tree! forge)))))
 
 (deftest a-commit-before-the-spec-is-approved-is-refused
   (let [forge (fixture-forge)
@@ -695,7 +740,7 @@
         (is (zero? (:exit commit)) (:err commit)))
       (finally
         (stop-agent-session! project)
-        (fs/delete-tree forge)))))
+        (delete-tree! forge)))))
 
 (deftest a-pack-project-converts-in-place-after-a-safe-dry-run
   (let [forge (fixture-forge)
@@ -712,6 +757,9 @@
     (try
       (write-file (fs/path project ".gitignore")
                   ".swarmforge/\n.worktrees/\ntarget/\n")
+      (write-file (fs/path project ".mvn" "maven.config")
+                  "-Dmaven.repo.local=.m2/repository\n-s\n.mvn/settings.xml\n")
+      (write-file (fs/path project "pom.xml") "<project/>\n")
       (write-file (fs/path project "src" "main" "java" "Demo.java")
                   "package demo; final class Demo {}\n")
       (write-file (fs/path project "features" "existing.feature")
@@ -832,6 +880,11 @@
                (fs/path project ".swarmforge" "single-agent")))
           (is (fs/regular-file? (fs/path project "swarmforge" "scripts" "stage.bb")))
           (is (fs/regular-file? (fs/path project "qa" "e2e.edn")))
+          (is (fs/executable?
+               (fs/path project "scripts" "install-snapshot.sh")))
+          (is (fs/regular-file? (fs/path project "swarmforge" "release.conf")))
+          (is (= "-s\n.mvn/settings.xml\n"
+                 (slurp (str (fs/path project ".mvn" "maven.config")))))
           (is (fs/regular-file? (fs/path project ".git" "hooks" "pre-commit")))
           (is (fs/executable? (fs/path project ".git" "hooks" "pre-commit")))
           (let [stages (edn/read-string
@@ -860,7 +913,7 @@
             (is (fs/regular-file?
                  (fs/path archive "tasks.before.tsv")))))))
       (finally
-        (fs/delete-tree forge)))))
+        (delete-tree! forge)))))
 
 (deftest conversion-refuses-a-forge-with-the-old-master-only-runtime
   (let [forge (fixture-forge)
@@ -877,4 +930,4 @@
              "does not support single-agent projects on a non-master branch"))
         (is (str/includes? (:err result) "upgrade")))
       (finally
-        (fs/delete-tree forge)))))
+        (delete-tree! forge)))))

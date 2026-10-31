@@ -146,29 +146,29 @@
       (finally
         (fs/delete-tree root)))))
 
-(deftest a-configured-deploy-target-requires-a-required-stage
+(deftest a-single-agent-maven-project-requires-a-required-local-install-stage
   (let [root (fixture)
         stages-file (fs/path root "stages.edn")]
     (try
-      (write-file (fs/path root "swarmforge" "deploy.conf") "github-packages\n")
+      (write-file (fs/path root ".swarmforge" "single-agent") "agent\n")
       (let [missing (run-stage root "complete")]
         (is (not (zero? (:exit missing))))
-        (is (str/includes? (:err missing) "no deploy stage")))
+        (is (str/includes? (:err missing) "required deploy stage")))
 
       (write-file stages-file
                   (pr-str (update stage-config :stages conj
                                   {:name "deploy"
                                    :optional true
-                                   :runs [["scripts/publish-snapshot.sh"]]
+                                   :runs [["scripts/install-snapshot.sh"]]
                                    :stamp [:sources]})))
       (let [optional (run-stage root "complete")]
         (is (not (zero? (:exit optional))))
-        (is (str/includes? (:err optional) "deploy stage is optional")))
+        (is (str/includes? (:err optional) "must not be optional")))
 
       (write-file stages-file
                   (pr-str (update stage-config :stages conj
                                   {:name "deploy"
-                                   :runs [["scripts/publish-snapshot.sh"]]
+                                   :runs [["scripts/install-snapshot.sh"]]
                                    :stamp [:sources]})))
       (let [required (run-stage root "complete")]
         (is (not (zero? (:exit required))))
