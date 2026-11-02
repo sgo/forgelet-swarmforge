@@ -1735,6 +1735,10 @@
       ;; the adapter runs them, recording what each was handed.
       (write-file (fs/path bridge "scripts/build.sh")
                   (str "#!/bin/sh\nset -eu\n"
+                       "case \" $GOFLAGS \" in\n"
+                       "  *\" -buildvcs=false \"*) ;;\n"
+                       "  *) echo 'missing -buildvcs=false' >&2; exit 9 ;;\n"
+                       "esac\n"
                        "mkdir -p build/acceptance/bin\n"
                        "cp -R installers/. build/acceptance/bin/\n"
                        "chmod +x build/acceptance/bin/*\n"))

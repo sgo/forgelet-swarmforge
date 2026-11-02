@@ -417,7 +417,11 @@ build_forgelet_bridge() {
   [[ -f "$dest/scripts/build.sh" ]] || fail_missing "the bridge's build script in $dest"
   command -v go >/dev/null 2>&1 \
     || fail_missing "go (a Forgelet forge builds the bridge it runs)"
-  (cd "$dest" && ./scripts/build.sh >/dev/null) || fail_missing "the bridge's build"
+  # The bridge is built from a downloaded archive, not a Git checkout. Go 1.27's
+  # automatic VCS stamping otherwise fails while asking git about that scratch
+  # tree, aborting composition before the new forge can be started.
+  (cd "$dest" && GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" \
+    ./scripts/build.sh >/dev/null) || fail_missing "the bridge's build"
 }
 
 install_forgelet_bridge() {
