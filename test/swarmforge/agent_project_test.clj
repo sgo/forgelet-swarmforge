@@ -58,6 +58,14 @@
   (sh/sh "tmux" "-S" (str (fs/path project ".swarmforge" "agent-tmux.sock"))
          "kill-server"))
 
+(defn wait-for-path [path timeout-ms]
+  (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
+    (loop []
+      (cond
+        (fs/exists? path) true
+        (> (System/currentTimeMillis) deadline) false
+        :else (do (Thread/sleep 50) (recur))))))
+
 (def fake-agent-command
   "sh -c 'echo \"<<AGENT READY>>\"; while IFS= read -r line; do case \"$line\" in \"[phone \"*) id=${line#\\[phone }; id=${id%%]*}; mkdir -p tmp; printf \"fake answer from %s\\n\" \"$id\" > tmp/answer.txt; ./swarmforge/scripts/pack_dashboard_request.sh answer \"$id\" ./tmp/answer.txt; echo \"<<AGENT READY>>\";; esac; done'")
 
@@ -174,12 +182,14 @@
                        "bb" (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
                        "--root" (str project)
                        "--once" "--no-serve"
-                       "--agent-command" fake-agent-command)]
+                       "--agent-command" fake-agent-command)
+              done (fs/path project ".swarmforge" "dashboard" "requests"
+                             "done" "req-test.request")]
           (is (zero? (:exit run)) (:err run))
+          (is (wait-for-path done 3000) "the agent answered the delivered request")
           (is (not (fs/exists? (fs/path project ".swarmforge" "dashboard" "requests"
                                          "pending" "req-test.request"))))
-          (let [answer (slurp (str (fs/path project ".swarmforge" "dashboard" "requests"
-                                              "done" "req-test.request")))]
+          (let [answer (slurp (str done))]
             (is (str/includes? answer "fake answer from req-test")))))
 
       (testing "a turn cannot complete while stages are stale"
@@ -190,10 +200,12 @@
                        "bb" (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
                        "--root" (str project)
                        "--once" "--no-serve"
-                       "--agent-command" fake-agent-command)]
+                       "--agent-command" fake-agent-command)
+              done (fs/path project ".swarmforge" "dashboard" "requests"
+                             "done" "req-complete.request")]
           (is (zero? (:exit run)) (:err run))
-          (let [answer (slurp (str (fs/path project ".swarmforge" "dashboard" "requests"
-                                              "done" "req-complete.request")))]
+          (is (wait-for-path done 3000) "the agent answered the delivered request")
+          (let [answer (slurp (str done))]
             (is (str/includes? answer "fake answer from req-complete")
                 (str "answer was: " answer)))))
 
@@ -656,7 +668,8 @@
                       "--once" "--no-serve"
                       "--agent-command" "unused")]
         (is (zero? (:exit once)) (:err once))
-        (is (str/includes? (:out once) "ringing request already in the composer"))
+        (is (str/includes? (:out once)
+                           "submitting request already in the composer"))
         (is (fs/regular-file?
              (fs/path project ".swarmforge" "dashboard" "requests" "done"
                       (str request ".request")))))

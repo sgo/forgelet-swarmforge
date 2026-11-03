@@ -394,8 +394,8 @@
                   (apply process/process (concat [options] command)))
         result @process]
     (when-not (zero? (:exit result))
-      (exit! (or (:exit result) 1)
-             (str "Stage command failed: " command)))))
+      (throw (ex-info (str "Stage command failed: " command)
+                      {:exit (or (:exit result) 1)})))))
 
 (defn glob? [value]
   (boolean (re-find #"[*?\[\]]" value)))
@@ -506,10 +506,50 @@
              :evidence evidence
              :inputs (vec (distinct inputs))}))
 
+(defn process-alive? [pid]
+  (boolean
+   (when pid
+     (zero? (:exit (sh/sh "kill" "-0" (str pid)))))))
+
+(defn begin-stage! [root config state name tree]
+  (let [running {:stage name
+                 :tree tree
+                 :pid (.pid (java.lang.ProcessHandle/current))
+                 :status :running
+                 :started-at (now)}
+        state (assoc state :running running)]
+    (save-state root (:task config) state)
+    (update-board! root config
+                   (or (:card state) (fallback-card root config []))
+                   name)
+    state))
+
+(defn finish-stage! [root config state name]
+  (let [state (dissoc state :running)]
+    (save-state root (:task config) state)
+    (update-board! root config
+                   (or (:card state) (fallback-card root config []))
+                   name)
+    (println (str "stage " name ": done at tree "
+                  (get-in state [:stages name :tree])))))
+
+(defn fail-stage! [root config state code message]
+  (let [running (assoc (:running state)
+                       :status :failed
+                       :failed-at (now)
+                       :exit code
+                       :message message)
+        state (assoc state :running running)]
+    (save-state root (:task config) state)
+    (update-board! root config
+                   (or (:card state) (fallback-card root config []))
+                   (:stage running))))
+
 (defn check-spec [root state stage tree]
   (let [spec (or (:spec stage) (:file stage))]
     (when-not spec
-      (exit! 1 "The spec stage needs :spec <file> or a vector of paths"))
+      (throw (ex-info "The spec stage needs :spec <file> or a vector of paths"
+                      {:exit 1})))
     (let [files (spec-files root spec)
           hash (when (seq files) (spec-hash root files))
           approved (->> (vals (:proposals state))
@@ -517,10 +557,12 @@
                                       (= hash (:hash %))))
                         first)]
       (when (empty? files)
-        (exit! 1 (str "No spec files found for " (pr-str spec))))
+        (throw (ex-info (str "No spec files found for " (pr-str spec))
+                        {:exit 1})))
       (when-not approved
-        (exit! 1 (str "No current approved proposal for "
-                      (str/join ", " files) " at " hash)))
+        (throw (ex-info (str "No current approved proposal for "
+                             (str/join ", " files) " at " hash)
+                        {:exit 1})))
       (println "spec approved:" (:id approved))
       (record-stage state "spec" tree
                     [{:proposal (:id approved) :hash hash :files files}]
@@ -533,25 +575,29 @@
     (when (seq blocked)
       (exit! 1 (str "Stage " name " is blocked by: "
                     (str/join ", " blocked))))
-    (let [state
-          (if (= :operator (:approval stage))
-            (check-spec root state stage tree)
-            (do
-              (doseq [command (:runs stage)]
-                (run-command root command))
-              (let [patterns (:evidence stage)
-                    missing (missing-evidence root patterns)]
-                (when (seq missing)
-                  (exit! 1 (str "Evidence missing: "
-                                (str/join ", " missing))))
-                (record-stage state name tree
-                              (collect-evidence root patterns)
-                              (resolve-inputs root stage)))))]
-      (save-state root (:task config) state)
-      (update-board! root config (or (:card state)
-                                     (fallback-card root config []))
-                     name)
-      (println (str "stage " name ": done at tree " tree)))))
+    (let [state (begin-stage! root config state name tree)]
+      (try
+        (let [state
+              (if (= :operator (:approval stage))
+                (check-spec root state stage tree)
+                (do
+                  (doseq [command (:runs stage)]
+                    (run-command root command))
+                  (let [patterns (:evidence stage)
+                        missing (missing-evidence root patterns)]
+                    (when (seq missing)
+                      (throw (ex-info (str "Evidence missing: "
+                                           (str/join ", " missing))
+                                      {:exit 1})))
+                    (record-stage state name tree
+                                  (collect-evidence root patterns)
+                                  (resolve-inputs root stage)))))]
+          (finish-stage! root config state name))
+        (catch Throwable error
+          (let [code (or (:exit (ex-data error)) 1)
+                message (or (ex-message error) (str error))]
+            (fail-stage! root config state code message)
+            (exit! code message)))))))
 
 (defn pending-proposals [state]
   (->> (:proposals state)
@@ -695,8 +741,18 @@
 (defn stage-status [config state stage tree]
   (let [name (:name stage)
         record (get-in state [:stages name])
-        blocked (blocked-by config state name tree)]
+        blocked (blocked-by config state name tree)
+        running (:running state)
+        attempt (when (= name (:stage running)) running)
+        attempt-status (when attempt
+                         (case (:status attempt)
+                           :failed "failed"
+                           :running (if (process-alive? (:pid attempt))
+                                      "running"
+                                      "interrupted")
+                           nil))]
     (cond
+      attempt-status attempt-status
       (and record (= tree (:tree record))) "done"
       record "stale"
       (:optional stage) "n/a"
@@ -757,13 +813,17 @@
       :spec_approval_mode (name (spec-approval-mode root))
       :spec_approved (spec-approved? root config state)
       :complete (get-in state [:complete :tree])
+      :running (:running state)
       :stages (mapv (fn [stage]
                       {:name (:name stage)
                        :status (stage-status config state stage tree)
                        :command (:runs stage)
                        :evidence (:evidence stage)
                        :inputs (vec (resolve-inputs root stage))
-                       :recorded-at (get-in state [:stages (:name stage) :at])})
+                       :recorded-at (get-in state [:stages (:name stage) :at])
+                       :attempt (when (= (:name stage)
+                                         (get-in state [:running :stage]))
+                                  (:running state))})
                     (:stages config))})))
 
 (defn complete! [root config state]

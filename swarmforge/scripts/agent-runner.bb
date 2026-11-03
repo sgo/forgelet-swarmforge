@@ -3,6 +3,7 @@
 (ns agent-runner
   (:require [babashka.fs :as fs]
             [babashka.process :as process]
+            [clojure.edn :as edn]
             [clojure.java.shell :as sh]
             [clojure.string :as str]))
 
@@ -10,6 +11,8 @@
   (str "Usage:\n"
        "  agent-runner.bb --root <project> [--agent-command CMD] [--once]\n"
        "                  [--no-serve] [--interval SECONDS]\n"
+       "                  [--idle-nudge-seconds SECONDS]\n"
+       "                  [--nudge-cooldown-seconds SECONDS]\n"
        "  agent-runner.bb --root <project> --stop\n"
        "  agent-runner.bb --root <project> --stop-agent\n\n"
        "--stop closes the relay and the agent session; --stop-agent closes only\n"
@@ -18,7 +21,10 @@
        "requests are pasted into that session with an Answer with instruction;\n"
        "the agent writes ./tmp/answer.txt and answers through the dashboard\n"
        "tool. forge-attach opens the same session. The agent must end every\n"
-       "turn with <<AGENT READY>>."))
+       "turn with <<AGENT READY>>.\n\n"
+       "A request is pasted once. If its agent goes idle without answering, the\n"
+       "relay sends a short continuation nudge by request id after the idle\n"
+       "interval, rather than repasting the original task."))
 
 (defn usage []
   (println usage-text))
@@ -32,7 +38,9 @@
 
 (defn parse-args [args]
   (loop [remaining args
-         options {:interval 2}]
+         options {:interval 2
+                  :idle-nudge-seconds 300
+                  :nudge-cooldown-seconds 900}]
     (if (empty? remaining)
       options
       (let [argument (first remaining)]
@@ -51,6 +59,18 @@
           (if-let [value (second remaining)]
             (recur (nnext remaining) (assoc options :interval (Long/parseLong value)))
             (exit! 1 "--interval needs a value"))
+
+          (= argument "--idle-nudge-seconds")
+          (if-let [value (second remaining)]
+            (recur (nnext remaining)
+                   (assoc options :idle-nudge-seconds (Long/parseLong value)))
+            (exit! 1 "--idle-nudge-seconds needs a value"))
+
+          (= argument "--nudge-cooldown-seconds")
+          (if-let [value (second remaining)]
+            (recur (nnext remaining)
+                   (assoc options :nudge-cooldown-seconds (Long/parseLong value)))
+            (exit! 1 "--nudge-cooldown-seconds needs a value"))
 
           (= argument "--once")
           (recur (next remaining) (assoc options :once true))
@@ -206,7 +226,9 @@
       (:out result))))
 
 (defn busy? [text]
-  (str/includes? (str/lower-case (or text "")) "esc to interrupt"))
+  (let [text (str/lower-case (or text ""))]
+    (or (str/includes? text "esc to interrupt")
+        (str/includes? text "waiting for background terminal"))))
 
 (declare request-in-composer?)
 
@@ -340,42 +362,159 @@
 (defn request-in-composer? [root id]
   (str/includes? (composer-tail root) (str "[phone " id "]")))
 
+(defn delivery-state-dir [root]
+  (fs/path root ".swarmforge" "agent-runner" "requests"))
+
+(defn delivery-state-file [root id]
+  (fs/path (delivery-state-dir root)
+           (str (str/replace (str id) #"[^0-9A-Za-z._-]" "_") ".edn")))
+
+(defn delivery-state [root id]
+  (let [file (delivery-state-file root id)]
+    (when (fs/regular-file? file)
+      (try
+        (edn/read-string (slurp (str file)))
+        (catch Exception _ nil)))))
+
+(defn write-delivery-state! [root id state]
+  (let [file (delivery-state-file root id)
+        temporary (fs/path (fs/parent file)
+                           (str (fs/file-name file) ".tmp"))]
+    (fs/create-dirs (fs/parent file))
+    (spit (str temporary) (str (pr-str state) "\n"))
+    (fs/move temporary file {:replace-existing true})))
+
+(defn pane-digest [text]
+  (let [bytes (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                       (.getBytes (or text "") "UTF-8"))]
+    (apply str (map #(format "%02x" %) bytes))))
+
+(defn note-activity! [root id state text]
+  (let [now (System/currentTimeMillis)
+        digest (pane-digest text)
+        busy (busy? text)
+        changed (not= digest (:pane-digest state))
+        last-activity (long (or (:last-activity-at state) 0))]
+    (if (or (and busy (>= now (+ last-activity 30000)))
+            (and (not busy) changed))
+      (let [updated (assoc state
+                           :pane-digest digest
+                           :last-activity-at now)]
+        (write-delivery-state! root id updated)
+        updated)
+      state)))
+
+(defn mark-delivered! [root request text]
+  (let [now (System/currentTimeMillis)
+        state {:delivered-at now
+               :last-activity-at now
+               :pane-digest (pane-digest text)}]
+    (write-delivery-state! root (:id request) state)
+    state))
+
+(defn request-visible? [root id]
+  (str/includes? (or (visible-pane root) "")
+                 (str "[phone " id "]")))
+
+(defn wait-until-submitted! [root id timeout-ms]
+  (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
+    (loop []
+      (cond
+        (not (request-in-composer? root id)) true
+        (>= (System/currentTimeMillis) deadline) false
+        :else (do
+                (Thread/sleep 200)
+                (recur))))))
+
 (defn deliver-request! [root request]
-  (if (request-in-composer? root (:id request))
-    ;; The earlier paste reached the composer but its Enter did not submit it.
-    ;; Submitting the text already there is safer than pasting a second copy.
-    (tmux root "send-keys" "-t" session-name "C-m")
-    (send-request! root request)))
+  (let [id (:id request)]
+    (if (request-in-composer? root id)
+      ;; The earlier paste reached the composer but its Enter did not submit it.
+      ;; Submitting the text already there is safer than pasting a second copy.
+      (tmux root "send-keys" "-t" session-name "C-m")
+      (send-request! root request))
+    (wait-until-submitted! root id 5000)))
 
 (defn request-done? [root id]
   (fs/regular-file?
    (fs/path root ".swarmforge" "dashboard" "requests" "done"
             (str id ".request"))))
 
-(defn wait-for-done! [root id timeout-ms]
-  (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
-    (loop []
-      (cond
-        (request-done? root id) true
-        (> (System/currentTimeMillis) deadline) false
-        :else (do (Thread/sleep 500) (recur))))))
+(defn continuation-text [root id]
+  (str "[phone " id "] Continuation nudge. The routed card is still open. "
+       "Continue from the current card, task note and stage state; do not "
+       "restart completed work. If blocked, use the clarification channel. "
+       "When finished, answer with: "
+       (fs/path root "swarmforge" "scripts" "pack_dashboard_request.sh")
+       " answer " id " ./tmp/answer.txt. Write only the operator-facing "
+       "answer to ./tmp/answer.txt."))
 
-(defn run-once! [root agent-command]
+(defn send-continuation! [root id]
+  (let [text (continuation-text root id)]
+    (tmux root "set-buffer" "-b" "agent-nudge" text)
+    (tmux root "paste-buffer" "-d" "-p" "-b" "agent-nudge"
+          "-t" session-name)
+    (Thread/sleep 200)
+    (tmux root "send-keys" "-t" session-name "C-m")
+    (wait-until-submitted! root id 5000)))
+
+(defn handle-delivered-request! [root request options]
+  (let [id (:id request)
+        text (or (visible-pane root) "")
+        state (note-activity! root id (delivery-state root id) text)
+        now (System/currentTimeMillis)
+        last-activity (long (or (:last-activity-at state) now))
+        last-nudge (long (or (:last-nudge-at state) 0))
+        idle-ms (* 1000 (long (:idle-nudge-seconds options)))
+        cooldown-ms (* 1000 (long (:nudge-cooldown-seconds options)))]
+    (if (and (not (busy? text))
+             (>= (- now last-activity) idle-ms)
+             (>= (- now last-nudge) cooldown-ms))
+      (do
+        (println "nudging delivered request after inactivity:" id)
+        (send-continuation! root id)
+        (write-delivery-state! root id
+                               (assoc state
+                                      :last-activity-at (System/currentTimeMillis)
+                                      :last-nudge-at now)))
+      (println "request" id "already delivered; monitoring the agent"))))
+
+(defn run-once! [root agent-command options]
   (start-agent-session! root agent-command)
   (settle-agent-session! root)
   (if-let [request (pending-request root)]
-    (let [id (:id request)]
+    (let [id (:id request)
+          state (delivery-state root id)]
       (if-not (ready? root id)
-        (println "request" id "waits: the agent is still in a turn")
         (do
-          (println (if (request-in-composer? root id)
-                     "ringing request already in the composer:"
-                     "request")
-                   id)
-          (deliver-request! root request)
-          (if (wait-for-done! root id 15000)
-            (println "answered" id)
-            (println "still pending after delivery; the next pass will ring it again:" id)))))
+          (when state
+            (note-activity! root id state (or (visible-pane root) "")))
+          (println "request" id "waits: the agent is still in a turn"))
+        (do
+          (cond
+            (request-in-composer? root id)
+            (do
+              (println "submitting request already in the composer:" id)
+              (when (deliver-request! root request)
+                (mark-delivered! root request (or (visible-pane root) ""))))
+
+            state
+            (handle-delivered-request! root request options)
+
+            (request-visible? root id)
+            (do
+              (println "request already visible in the transcript:" id)
+              (mark-delivered! root request (or (visible-pane root) "")))
+
+            :else
+            (do
+              (println "request" id)
+              (if (deliver-request! root request)
+                (do
+                  (mark-delivered! root request (or (visible-pane root) ""))
+                  (println "delivered" id))
+                (println "paste did not submit; the next pass will submit it:"
+                         id)))))))
     (println "no pending requests")))
 
 (defn -main [& args]
@@ -405,9 +544,9 @@
                      (fs/path root ".swarmforge" "pack_web.pid")))
                   (fs/delete-if-exists (pid-file root)))))
               (if (:once options)
-                (run-once! root agent-command)
+                (run-once! root agent-command options)
                 (loop []
-                  (run-once! root agent-command)
+                  (run-once! root agent-command options)
                   (Thread/sleep (* 1000 (:interval options)))
                   (recur)))))))))))
 
