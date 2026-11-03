@@ -2627,6 +2627,8 @@
                              "--test-open-project" (str root) "agent")]
       (is (zero? (:exit open)) (:err open))
       (is (fs/regular-file? (fs/path project "swarmforge/scripts/agent-runner.bb")))
+      (is (re-find #"(?m)^agent\tmaster\t.*\tswarmforge-agent\tAgent\tcodex\ttask$"
+                   (slurp (str (fs/path project ".swarmforge/roles.tsv")))))
       (is (str/includes?
            (slurp (str (fs/path root ".swarmforge" "open-projects")))
            "agent")))
@@ -2665,6 +2667,7 @@
         (is (= ["swarmforge-runtime"] (tmux-sessions runtime-socket)))
         (is (= ["swarmforge-agent"] (tmux-sessions agent-socket)))
         (is (str/includes? (slurp url) "SwarmForge"))
+        (is (str/includes? (slurp (str url "/api/state")) "\"lanes\""))
         (is (fs/regular-file? (fs/path project ".swarmforge/runtime.edn")))
         (let [duplicate (run {:dir root :env open-env :ok? false}
                              (script "pack_web.sh")

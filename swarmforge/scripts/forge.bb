@@ -264,6 +264,29 @@
       (init-git-if-needed! dest))
     {:name dir-name :path (str dest)}))
 
+(defn ensure-single-agent-role! [project]
+  (let [file (fs/path project ".swarmforge" "roles.tsv")
+        rows (when (fs/regular-file? file)
+               (->> (str/split-lines (slurp (str file)))
+                    (remove str/blank?)
+                    vec))]
+    (cond
+      (= 1 (count rows)) true
+      (seq rows)
+      (throw (ex-info (str "Single-agent project must name exactly one role: " project)
+                      {:http-status 500 :error "invalid-single-agent-role"}))
+      :else
+      (let [branch (or (not-empty
+                        (str/trim (:out (sh {:continue true}
+                                            "git" "-C" (str project)
+                                            "branch" "--show-current"))))
+                       "master")]
+        (fs/create-dirs (fs/parent file))
+        (spit (str file)
+              (format "agent\t%s\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n"
+                      branch project))
+        true))))
+
 (defn refresh! [forge name]
   (let [dest (project-dir forge name)
         pack (stored-pack dest)]
@@ -273,6 +296,7 @@
       (do
         (copy-shared-scripts! forge dest)
         (copy-shared-articles! forge dest)
+        (ensure-single-agent-role! dest)
         (let [installer (fs/path dest "swarmforge" "scripts" "install-agent-hooks.sh")]
           (when (fs/regular-file? installer)
             (process/sh {:continue true} "bash" (str installer) (str dest))))

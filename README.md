@@ -163,7 +163,9 @@ generated `sessions.tsv`. The relay identity and log are recorded in the
 project's `.swarmforge/runtime.edn` and `start.log`. A failed start stays closed,
 and opening a project whose relay died replaces that relay rather than treating
 the stale open marker as healthy. Closing removes that project's runtime,
-dashboard and agent sessions without touching another project.
+dashboard and agent sessions without touching another project. Opening a
+single-agent project also restores its required one-row `.swarmforge/roles.tsv`
+if that runtime identity is missing; a file naming several roles is rejected.
 
 An existing single-agent project can adopt structural additions from the
 current template with:
