@@ -677,6 +677,57 @@
         (sh/sh "tmux" "-S" sock "kill-server")
         (delete-tree! forge)))))
 
+(deftest an-idle-agent-submits-one-collapsed-pending-paste-without-repasting
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent")
+        sock (str (fs/path project ".swarmforge" "agent-tmux.sock"))
+        fake (fs/path project ".swarmforge" "fake-collapsed-composer.sh")
+        submission-log (fs/path project ".swarmforge" "submission.log")
+        request "req-collapsed"]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge) "agent"))))
+      (write-file (fs/path project ".swarmforge" "dashboard" "requests" "pending"
+                           (str request ".request"))
+                  (str "id: " request "\nstatus: pending\n"
+                       "created_at: 2026-11-03T14:03:39Z\n\nLarge routed card.\n"))
+      ;; Codex collapses a large bracketed paste in the idle composer. The
+      ;; request marker is no longer visible, but the sole pending request is
+      ;; already the composer contents.
+      (write-file fake
+                  (str "#!/bin/sh\n"
+                       "printf '› [Pasted Content 4096 chars]\\n'\n"
+                       "IFS= read -r line\n"
+                       "if [ -n \"$line\" ]; then\n"
+                       "  printf 'paste:%s\\n' \"$line\" >> .swarmforge/submission.log\n"
+                       "else\n"
+                       "  printf 'enter\\n' >> .swarmforge/submission.log\n"
+                       "fi\n"
+                       "mkdir -p .swarmforge/dashboard/requests/done\n"
+                       "printf 'id: " request "\\nstatus: done\\n\\nreceived\\n' "
+                       "> .swarmforge/dashboard/requests/done/" request ".request\n"
+                       "printf '• Working (1s • esc to interrupt)\\n'\n"
+                       "sleep 30\n"))
+      (fs/set-posix-file-permissions fake "rwxr-xr-x")
+      (fs/create-dirs (fs/parent sock))
+      (is (zero? (:exit
+                  (sh/sh "tmux" "-S" sock "new-session" "-d" "-s" "swarmforge-agent"
+                         "-c" (str project) (str fake)))))
+      (let [once (run project
+                      "bb" (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
+                      "--root" (str project)
+                      "--once" "--no-serve"
+                      "--agent-command" "unused")]
+        (is (zero? (:exit once)) (:err once))
+        (is (str/includes? (:out once)
+                           "submitting request already in the composer"))
+        (is (= "enter\n" (slurp (str submission-log))))
+        (is (fs/regular-file?
+             (fs/path project ".swarmforge" "dashboard" "requests" "done"
+                      (str request ".request")))))
+      (finally
+        (sh/sh "tmux" "-S" sock "kill-server")
+        (delete-tree! forge)))))
+
 (deftest a-single-agent-window-is-named-for-its-project
   (let [forge (fixture-forge)
         project (fs/path forge "projects" "propositions")

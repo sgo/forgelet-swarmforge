@@ -189,11 +189,14 @@
      :status (get entries "status")
      :body (or body "")}))
 
-(defn pending-request [root]
+(defn pending-requests [root]
   (->> (request-files root)
        (map parse-request)
        (filter #(= "pending" (:status %)))
-       first))
+       vec))
+
+(defn pending-request [root]
+  (first (pending-requests root)))
 
 (def session-name "swarmforge-agent")
 (def ready-marker "<<AGENT READY>>")
@@ -290,8 +293,7 @@
   (loop [waited 0]
     (let [text (or (visible-pane root) "")]
       (cond
-        (or (str/includes? text ready-marker)
-            (str/includes? text "Ask Codex to do anything")) true
+        (ready? root (some-> (pending-request root) :id)) true
 
         (str/includes? text "Trust this folder?")
         (do
@@ -359,8 +361,19 @@
       (str/join "\n" (subvec lines prompt-index))
       "")))
 
+(def collapsed-paste-pattern #"\[Pasted Content \d+ chars?\]")
+
+(defn collapsed-paste? [text]
+  (boolean (re-find collapsed-paste-pattern (or text ""))))
+
+(defn sole-pending-request? [root id]
+  (= [id] (mapv :id (pending-requests root))))
+
 (defn request-in-composer? [root id]
-  (str/includes? (composer-tail root) (str "[phone " id "]")))
+  (let [tail (composer-tail root)]
+    (or (str/includes? tail (str "[phone " id "]"))
+        (and (collapsed-paste? tail)
+             (sole-pending-request? root id)))))
 
 (defn delivery-state-dir [root]
   (fs/path root ".swarmforge" "agent-runner" "requests"))

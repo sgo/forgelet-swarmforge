@@ -52,3 +52,12 @@ changing layer code directly.
 - Composition into the active forge remains optional `release` work.
 - Layer-appropriate gates that are intentionally absent are explained in
   `STAGES.md` instead of being silently omitted.
+
+## Runner composer follow-up
+
+- Reproduce a large request that Codex has already pasted and collapsed to
+  `[Pasted Content N chars]` in the idle composer.
+- When exactly one request is pending and that request is already in the
+  composer, the next runner pass must send Enter and submit the existing paste
+  once.
+- It must not repaste the full card.
