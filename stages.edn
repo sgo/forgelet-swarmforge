@@ -1,0 +1,15 @@
+{:task "forgelet-swarmforge"
+ :stages
+ [{:name "spec"
+   :approval :operator
+   :spec ["tasks/*.md"]
+   :stamp ["tasks"]}
+  {:name "code"
+   :runs [["bb" "test"]]
+   :evidence []
+   :stamp [:whole-tree]}
+  {:name "release"
+   :optional true
+   :runs []
+   :evidence []
+   :stamp ["README.md"]}]}
