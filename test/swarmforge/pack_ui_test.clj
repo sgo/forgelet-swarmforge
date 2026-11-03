@@ -2448,6 +2448,27 @@
     (write-file (fs/path root "packs" pack "swarmforge/roles/specifier.prompt") "spec\n")
     (write-file (fs/path root "packs" pack "swarmforge/roles/coder.prompt") "coder\n")))
 
+(defn use-full-forge-scripts! [root]
+  (let [dest (fs/path root "swarmforge" "scripts")]
+    (fs/delete-tree dest)
+    (fs/copy-tree (fs/path repo-root "swarmforge" "scripts") dest)))
+
+(defn tmux-sessions [socket]
+  (if (fs/exists? socket)
+    (let [result (run {:dir repo-root :ok? false}
+                      "tmux" "-S" (str socket)
+                      "list-sessions" "-F" "#{session_name}")]
+      (if (zero? (:exit result))
+        (->> (str/split-lines (:out result))
+             (remove str/blank?)
+             sort
+             vec)
+        []))
+    []))
+
+(def supervised-fake-agent
+  "sh -c 'echo \"<<AGENT READY>>\"; while IFS= read -r line; do case \"$line\" in \"[phone \"*) id=${line#\\[phone }; id=${id%%]*}; mkdir -p tmp; printf \"fake answer from %s\\n\" \"$id\" > tmp/answer.txt; ./swarmforge/scripts/pack_dashboard_request.sh answer \"$id\" ./tmp/answer.txt; echo \"<<AGENT READY>>\";; esac; done'")
+
 (deftest forge-infers-github-project-name
   (let [result (pack-web (tmp-dir) true "--test-inferred-name" "unclebob/swarm-forge" "github")]
     (is (zero? (:exit result)))
@@ -2615,6 +2636,167 @@
       (is (not (str/includes?
                 (slurp (str (fs/path root ".swarmforge" "open-projects")))
                 "agent"))))))
+
+(deftest a-single-agent-open-is-supervised-and-recovers
+  ;; Given a composed single-agent project
+  ;; When the forge opens it, its relay disappears, and it is opened again
+  ;; Then the dashboard and agent live under one project relay, recovery replaces
+  ;; that relay, and close removes both the relay and its children
+  (let [root (tmp-dir)
+        project (fs/path root "projects/agent")
+        runtime-socket (fs/path project ".swarmforge/runtime-tmux.sock")
+        agent-socket (fs/path project ".swarmforge/agent-tmux.sock")
+        url-file (fs/path project ".swarmforge/dashboard-url")
+        open-env {"SWARMFORGE_AGENT_COMMAND" supervised-fake-agent
+                  "SWARMFORGE_OPEN_BROWSER" "0"
+                  "SWARMFORGE_PREVENT_SLEEP" "0"
+                  "SWARMFORGE_RUNTIME_READY_TIMEOUT_MS" "10000"}]
+    (try
+      (seed-mini-forge! root)
+      (use-full-forge-scripts! root)
+      (write-file (fs/path project ".swarmforge/single-agent") "agent\n")
+      (let [opened (pack-web-env root open-env
+                                 "--test-open-project" (str root) "agent")
+            url (str/trim (slurp (str url-file)))]
+        (is (zero? (:exit opened)) (:err opened))
+        (is (str/includes?
+             (slurp (str (fs/path root ".swarmforge" "open-projects")))
+             "agent"))
+        (is (= ["swarmforge-runtime"] (tmux-sessions runtime-socket)))
+        (is (= ["swarmforge-agent"] (tmux-sessions agent-socket)))
+        (is (str/includes? (slurp url) "SwarmForge"))
+        (is (fs/regular-file? (fs/path project ".swarmforge/runtime.edn")))
+        (let [duplicate (run {:dir root :env open-env :ok? false}
+                             (script "pack_web.sh")
+                             "--test-open-project" (str root) "agent")]
+          (is (not (zero? (:exit duplicate))))
+          (is (str/includes? (str (:err duplicate) (:out duplicate))
+                             "already open"))
+          (is (= ["swarmforge-runtime"] (tmux-sessions runtime-socket)))))
+
+      (run {:dir root} "tmux" "-S" (str runtime-socket)
+           "kill-session" "-t" "=swarmforge-runtime")
+      (is (= [] (tmux-sessions runtime-socket)))
+      (let [recovered (pack-web-env root open-env
+                                    "--test-open-project" (str root) "agent")]
+        (is (zero? (:exit recovered)) (:err recovered))
+        (is (= ["swarmforge-runtime"] (tmux-sessions runtime-socket)))
+        (is (= ["swarmforge-agent"] (tmux-sessions agent-socket))))
+
+      (let [closed (pack-web-env root {}
+                                 "--test-close-project" (str root) "agent")
+            open-file (fs/path root ".swarmforge/open-projects")]
+        (is (zero? (:exit closed)) (:err closed))
+        (is (= [] (tmux-sessions runtime-socket)))
+        (is (= [] (tmux-sessions agent-socket)))
+        (is (not (fs/exists? url-file)))
+        (is (not (fs/exists?
+                  (fs/path project ".swarmforge/runtime.edn"))))
+        (is (not (str/includes? (slurp (str open-file)) "agent"))))
+      (finally
+        (run {:dir root :ok? false} (script "pack_web.sh")
+             "--test-close-project" (str root) "agent")
+        (when (fs/exists? runtime-socket)
+          (run {:dir root :ok? false} "tmux" "-S" (str runtime-socket)
+               "kill-server"))
+        (when (fs/exists? agent-socket)
+          (run {:dir root :ok? false} "tmux" "-S" (str agent-socket)
+               "kill-server"))))))
+
+(deftest a-failed-single-agent-start-leaves-the-project-closed
+  ;; Given a project whose agent runner exits immediately
+  ;; When the forge tries to open it
+  ;; Then no runtime is left behind and the forge does not record it as open
+  (let [root (tmp-dir)
+        project (fs/path root "projects/agent")
+        runtime-socket (fs/path project ".swarmforge/runtime-tmux.sock")]
+    (try
+      (seed-mini-forge! root)
+      (use-full-forge-scripts! root)
+      (write-file (fs/path project ".swarmforge/single-agent") "agent\n")
+      (write-file (fs/path root "swarmforge/scripts/agent-runner.bb")
+                  "#!/usr/bin/env bb\n(println \"runner failed\")\n(System/exit 9)\n")
+      (let [opened (run {:dir root
+                         :env {"SWARMFORGE_PREVENT_SLEEP" "0"
+                               "SWARMFORGE_RUNTIME_READY_TIMEOUT_MS" "3000"}
+                         :ok? false}
+                        (script "pack_web.sh")
+                        "--test-open-project" (str root) "agent")
+            open-file (fs/path root ".swarmforge/open-projects")]
+        (is (not (zero? (:exit opened))))
+        (is (str/includes? (str (:err opened) (:out opened))
+                           "Project runtime did not become ready"))
+        (is (= [] (tmux-sessions runtime-socket)))
+        (is (or (not (fs/exists? open-file))
+                (not (str/includes? (slurp (str open-file)) "agent")))))
+      (finally
+        (when (fs/exists? runtime-socket)
+          (run {:dir root :ok? false} "tmux" "-S" (str runtime-socket)
+               "kill-server"))))))
+
+(deftest a-pack-open-is-supervised-and-closes-only-its-runtime
+  ;; Given a pack project whose runner starts one role session
+  ;; When the forge opens it and later closes it
+  ;; Then the role and its relay survive the opening command, and close removes
+  ;; exactly that project's relay and role session
+  (let [root (tmp-dir)
+        project (fs/path root "projects/pack")
+        runtime-socket (fs/path project ".swarmforge/runtime-tmux.sock")
+        project-socket (fs/path project ".swarmforge/role-tmux.sock")
+        project-socket-file (fs/path project ".swarmforge/tmux-socket")
+        neighbour-socket (fs/path root "neighbour.sock")]
+    (try
+      (seed-mini-forge! root)
+      (write-file (fs/path root "swarmforge/scripts/swarmforge.bb")
+                  (str "#!/usr/bin/env bb\n"
+                       "(require '[babashka.fs :as fs] '[babashka.process :as process])\n"
+                       "(let [[action root] *command-line-args*\n"
+                       "      state (fs/path root \".swarmforge\")\n"
+                       "      socket-file (fs/path state \"tmux-socket\")\n"
+                       "      socket (fs/path state \"role-tmux.sock\")]\n"
+                       "  (cond\n"
+                       "    (= action \"--start-project\")\n"
+                       "    (do\n"
+                       "      (fs/create-dirs state)\n"
+                       "      (spit (str socket-file) (str socket \"\\n\"))\n"
+                       "      (process/sh \"tmux\" \"-S\" (str socket) \"new-session\" \"-d\"\n"
+                       "                  \"-s\" \"swarmforge-specifier\" \"sleep\" \"120\")\n"
+                       "      (spit (str (fs/path state \"sessions.tsv\"))\n"
+                       "            \"1\\tspecifier\\tswarmforge-specifier\\tSpecifier\\tcodex\\n\"))\n"
+                       "    (= action \"--stop-project\")\n"
+                       "    (process/sh {:continue true} \"tmux\" \"-S\" (str socket) \"kill-server\")\n"
+                       "    :else (System/exit 2)))\n"))
+      (write-file (fs/path project ".swarmforge/pack") "two-pack\n")
+      (run {:dir root} "tmux" "-S" (str neighbour-socket)
+           "new-session" "-d" "-s" "neighbour" "sleep" "120")
+      (let [opened (pack-web-env root {"SWARMFORGE_PREVENT_SLEEP" "0"
+                                      "SWARMFORGE_RUNTIME_READY_TIMEOUT_MS" "10000"}
+                                 "--test-open-project" (str root) "pack")]
+        (is (zero? (:exit opened)) (:err opened))
+        (is (= ["swarmforge-runtime"] (tmux-sessions runtime-socket)))
+        (is (= ["swarmforge-specifier"] (tmux-sessions project-socket)))
+        (is (str/includes?
+             (slurp (str (fs/path root ".swarmforge/open-projects")))
+             "pack")))
+      (let [closed (pack-web-env root {}
+                                 "--test-close-project" (str root) "pack")]
+        (is (zero? (:exit closed)) (:err closed))
+        (is (= [] (tmux-sessions runtime-socket)))
+        (is (= [] (tmux-sessions project-socket)))
+        (is (fs/regular-file? project-socket-file))
+        (is (= ["neighbour"] (tmux-sessions neighbour-socket))))
+      (finally
+        (run {:dir root :ok? false} (script "pack_web.sh")
+             "--test-close-project" (str root) "pack")
+        (when (fs/exists? runtime-socket)
+          (run {:dir root :ok? false} "tmux" "-S" (str runtime-socket)
+               "kill-server"))
+        (when (fs/exists? project-socket)
+          (run {:dir root :ok? false} "tmux" "-S" (str project-socket)
+               "kill-server"))
+        (when (fs/exists? neighbour-socket)
+          (run {:dir root :ok? false} "tmux" "-S" (str neighbour-socket)
+               "kill-server"))))))
 
 (deftest forge-refresh-keeps-mission-and-conf
   (let [root (tmp-dir)]

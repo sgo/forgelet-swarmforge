@@ -827,20 +827,87 @@
         (finally (.close socket))))
     (catch Exception _ false)))
 
+(defn port-listening? [port]
+  (and (command-exists? "lsof")
+       (zero? (:exit (process/sh {:continue true}
+                                 "lsof" "-nP" (str "-iTCP:" port)
+                                 "-sTCP:LISTEN")))))
+
+(defn preferred-port-usable? [port]
+  ;; A recently used server can leave its port in TIME_WAIT. The strict bind in
+  ;; port-available? rejects that even though no process owns the port and the
+  ;; dashboard can bind it again. lsof tells the two apart without treating a
+  ;; live listener as free.
+  (or (port-available? port)
+      (and (command-exists? "lsof")
+           (not (port-listening? port)))))
+
 (defn test-dashboard-address! [root port]
   (let [ctx {:state-dir (fs/path root ".swarmforge")}]
     (println (str "previous=" (or (previous-dashboard-port ctx) "none")
                   " available=" (port-available? port)))))
 
+(def dashboard-session "swarmforge-dashboard")
+
+(defn dashboard-socket [ctx]
+  (str (fs/path (:state-dir ctx) "dashboard-tmux.sock")))
+
+(defn dashboard-target []
+  (str "=" dashboard-session))
+
+(defn dashboard-running? [ctx]
+  (zero? (:exit (process/sh {:continue true}
+                            "tmux" "-S" (dashboard-socket ctx)
+                            "has-session" "-t" (dashboard-target)))))
+
+(defn wait-for-dashboard-exit [ctx timeout-ms]
+  (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
+    (loop []
+      (cond
+        (not (dashboard-running? ctx)) true
+        (> (System/currentTimeMillis) deadline) false
+        :else (do (Thread/sleep 100) (recur))))))
+
+(defn dashboard-process?
+  "Whether PID is the dashboard this forge owns. A PID file can outlive the
+  process, and the operating system can later give that number to something
+  unrelated; matching the command before signalling it keeps stop scoped to this
+  dashboard."
+  [ctx pid]
+  (and (process-alive? pid)
+       (let [command (:out (process/sh {:continue true}
+                                      "ps" "-p" pid "-o" "command="))]
+         (and (str/includes? command "pack_web")
+              (str/includes? command (str "--serve " (:working-dir ctx)))))))
+
+(defn stop-dashboard-process! [ctx pid]
+  (when (dashboard-process? ctx pid)
+    (process/sh {:continue true} "kill" "-TERM" pid)
+    ;; The dashboard reuses its last port when that port is free, so the old
+    ;; server has to be gone before the new one tries to bind it. A wedged
+    ;; server gets one bounded escalation rather than leaving the next start to
+    ;; fail against a port it still holds.
+    (when-not (wait-for-exit pid 5000)
+      (when (dashboard-process? ctx pid)
+        (process/sh {:continue true} "kill" "-KILL" pid)
+        (wait-for-exit pid 1000)))))
+
 (defn stop-existing-pack-web! [ctx]
   (let [file (pack-web-pid-file ctx)
         pid (when (fs/regular-file? file)
               (not-empty (str/trim (slurp (str file)))))]
+    (when (dashboard-running? ctx)
+      (process/sh {:continue true}
+                  "tmux" "-S" (dashboard-socket ctx)
+                  "kill-session" "-t" (dashboard-target))
+      (when-not (wait-for-dashboard-exit ctx 5000)
+        (fail! (str red "Error:" reset
+                    " Dashboard supervisor did not stop: "
+                    (dashboard-socket ctx)))))
+    ;; This also stops a dashboard left by the previous detached lifecycle, on
+    ;; the first start after an upgrade.
     (when pid
-      (process/sh {:continue true} "kill" "-TERM" pid)
-      ;; The dashboard reuses its last port when that port is free, so the old
-      ;; server has to be gone before the new one tries to bind it.
-      (wait-for-exit pid 5000))
+      (stop-dashboard-process! ctx pid))
     (fs/delete-if-exists file)
     (fs/delete-if-exists (dashboard-url-file ctx))))
 
@@ -851,6 +918,45 @@
   (when (and (open-browser?) (command-exists? "open"))
     (process/sh {:continue true} "open" url)))
 
+(defn dashboard-status [ctx]
+  (let [url-file (dashboard-url-file ctx)
+        pid-file (pack-web-pid-file ctx)
+        url (when (fs/regular-file? url-file)
+              (not-empty (str/trim (slurp (str url-file)))))
+        pid (when (fs/regular-file? pid-file)
+              (not-empty (str/trim (slurp (str pid-file)))))]
+    {:url url
+     :pid pid
+     :supervised (dashboard-running? ctx)
+     :process (boolean (and pid (dashboard-process? ctx pid)))
+     :socket (dashboard-socket ctx)
+     :log (str (fs/path (:state-dir ctx) "dashboard.log"))}))
+
+(defn print-dashboard-status! [ctx]
+  (let [{:keys [url pid supervised process socket log]} (dashboard-status ctx)]
+    (println (str "supervisor=" (if supervised "running" "stopped")))
+    (println (str "process=" (if process "running" "stopped")))
+    (println (str "pid=" (or pid "none")))
+    (println (str "url=" (or url "none")))
+    (println (str "socket=" socket))
+    (println (str "log=" log))))
+
+(defn dashboard-log-tail [ctx]
+  (let [log (fs/path (:state-dir ctx) "dashboard.log")]
+    (when (fs/regular-file? log)
+      (->> (str/split-lines (slurp (str log)))
+           (take-last 20)
+           (str/join "\n")))))
+
+(defn fail-dashboard! [ctx message]
+  (when (dashboard-running? ctx)
+    (process/sh {:continue true}
+                "tmux" "-S" (dashboard-socket ctx)
+                "kill-session" "-t" (dashboard-target)))
+  (let [tail (dashboard-log-tail ctx)]
+    (fail! (str red "Error:" reset " " message
+                (when-not (str/blank? tail) (str "\n" tail))))))
+
 (defn start-pack-web! [ctx]
   ;; The dashboard's address is the operator's bookmark, so it keeps the port it
   ;; served on last time whenever that port is free. A fresh port on every start
@@ -858,18 +964,33 @@
   ;; forge or another program, the dashboard falls back to a random one.
   (let [previous (previous-dashboard-port ctx)]
     (stop-existing-pack-web! ctx)
+    (fs/create-dirs (:state-dir ctx))
     (let [script (str (fs/path (:script-dir ctx) "pack_web.sh"))
           log (fs/path (:state-dir ctx) "dashboard.log")
-          port (when (and previous (port-available? previous)) previous)]
-      (process/process (cond-> [script "--serve" (str (:working-dir ctx))]
-                         port (conj port))
-                       {:out (str log) :err :out})
-    (when-not (wait-for-file (dashboard-url-file ctx) 5000)
-      (fail! (str red "Error:" reset " Dashboard did not start.")))
-    (let [url (str/trim (slurp (str (dashboard-url-file ctx))))]
-      (println (str green "Dashboard: " url reset))
-      (maybe-open-browser! url)
-      url))))
+          port (when (and previous (preferred-port-usable? previous)) previous)
+          command (str/join " "
+                            (map sq
+                                 (into (or (sleep-inhibitor-prefix) [])
+                                       (cond-> [script "--serve" (str (:working-dir ctx))]
+                                         port (conj (str port))))))
+          inner (str "cd " (sq (str (:working-dir ctx)))
+                     " && exec " command
+                     " >> " (sq (str log)) " 2>&1")
+          started (process/sh {:continue true}
+                              "tmux" "-S" (dashboard-socket ctx)
+                              "new-session" "-d" "-s" dashboard-session
+                              "-c" (str (:working-dir ctx))
+                              inner)]
+      (when-not (zero? (:exit started))
+        (fail-dashboard! ctx (str "Dashboard did not start: " (:err started))))
+      (when-not (wait-for-file (dashboard-url-file ctx) 8000)
+        (fail-dashboard! ctx "Dashboard did not announce an address."))
+      (when-not (dashboard-running? ctx)
+        (fail-dashboard! ctx "Dashboard exited during startup."))
+      (let [url (str/trim (slurp (str (dashboard-url-file ctx))))]
+        (println (str green "Dashboard: " url reset))
+        (maybe-open-browser! url)
+        url))))
 
 (defn context [working-dir]
   (let [working-dir (fs/absolutize (fs/path working-dir))
@@ -1252,7 +1373,11 @@
                            vec)
                       [])]
       (doseq [name lingering]
-        (run-stop-project! (str (fs/path (:working-dir ctx) "projects" name))))
+        ;; Close through the same owner the dashboard uses. The low-level
+        ;; project cleanup below stops pack sessions, but it does not own the
+        ;; durable project relay or a single-agent dashboard; calling it alone
+        ;; here leaves those children behind across a forge restart.
+        (run-forge-project! root name false))
       (fs/create-dirs (:state-dir ctx))
       (spit (str open-file) ""))
     (kill-existing-sessions! ctx)
@@ -1353,6 +1478,16 @@
     (println (str (boolean (fs/exists? (dashboard-url-file ctx))) " "
                   (boolean (fs/exists? (pack-web-pid-file ctx)))))))
 
+(defn test-start-pack-web! [root]
+  (start-pack-web! (context root)))
+
+(defn test-stop-pack-web! [root]
+  (stop-existing-pack-web! (context root))
+  (print-dashboard-status! (context root)))
+
+(defn test-dashboard-status! [root]
+  (print-dashboard-status! (context root)))
+
 (defn -main [& args]
   (case (first args)
     "--test-parse" (test-parse! (or (second args) (System/getProperty "user.dir")))
@@ -1370,6 +1505,9 @@
     "--test-sleep-inhibitor-prefix" (test-sleep-inhibitor-prefix!)
     "--test-ensure-codex-trust" (test-ensure-codex-trust! (second args))
     "--test-reset-pack-web-state" (test-reset-pack-web-state! (second args))
+    "--test-start-pack-web" (test-start-pack-web! (second args))
+    "--test-stop-pack-web" (test-stop-pack-web! (second args))
+    "--dashboard-status" (test-dashboard-status! (second args))
     "--test-tmux-base-indexes" (test-tmux-base-indexes! (second args))
     "--test-dashboard-address" (test-dashboard-address! (second args) (nth args 2))
     "--test-create-role-session" (test-create-role-session! (second args) (nth args 2) (nth args 3 nil))

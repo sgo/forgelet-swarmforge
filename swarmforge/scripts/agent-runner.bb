@@ -86,14 +86,24 @@
     (when (fs/regular-file? file)
       (not-empty (str/trim (slurp (str file)))))))
 
+(defn runner-process? [root pid]
+  (and (zero? (:exit (sh/sh {:continue true} "kill" "-0" pid)))
+       (let [command (:out (sh/sh {:continue true}
+                                  "ps" "-p" pid "-o" "command="))]
+         (and (str/includes? command "agent-runner")
+              (str/includes? command (str "--root " root))))))
+
 (declare stop-agent!)
 
 (defn stop! [root]
   (when-let [pid (running-pid root)]
-    (let [result (sh/sh "kill" pid)]
-      (if (zero? (:exit result))
-        (println (str "Stopped agent runner " pid))
-        (println (str "Agent runner " pid " is not running")))))
+    (if (runner-process? root pid)
+      (let [result (sh/sh {:continue true} "kill" pid)]
+        (if (zero? (:exit result))
+          (println (str "Stopped agent runner " pid))
+          (println (str "Agent runner " pid " is not running"))))
+      (println (str "Ignored stale agent runner PID " pid)))
+    (fs/delete-if-exists (pid-file root)))
   (stop-agent! root))
 
 (defn dashboard-url [root]
@@ -103,10 +113,12 @@
 
 (defn dashboard-up? [url]
   (try
-    (let [connection (.openConnection (java.net.URL. (str url "/api/state")))]
-      (.setConnectTimeout connection 1000)
-      (.setReadTimeout connection 1000)
-      (with-open [_ (.getInputStream connection)] true))
+    ;; This predicate runs inside Babashka's SCI, which does not permit the
+    ;; HttpURLConnection response/timeout methods. Reading the project page is
+    ;; the same liveness boundary the bridge uses, and a dead local address
+    ;; fails without waiting.
+    (slurp (str url "/"))
+    true
     (catch Exception _ false)))
 
 (defn start-dashboard! [root]

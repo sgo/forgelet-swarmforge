@@ -42,6 +42,26 @@
 (defn script [name]
   (str (fs/path scripts-dir name)))
 
+(defn tmux-session-names [socket]
+  (let [result (run {:dir repo-root :ok? false}
+                    "tmux" "-S" socket "list-sessions" "-F" "#{session_name}")]
+    (if (zero? (:exit result))
+      (->> (str/split-lines (:out result))
+           (remove str/blank?)
+           sort
+           vec)
+      [])))
+
+(defn dashboard-http-reachable? [url]
+  (try
+    (slurp url)
+    true
+    (catch Exception _
+      false)))
+
+(defn kill-tmux-server! [socket]
+  (run {:dir repo-root :ok? false} "tmux" "-S" socket "kill-server"))
+
 (defn open-projects-names [forge]
   (let [file (fs/path forge ".swarmforge" "open-projects")]
     (if (fs/regular-file? file)
@@ -614,6 +634,119 @@
         (is (not (fs/exists? (fs/path root ".swarmforge/dashboard-url"))))
         (is (not (fs/exists? (fs/path root ".swarmforge/pack_web.pid")))))
       (finally
+        (fs/delete-tree root)))))
+
+(deftest a-forge-dashboard-is-one-supervised-runtime
+  ;; Given a forge with no dashboard running
+  ;; When SwarmForge starts its dashboard
+  ;; Then one tmux session owns a live dashboard after the launcher exits, and
+  ;; stop removes that session and process without touching a sibling session
+  (let [root (tmp-dir)
+        state (fs/path root ".swarmforge")
+        socket (str (fs/path state "dashboard-tmux.sock"))
+        url-file (fs/path state "dashboard-url")
+        pid-file (fs/path state "pack_web.pid")]
+    (try
+      (let [started (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+                         (script "swarmforge.bb")
+                         "--test-start-pack-web" (str root))
+            url (str/trim (slurp (str url-file)))
+            pid (str/trim (slurp (str pid-file)))
+            status (run {:dir root} (script "swarmforge.bb")
+                        "--dashboard-status" (str root))]
+        (is (str/includes? (:out started) "Dashboard: "))
+        (is (= ["swarmforge-dashboard"] (tmux-session-names socket)))
+        (is (zero? (:exit (run {:dir root :ok? false} "kill" "-0" pid))))
+        (is (dashboard-http-reachable? url))
+        (is (str/includes? (:out status) "supervisor=running"))
+        (is (str/includes? (:out status) "process=running")))
+      (run {:dir root} "tmux" "-S" socket "new-session" "-d"
+           "-s" "dashboard-probe" "sleep" "120")
+      (let [stopped (run {:dir root} (script "swarmforge.bb")
+                         "--test-stop-pack-web" (str root))]
+        (is (str/includes? (:out stopped) "supervisor=stopped"))
+        (is (str/includes? (:out stopped) "process=stopped"))
+        (is (= ["dashboard-probe"] (tmux-session-names socket)))
+        (is (not (fs/exists? url-file)))
+        (is (not (fs/exists? pid-file))))
+      (finally
+        (run {:dir root :ok? false} (script "swarmforge.bb")
+             "--test-stop-pack-web" (str root))
+        (kill-tmux-server! socket)
+        (fs/delete-tree root)))))
+
+(deftest a-forge-dashboard-is-idempotent-and-recovers
+  ;; Given a supervised dashboard already serving on its preferred port
+  ;; When it is started again, then killed and started a third time
+  ;; Then each start leaves exactly one supervisor on the same address
+  (let [root (tmp-dir)
+        state (fs/path root ".swarmforge")
+        socket (str (fs/path state "dashboard-tmux.sock"))
+        url-file (fs/path state "dashboard-url")]
+    (try
+      (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+           (script "swarmforge.bb") "--test-start-pack-web" (str root))
+      (let [first-url (str/trim (slurp (str url-file)))]
+        (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+             (script "swarmforge.bb") "--test-start-pack-web" (str root))
+        (is (= first-url (str/trim (slurp (str url-file)))))
+        (is (= ["swarmforge-dashboard"] (tmux-session-names socket)))
+        (is (dashboard-http-reachable? first-url))
+
+        (run {:dir root} "tmux" "-S" socket "kill-session"
+             "-t" "=swarmforge-dashboard")
+        (is (= [] (tmux-session-names socket)))
+        (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+             (script "swarmforge.bb") "--test-start-pack-web" (str root))
+        (is (= first-url (str/trim (slurp (str url-file)))))
+        (is (= ["swarmforge-dashboard"] (tmux-session-names socket)))
+        (is (dashboard-http-reachable? first-url)))
+      (finally
+        (run {:dir root :ok? false} (script "swarmforge.bb")
+             "--test-stop-pack-web" (str root))
+        (kill-tmux-server! socket)
+        (fs/delete-tree root)))))
+
+(deftest a-supervised-start-replaces-a-detached-dashboard
+  ;; Given a dashboard started by the pre-supervisor lifecycle
+  ;; When the forge is started after the upgrade
+  ;; Then the old detached process is replaced by the supervised one without
+  ;; changing the operator's saved address
+  (let [root (tmp-dir)
+        state (fs/path root ".swarmforge")
+        socket (str (fs/path state "dashboard-tmux.sock"))
+        url-file (fs/path state "dashboard-url")
+        pb (doto (java.lang.ProcessBuilder. [(script "pack_web.sh")
+                                             "--serve" (str root)])
+             (.directory (java.io.File. (str root))))
+        _ (doto (.environment pb)
+            (.put "PATH" (System/getenv "PATH"))
+            (.put "GIT_CONFIG_NOSYSTEM" "1"))
+        old (.start pb)]
+    (try
+      (is (do
+            (let [deadline (+ (System/currentTimeMillis) 5000)]
+              (loop []
+                (cond
+                  (fs/regular-file? url-file) true
+                  (> (System/currentTimeMillis) deadline) false
+                  :else (do (Thread/sleep 50) (recur))))))
+          "detached dashboard wrote its address")
+      (let [old-url (str/trim (slurp (str url-file)))]
+        (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+             (script "swarmforge.bb") "--test-start-pack-web" (str root))
+        (is (= old-url (str/trim (slurp (str url-file)))))
+        (is (= ["swarmforge-dashboard"] (tmux-session-names socket)))
+        (is (.waitFor old 5 java.util.concurrent.TimeUnit/SECONDS))
+        (is (not (.isAlive old)))
+        (is (dashboard-http-reachable? old-url)))
+      (finally
+        (run {:dir root :ok? false} (script "swarmforge.bb")
+             "--test-stop-pack-web" (str root))
+        (when (.isAlive old)
+          (.destroyForcibly old)
+          (.waitFor old))
+        (kill-tmux-server! socket)
         (fs/delete-tree root)))))
 
 (deftest grok-lieutenant-launch-waits-for-chat

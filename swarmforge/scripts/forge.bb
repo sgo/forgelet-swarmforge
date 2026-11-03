@@ -289,30 +289,252 @@
 (defn swarmforge-bb [forge]
   (str (fs/path forge "swarmforge" "scripts" "swarmforge.bb")))
 
+(def runtime-session "swarmforge-runtime")
+
+(defn runtime-socket [project]
+  (fs/path project ".swarmforge" "runtime-tmux.sock"))
+
+(defn runtime-metadata-file [project]
+  (fs/path project ".swarmforge" "runtime.edn"))
+
+(defn runtime-log-file [project]
+  (fs/path project ".swarmforge" "start.log"))
+
+(defn tmux-session?
+  [socket session]
+  (and (fs/exists? socket)
+       (zero? (:exit (process/sh {:continue true}
+                                 "tmux" "-S" (str socket)
+                                 "has-session" "-t" (str "=" session))))))
+
+(defn runtime-running? [project]
+  (tmux-session? (runtime-socket project) runtime-session))
+
+(defn runtime-timeout-ms []
+  (try
+    (Long/parseLong (or (System/getenv "SWARMFORGE_RUNTIME_READY_TIMEOUT_MS") "45000"))
+    (catch Exception _
+      45000)))
+
+(defn dashboard-ready? [project]
+  (let [file (fs/path project ".swarmforge" "dashboard-url")
+        url (when (fs/regular-file? file)
+              (not-empty (str/trim (slurp (str file)))))]
+    (when url
+      (try
+        ;; Babashka's SCI does not expose HttpURLConnection's response-code
+        ;; methods. Reading the local dashboard page tests the same boundary:
+        ;; it succeeds only when the HTTP server answers.
+        (slurp (str url "/"))
+        true
+        (catch Exception _
+          false)))))
+
+(defn agent-session-ready? [project]
+  (tmux-session? (fs/path project ".swarmforge" "agent-tmux.sock")
+                 "swarmforge-agent"))
+
+(defn project-tmux-socket [project]
+  (let [file (fs/path project ".swarmforge" "tmux-socket")]
+    (when (fs/regular-file? file)
+      (not-empty (str/trim (slurp (str file)))))))
+
+(defn pack-sessions-ready? [project]
+  (let [file (fs/path project ".swarmforge" "sessions.tsv")
+        socket (project-tmux-socket project)
+        sessions (when (fs/regular-file? file)
+                   (->> (str/split-lines (slurp (str file)))
+                        (remove str/blank?)
+                        (map #(nth (str/split % #"\t" -1) 2 nil))
+                        (remove str/blank?)
+                        vec))]
+    (boolean
+     (and socket
+          (seq sessions)
+          (every? #(tmux-session? socket %) sessions)))))
+
+(defn runtime-status [project]
+  (let [single? (single-agent? project)]
+    {:kind (if single? :single-agent :pack)
+     :session runtime-session
+     :socket (str (runtime-socket project))
+     :relay (runtime-running? project)
+     :dashboard (if single? (dashboard-ready? project) nil)
+     :agent (if single? (agent-session-ready? project) (pack-sessions-ready? project))}))
+
+(defn runtime-ready? [project]
+  (let [{:keys [relay dashboard agent]} (runtime-status project)]
+    (boolean
+     (and relay
+          (if (single-agent? project) (and dashboard agent) agent)))))
+
+(defn wait-for-runtime-ready! [project timeout-ms]
+  (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
+    (loop []
+      (cond
+        (runtime-ready? project) true
+        (or (not (runtime-running? project))
+            (> (System/currentTimeMillis) deadline)) false
+        :else (do (Thread/sleep 100) (recur))))))
+
+(defn sleep-inhibitor-prefix []
+  (when-not (= "0" (System/getenv "SWARMFORGE_PREVENT_SLEEP"))
+    (case (str/trim (:out (process/sh {:continue true} "uname" "-s")))
+      "Darwin" (when (fs/which "caffeinate")
+                 ["caffeinate" "-dims"])
+      "Linux" (when (and (fs/which "systemd-inhibit")
+                         (fs/which "systemctl"))
+                ["systemd-inhibit"
+                 "--what=sleep:idle"
+                 "--who=SwarmForge"
+                 "--why=SwarmForge project is active"])
+      nil)))
+
+(defn runtime-log-tail [project]
+  (let [log (runtime-log-file project)]
+    (when (fs/regular-file? log)
+      (->> (str/split-lines (slurp (str log)))
+           (take-last 20)
+           (str/join "\n")))))
+
+(defn process-alive? [pid]
+  (zero? (:exit (process/sh {:continue true} "kill" "-0" pid))))
+
+(defn wait-for-exit [pid timeout-ms]
+  (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
+    (loop []
+      (cond
+        (not (process-alive? pid)) true
+        (> (System/currentTimeMillis) deadline) false
+        :else (do (Thread/sleep 100) (recur))))))
+
+(defn project-dashboard-pid [project]
+  (let [file (fs/path project ".swarmforge" "pack_web.pid")]
+    (when (fs/regular-file? file)
+      (not-empty (str/trim (slurp (str file)))))))
+
+(defn project-dashboard-process?
+  "The project's PID file may remain after the relay dies. Only signal it when
+  the command still names this project's dashboard, so a reused PID cannot make
+  Close kill an unrelated process."
+  [project pid]
+  (and (process-alive? pid)
+       (let [command (:out (process/sh {:continue true}
+                                      "ps" "-p" pid "-o" "command="))]
+         (and (str/includes? command "pack_web")
+              (str/includes? command
+                             (str "--serve " project))))))
+
+(defn stop-project-dashboard! [project]
+  (when-let [pid (project-dashboard-pid project)]
+    (when (project-dashboard-process? project pid)
+      (process/sh {:continue true} "kill" "-TERM" pid)
+      (when-not (wait-for-exit pid 5000)
+        (when (project-dashboard-process? project pid)
+          (process/sh {:continue true} "kill" "-KILL" pid)
+          (wait-for-exit pid 1000)))))
+  (fs/delete-if-exists (fs/path project ".swarmforge" "pack_web.pid"))
+  (fs/delete-if-exists (fs/path project ".swarmforge" "dashboard-url")))
+
+(defn write-runtime-metadata! [project]
+  (let [file (runtime-metadata-file project)]
+    (fs/create-dirs (fs/parent file))
+    (spit (str file)
+          (pr-str {:kind (if (single-agent? project) :single-agent :pack)
+                   :session runtime-session
+                   :socket (str (runtime-socket project))
+                   :log (str (runtime-log-file project))
+                   :started-at (str (java.time.Instant/now))}))))
+
+(defn stop-runtime-relay! [project]
+  (let [socket (runtime-socket project)]
+    (when (runtime-running? project)
+      (process/sh {:continue true}
+                  "tmux" "-S" (str socket)
+                  "kill-session" "-t" (str "=" runtime-session)))
+    (let [deadline (+ (System/currentTimeMillis) 5000)]
+      (loop []
+        (cond
+          (not (runtime-running? project)) true
+          (> (System/currentTimeMillis) deadline)
+          (throw (ex-info (str "Runtime relay did not stop for " project)
+                          {:kind :runtime-stop-failed
+                           :socket (str socket)
+                           :session runtime-session}))
+          :else (do (Thread/sleep 100) (recur)))))))
+
+(declare stop-project-runtime!)
+
 (defn start-project-runtime! [forge name]
   (let [dest (project-dir forge name)
-        script (if (single-agent? dest)
-                 (str (fs/path dest "swarmforge" "scripts" "agent-runner.bb"))
-                 (str (swarmforge-bb forge)))
-        log (fs/path dest ".swarmforge" "start.log")
-        agent-command (or (not-empty (System/getenv "SWARMFORGE_AGENT_COMMAND"))
-                          (str "codex -C " (shell-quote (str dest))
-                               " --no-alt-screen"
-                               " --dangerously-bypass-approvals-and-sandbox"))
-        arguments (if (single-agent? dest)
-                    (str " --root " (shell-quote (str dest))
-                         " --agent-command " (shell-quote agent-command))
-                    (str " --start-project " (shell-quote (str dest))))]
-    (fs/create-dirs (fs/parent log))
-    ;; Through a shell that backgrounds it and goes away, so the runtime outlives
-    ;; whoever asked for it. Spawned directly it is the caller's child, and a caller
-    ;; that exits takes the project down with it: a lieutenant running
-    ;; `--open-project` from its own command line marked the forge and left nothing
-    ;; running, because the bb process that asked was gone a moment later.
-    (process/sh {:continue true}
-                "zsh" "-c"
-                (str "nohup bb " (shell-quote (str script)) arguments
-                     " > " (shell-quote (str log)) " 2>&1 &!"))))
+        project (fs/path dest)
+        socket (runtime-socket project)
+        log (runtime-log-file project)]
+    (if (and (runtime-running? project)
+             (runtime-ready? project))
+      {:name name :started false :reused true :status (runtime-status project)}
+      (do
+        (when (runtime-running? project)
+          ;; A relay without the runtime it promises is a failed start, not a
+          ;; project that can be marked open. Remove it before trying once more.
+          (stop-project-runtime! forge name))
+        (let [single? (single-agent? project)
+              script (if single?
+                       (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
+                       (str (swarmforge-bb forge)))
+              agent-command (or (not-empty (System/getenv "SWARMFORGE_AGENT_COMMAND"))
+                                (str "codex -C " (shell-quote dest)
+                                     " --no-alt-screen"
+                                     " --dangerously-bypass-approvals-and-sandbox"))
+              start-command (str/join
+                             " "
+                             (map shell-quote
+                                  (if single?
+                                    ["bb" script "--root" dest
+                                     "--agent-command" agent-command]
+                                    ["bb" script "--start-project" dest])))
+              tail (if single?
+                     start-command
+                     (str start-command "; status=$?; "
+                          "if [ $status -ne 0 ]; then exit $status; fi; "
+                          "while tmux -S " (shell-quote (str socket))
+                          " has-session 2>/dev/null; do sleep 2; done"))
+              command (str/join " "
+                                (map shell-quote
+                                     (into (or (sleep-inhibitor-prefix) [])
+                                           ["sh" "-c" tail])))
+              inner (str "cd " (shell-quote dest)
+                         " && exec " command
+                         " >> " (shell-quote (str log)) " 2>&1")]
+          (fs/create-dirs (fs/parent log))
+          (write-runtime-metadata! project)
+          (let [started (process/sh {:continue true}
+                                    "tmux" "-S" (str socket)
+                                    "new-session" "-d" "-s" runtime-session
+                                    "-c" dest inner)]
+            (when-not (zero? (:exit started))
+              (fs/delete-if-exists (runtime-metadata-file project))
+              (throw (ex-info (str "Could not start project runtime: "
+                                   (str/trim (str (:err started) (:out started))))
+                              {:kind :runtime-start-failed
+                               :name name
+                               :log (str log)})))
+          (when-not (wait-for-runtime-ready! project (runtime-timeout-ms))
+            (let [status (runtime-status project)
+                  tail (runtime-log-tail project)]
+              (try
+                (stop-project-runtime! forge name)
+                (catch Exception _))
+              (throw (ex-info (str "Project runtime did not become ready: " name
+                                   "\nstatus: " (pr-str status)
+                                   (when-not (str/blank? tail)
+                                     (str "\n" tail)))
+                              {:kind :runtime-not-ready
+                               :name name
+                               :status status
+                               :log (str log)}))))
+          {:name name :started true :reused false
+           :status (runtime-status project)}))))))
 
 (defn stop-project-runtime! [forge name]
   (let [dest (str (project-dir forge name))
@@ -323,19 +545,29 @@
         (process/sh {:continue true} "bb" runner "--root" dest "--stop")
         (process/sh {:continue true} "bb" runner "--root" dest "--stop-agent"))
       (let [script (swarmforge-bb forge)]
-        (process/sh {:continue true} "bb" script "--stop-project" dest)))))
+        (process/sh {:continue true} "bb" script "--stop-project" dest)))
+    (stop-runtime-relay! project)
+    (stop-project-dashboard! project)
+    (fs/delete-if-exists (runtime-metadata-file project))
+    {:name name :running false}))
 
 (defn open-project! [forge name]
-  (when-not (fs/directory? (project-dir forge name))
-    (throw (ex-info (str "Unknown project: " name) {:http-status 404})))
-  (when (project-open? forge name)
-    (throw (ex-info (str "Project already open: " name)
-                    {:http-status 409 :error "already-open"})))
-  (refresh! forge name)
-  (when-not (skip-start?)
-    (start-project-runtime! forge name))
-  (mark-open! forge name)
-  {:name name :open true})
+  (let [project (project-dir forge name)]
+    (when-not (fs/directory? project)
+      (throw (ex-info (str "Unknown project: " name) {:http-status 404})))
+    (when (and (project-open? forge name)
+               (or (skip-start?) (runtime-ready? project)))
+      (throw (ex-info (str "Project already open: " name)
+                      {:http-status 409 :error "already-open"})))
+    ;; An open marker with no ready runtime is a crash to reconcile, not a
+    ;; reason to leave the project permanently open and unreachable.
+    (when (project-open? forge name)
+      (stop-project-runtime! forge name))
+    (refresh! forge name)
+    (when-not (skip-start?)
+      (start-project-runtime! forge name))
+    (mark-open! forge name)
+    {:name name :open true}))
 
 (defn close-project! [forge name]
   (when-not (skip-start?)

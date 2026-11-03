@@ -90,6 +90,20 @@ get-swarm-forge project-manager      # a forge with selectable packs
 ./swarm                              # dashboard, host lieutenant, projects/ waiting
 ```
 
+Each forge dashboard runs in its own `swarmforge-dashboard` tmux session on
+`<forge>/.swarmforge/dashboard-tmux.sock`, wrapped in the platform's sleep
+inhibitor where one is available. The launcher does not own the dashboard, so it
+survives after `./swarm` returns. A restart replaces only that forge's supervisor
+and keeps the previous address when it can still be bound. Check it with:
+
+```sh
+swarmforge/scripts/swarmforge.sh --dashboard-status <forge-root>
+```
+
+That prints the supervisor, dashboard process, PID, URL, socket and log. The
+`dashboard-url` and `pack_web.pid` files remain the bridge-facing and diagnostic
+state; stop removes both only after the supervised process has exited.
+
 Set `SWARMFORGE_REPO_URL` to `https://github.com/unclebob/swarm-forge` and
 `SWARMFORGE_BASE_REF` to `main` to compose Uncle Bob's products instead, or point
 `SWARMFORGE_GIT_DIR` at a local checkout to compose from a branch you have not
@@ -138,6 +152,18 @@ with automatic renaming disabled, so its status line reads
 Closing the project stops both the relay and the `swarmforge-agent` session;
 `agent-runner.bb --stop-agent` stops only the agent, leaving the phone relay
 running.
+
+Open and close work the same way for pack and single-agent projects. The
+long-lived project runner is held in a `swarmforge-runtime` tmux session on that
+project's `.swarmforge/runtime-tmux.sock`; the forge records the project in
+`.swarmforge/open-projects` only after its readiness signals exist. For a
+single-agent project those signals are the project dashboard and
+`swarmforge-agent` session; for a pack they are every session named by its
+generated `sessions.tsv`. The relay identity and log are recorded in the
+project's `.swarmforge/runtime.edn` and `start.log`. A failed start stays closed,
+and opening a project whose relay died replaces that relay rather than treating
+the stale open marker as healthy. Closing removes that project's runtime,
+dashboard and agent sessions without touching another project.
 
 An existing single-agent project can adopt structural additions from the
 current template with:
