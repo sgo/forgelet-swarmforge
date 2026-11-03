@@ -43,3 +43,12 @@ changing layer code directly.
   repaired gates.
 - The final tree is committed and pushed to `forgelet` without touching the
   active forge runtime.
+
+## Gate ownership follow-up
+
+- `bb test` remains the full-suite gate.
+- CRAP and coverage are a separate `clean` gate once the hyphenated-file repair
+  makes that gate executable.
+- Composition into the active forge remains optional `release` work.
+- Layer-appropriate gates that are intentionally absent are explained in
+  `STAGES.md` instead of being silently omitted.
