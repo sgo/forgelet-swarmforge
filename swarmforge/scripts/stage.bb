@@ -784,6 +784,8 @@
                        (:name stage)
                        (stage-status config state stage tree)
                        (stage-command root stage)))
+      (when (seq (:evidence stage))
+        (println (str "           evidence: " (str/join ", " (:evidence stage)))))
       (let [inputs (resolve-inputs root stage)]
         (when (seq inputs)
           (println (str "           inputs: " (str/join ", " inputs))))))))

@@ -8,6 +8,10 @@
    :runs [["bb" "test"]]
    :evidence []
    :stamp [:whole-tree]}
+  {:name "clean"
+   :runs [["bb" "crap"]]
+   :evidence ["target/coverage/lcov.info"]
+   :stamp [:whole-tree]}
   {:name "release"
    :optional true
    :runs []

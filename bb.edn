@@ -3,6 +3,7 @@
  {test {:doc "Run helper tests and dashboard Playwright tests"
         :task (do
                 (require 'clojure.test)
+                (require 'swarmforge.layer-gate-test)
                 (require 'swarmforge.handoff-test)
                 (require 'swarmforge.script-test)
                 (require 'swarmforge.stage-test)
@@ -10,7 +11,8 @@
                 (require 'swarmforge.update-exercise-test)
                 (require 'swarmforge.pack-ui-test)
                 (require 'swarmforge.coverage-in-process-test)
-                (let [{:keys [fail error]} (clojure.test/run-tests 'swarmforge.handoff-test
+                (let [{:keys [fail error]} (clojure.test/run-tests 'swarmforge.layer-gate-test
+                                                                    'swarmforge.handoff-test
                                                                     'swarmforge.script-test
                                                                     'swarmforge.stage-test
                                                                     'swarmforge.agent-project-test
@@ -41,6 +43,16 @@
                         (println "  cd test/dashboard && npx playwright install chromium"))
                       (System/exit (or (:exit result) 1)))))
                 (System/exit 0))}
+  coverage:discover {:doc "Verify Cloverage resolves every Babashka helper source"
+                     :extra-deps {io.github.unclebob/crap4clj
+                                  {:git/url "https://github.com/unclebob/crap4clj.git"
+                                   :git/sha "e068673a852a8142323ac680fa3366de65bc2227"}
+                                  cloverage/cloverage
+                                  {:git/url "https://github.com/cloverage/cloverage.git"
+                                   :git/sha "61e3cac426e9907a9dd01c37597f85c71a57ff90"
+                                   :deps/root "cloverage"}}
+                     :requires ([layer-coverage :as layer-coverage])
+                     :task (apply layer-coverage/-main *command-line-args*)}
   coverage:bb {:doc "Cover Babashka scripts with Cloverage"
                :extra-deps {io.github.unclebob/crap4clj
                             {:git/url "https://github.com/unclebob/crap4clj.git"
@@ -49,8 +61,11 @@
                             {:git/url "https://github.com/cloverage/cloverage.git"
                              :git/sha "61e3cac426e9907a9dd01c37597f85c71a57ff90"
                              :deps/root "cloverage"}}
-               :requires ([crap4clj.bb-coverage :as coverage])
-               :task (apply coverage/-main
+               :requires ([layer-coverage :as layer-coverage]
+                          [cloverage.coverage :as coverage])
+               :task (do
+                       (layer-coverage/enable-discovery!)
+                       (apply coverage/-main
                             "-p" "swarmforge/scripts"
                             "-s" "test"
                             "--lcov"
@@ -58,7 +73,7 @@
                             "--no-text"
                             "--no-emma-xml"
                             "--test-ns-regex" "swarmforge\\.coverage-in-process-test"
-                            *command-line-args*)}
+                            *command-line-args*))}
   crap {:doc "Run crap4clj on Babashka scripts"
         :extra-deps {io.github.unclebob/crap4clj
                      {:git/url "https://github.com/unclebob/crap4clj.git"
