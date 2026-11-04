@@ -2815,6 +2815,39 @@
       (is (= "keep me\n" (slurp (str (fs/path root "projects/cave/mission.md")))))
       (is (str/includes? (slurp (str conf)) "extra-flag")))))
 
+(deftest forge-state-only-lists-managed-project-roots
+  (let [root (tmp-dir)
+        alpha (fs/path root "projects/alpha-agent")
+        middle (fs/path root "projects/middle-pack")
+        zeta (fs/path root "projects/zeta-legacy")
+        bridge (fs/path root "projects/forgelet-bridge")
+        artifact (fs/path root "projects/target")]
+    (seed-mini-forge! root)
+    (write-file (fs/path alpha ".swarmforge/single-agent") "agent\n")
+    (write-file (fs/path middle ".swarmforge/pack") "two-pack\n")
+    (write-file (fs/path zeta ".swarmforge/roles.tsv")
+                (format "specifier\tmaster\t%s\n" zeta))
+    (write-file (fs/path bridge "swarmforge/rules/stale.md") "stale bridge rules\n")
+    (write-file (fs/path artifact "artifact.txt") "build output\n")
+    (write-file (fs/path root ".swarmforge/open-projects")
+                "zeta-legacy\nalpha-agent\n")
+
+    (let [state (json/parse-string
+                 (:out (pack-web root true "--test-state" (str root)))
+                 true)]
+      (is (= ["alpha-agent" "middle-pack" "zeta-legacy"]
+             (:all_projects state)))
+      (is (= ["zeta-legacy" "alpha-agent"] (:open_projects state))))
+
+    ;; Identity comes from the project marker, never from the directory name.
+    (write-file (fs/path bridge ".swarmforge/pack") "six-pack\n")
+    (let [state (json/parse-string
+                 (:out (pack-web root true "--test-state" (str root)))
+                 true)]
+      (is (= ["alpha-agent" "forgelet-bridge" "middle-pack" "zeta-legacy"]
+             (:all_projects state)))
+      (is (= ["zeta-legacy" "alpha-agent"] (:open_projects state))))))
+
 (deftest forge-state-tags-attention-with-project
   (let [root (tmp-dir)]
     (seed-mini-forge! root)

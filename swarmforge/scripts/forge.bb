@@ -67,11 +67,17 @@
     (when (fs/regular-file? file)
       (slurp (str file)))))
 
+(defn managed-project-root? [project]
+  (boolean
+   (some #(fs/regular-file? (fs/path project ".swarmforge" %))
+         ["single-agent" "pack" "roles.tsv"])))
+
 (defn list-project-names [root]
   (let [dir (projects-dir root)]
     (if (fs/directory? dir)
       (->> (fs/list-dir dir)
            (filter fs/directory?)
+           (filter managed-project-root?)
            (map fs/file-name)
            (remove #(str/starts-with? % "."))
            sort
