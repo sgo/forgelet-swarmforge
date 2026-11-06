@@ -122,9 +122,11 @@ parameterized or have its exemption recorded in the task note.
 - **deploy**: required for every completed card. After every earlier gate is
   current, commit and push the card, then run `stage check deploy`. The stage
   executes `scripts/install-snapshot.sh`, which requires a `-SNAPSHOT` version,
-  activates `with-release-tests`, and installs into the operator's standard
-  `~/.m2`. Other projects on this devbox resolve that local snapshot normally.
-  `stage complete` refuses while this stage is absent, optional or stale.
+  activates `with-release-tests`, installs into the operator's standard `~/.m2`,
+  and deploys timestamped files to the host-supplied repository coordinate in
+  `SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY`. A missing or malformed value
+  fails the gate. `stage complete` refuses while this stage is absent, optional
+  or stale.
   GitHub Packages is written only by the separate release path, configured by
   `swarmforge/release.conf`.
 - **release**: optional; `n/a` is not a pass for a release that was skipped.

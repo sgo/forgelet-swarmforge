@@ -268,8 +268,9 @@ behaviour makes the owning section fail instead of leaving stale prose in the
 tree.
 The template's required `deploy` stage runs `scripts/install-snapshot.sh` after
 the quality gates. It installs the current `-SNAPSHOT` into the operator's
-standard `~/.m2`, where all projects on the same devbox can resolve it.
-GitHub Packages is reserved for deliberate releases through
+standard `~/.m2` and deploys timestamped files to the host-supplied
+`SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY` coordinate. GitHub Packages is
+reserved for deliberate releases through
 `swarmforge/release.conf`, so ordinary card completion cannot mutate a registry
 shared with other operators.
 

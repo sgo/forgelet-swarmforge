@@ -505,17 +505,32 @@
                     (str "#!/bin/sh\n"
                          "case \" $* \" in\n"
                          "  *\" help:evaluate \"*) printf '0.1.0-SNAPSHOT\\n' ;;\n"
-                         "  *\" install \"*) mkdir -p target; "
+                         "  *\" deploy \"*) mkdir -p target; "
                          "printf 'args=%s\\n' \"$*\" > target/install.args ;;\n"
                          "  *) printf 'unexpected mvn: %s\\n' \"$*\" >&2; exit 2 ;;\n"
                          "esac\n"))
         (fs/set-posix-file-permissions mvn "rwxr-xr-x")
         (let [install (sh/sh (str (fs/path project "scripts" "install-snapshot.sh"))
                              :dir (str project)
-                             :env {"PATH" (str fake-bin ":" (System/getenv "PATH"))})]
+                             :env {"PATH" (str fake-bin ":" (System/getenv "PATH"))
+                                   "SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY"
+                                   "fixture-snapshots::default::file:///tmp/fixture-snapshots"})]
           (is (zero? (:exit install)) (:err install))
-          (is (= "args=-B -Pwith-release-tests install\n"
+          (is (= (str "args=-B -Pwith-release-tests deploy "
+                      "-DaltSnapshotDeploymentRepository=fixture-snapshots::default::file:///tmp/fixture-snapshots\n")
                  (slurp (str (fs/path project "target" "install.args"))))))
+        (doseq [[label value message]
+                [["missing" nil "SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY is required"]
+                 ["legacy" "fixture-snapshots::file:///tmp/snapshots"
+                  "<repository-id>::default::<repository-url>"]
+                 ["blank" "   " "<repository-id>::default::<repository-url>"]]]
+          (let [env (cond-> {"PATH" (str fake-bin ":" (System/getenv "PATH"))}
+                      (some? value)
+                      (assoc "SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY" value))
+                refused (sh/sh (str (fs/path project "scripts" "install-snapshot.sh"))
+                               :dir (str project) :env env)]
+            (is (not (zero? (:exit refused))) label)
+            (is (str/includes? (:err refused) message) label)))
         (write-file mvn
                     (str "#!/bin/sh\n"
                          "case \" $* \" in\n"
@@ -524,12 +539,75 @@
                          "esac\n"))
         (let [refused (sh/sh (str (fs/path project "scripts" "install-snapshot.sh"))
                              :dir (str project)
-                             :env {"PATH" (str fake-bin ":" (System/getenv "PATH"))})]
+                             :env {"PATH" (str fake-bin ":" (System/getenv "PATH"))
+                                   "SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY"
+                                   "fixture-snapshots::default::file:///tmp/fixture-snapshots"})]
           (is (not (zero? (:exit refused))))
           (is (str/includes? (:err refused) "is not a snapshot"))))
       (finally
         (stop-agent-session! project)
         (delete-tree! forge)))))
+
+(deftest a-snapshot-deploys-timestamped-files-and-installs-locally
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent-lib")
+        root (tmp-dir)
+        home (fs/path root "home")
+        snapshots (fs/path root "snapshot-repository")]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge)
+                            "--profile" "library" "agent-lib"))))
+      (write-file (fs/path project "pom.xml")
+                  (str "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n"
+                       "  <modelVersion>4.0.0</modelVersion>\n"
+                       "  <groupId>fixture</groupId>\n"
+                       "  <artifactId>snapshot-fixture</artifactId>\n"
+                       "  <version>0.1.0-SNAPSHOT</version>\n"
+                       "  <properties><maven.compiler.release>17</maven.compiler.release></properties>\n"
+                       "  <dependencies>\n"
+                       "    <dependency><groupId>org.junit.jupiter</groupId>"
+                       "<artifactId>junit-jupiter</artifactId><version>5.10.2</version>"
+                       "<scope>test</scope></dependency>\n"
+                       "  </dependencies>\n"
+                       "  <build><plugins>\n"
+                       "    <plugin><artifactId>maven-surefire-plugin</artifactId>"
+                       "<version>3.2.5</version></plugin>\n"
+                       "    <plugin><artifactId>maven-deploy-plugin</artifactId>"
+                       "<version>3.1.4</version></plugin>\n"
+                       "  </plugins></build>\n"
+                       "  <profiles><profile><id>with-release-tests</id></profile></profiles>\n"
+                       "</project>\n"))
+      (write-file (fs/path project "src/main/java/fixture/Demo.java")
+                  (str "package fixture;\n\n"
+                       "public final class Demo {\n"
+                       "  public static int answer() { return 42; }\n"
+                       "}\n"))
+      (write-file (fs/path project "src/test/java/fixture/DemoTest.java")
+                  (str "package fixture;\n\n"
+                       "import org.junit.jupiter.api.Test;\n"
+                       "import static org.junit.jupiter.api.Assertions.assertEquals;\n\n"
+                       "final class DemoTest {\n"
+                       "  @Test void answers() { assertEquals(42, Demo.answer()); }\n"
+                       "}\n"))
+      (let [deployed
+            (sh/sh (str (fs/path project "scripts" "install-snapshot.sh"))
+                   :dir (str project)
+                   :env {"HOME" (str home)
+                         "MAVEN_OPTS" (str "-Duser.home=" home)
+                         "PATH" (System/getenv "PATH")
+                         "SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY"
+                         (str "fixture-snapshots::default::file://" snapshots)})]
+        (is (zero? (:exit deployed)) (str (:out deployed) (:err deployed))))
+      (is (some #(re-find #"snapshot-fixture-0\.1\.0-\d{8}\.\d{6}-\d+\.jar$"
+                          (str %))
+                (fs/glob snapshots "**/snapshot-fixture-0.1.0-*.jar")))
+      (is (fs/regular-file?
+           (fs/path home ".m2/repository/fixture/snapshot-fixture"
+                    "0.1.0-SNAPSHOT/snapshot-fixture-0.1.0-SNAPSHOT.jar")))
+      (finally
+        (stop-agent-session! project)
+        (delete-tree! forge)
+        (delete-tree! root)))))
 
 (deftest a-manual-contract-runs-examples-and-detects-unowned-api-prose
   (let [forge (fixture-forge)

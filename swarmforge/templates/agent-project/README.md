@@ -21,7 +21,7 @@ to executable examples. `scripts/check-documentation.sh` checks the documents,
 headings, API ownership, local links and example output. A section without an
 example must be explicitly conceptual and carry its reason.
 
-## Local snapshot installation
+## Snapshot installation and deployment
 
 A completed card installs its current `-SNAPSHOT` after every quality gate and
 after its reviewed commit has been pushed:
@@ -31,9 +31,12 @@ stage check deploy
 ```
 
 The stage runs `scripts/install-snapshot.sh` and the `with-release-tests`
-profile. Maven writes into the operator's standard `~/.m2`, so another project
-on the same devbox can resolve the current SNAPSHOT without a remote publish.
-`stage complete` refuses while the required deploy stage is absent or stale.
+profile. Maven's `deploy` lifecycle installs into the operator's standard
+`~/.m2` and then publishes timestamped SNAPSHOT files to the host-supplied
+`<repository-id>::default::<repository-url>` in
+`SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY`. A missing or malformed value
+fails the gate. `stage complete` refuses while the required deploy stage is
+absent or stale.
 
 GitHub Packages belongs exclusively to the optional release path.
 `swarmforge/release.conf` names that target; ordinary card completion does not

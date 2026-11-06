@@ -94,10 +94,12 @@ section fail rather than leaving stale prose behind.
 
 Local snapshot installation is part of card completion, not an optional
 release: after the reviewed tree is committed and pushed, run
-`stage check deploy`. It executes `scripts/install-snapshot.sh` and installs
-the current `-SNAPSHOT` into the operator's standard `~/.m2`, where other
-projects on the same devbox can resolve it. `stage complete` refuses if a Maven
-project has no required `deploy` stage or if that stage is stale.
+`stage check deploy`. It executes `scripts/install-snapshot.sh`, installs the
+current `-SNAPSHOT` into the operator's standard `~/.m2`, and deploys
+timestamped files to the host-supplied repository named by
+`SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY`. A missing or malformed value
+fails the gate. `stage complete` refuses if a Maven project has no required
+`deploy` stage or if that stage is stale.
 
 GitHub Packages is the release boundary, not the card-completion boundary.
 Publish there only through the deliberate `release:prepare` /
