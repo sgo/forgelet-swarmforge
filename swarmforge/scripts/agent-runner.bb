@@ -251,8 +251,33 @@
                   (request-in-composer? root request-id)))))))
 
 (defn default-agent-command [root]
-  (str "codex -C " (sq (str root))
-       " --no-alt-screen --dangerously-bypass-approvals-and-sandbox"))
+  (let [roles-file (fs/path root ".swarmforge" "roles.tsv")
+        agents-file (or (some #(when (fs/regular-file? %)
+                                 (fs/path % "agents.conf"))
+                              [(fs/path (fs/parent *file*))])
+                        (fs/path root "swarmforge" "scripts" "agents.conf"))
+        supported (when (fs/regular-file? agents-file)
+                    (->> (str/split-lines (slurp (str agents-file)))
+                         (remove str/blank?)
+                         set))
+        row (when (fs/regular-file? roles-file)
+              (some->> (str/split-lines (slurp (str roles-file)))
+                       (remove str/blank?)
+                       first
+                       (#(str/split % #"\t"))))
+        agent (nth row 5 nil)]
+    (when-not row
+      (exit! 1 (str "Single-agent project has no agent role: " root)))
+    (when-not (contains? supported agent)
+      (exit! 1 (str "Unsupported or missing agent '" agent "' in " roles-file)))
+    (case agent
+      "codex" (str "codex -C " (sq (str root))
+                   " --no-alt-screen --dangerously-bypass-approvals-and-sandbox")
+      "claude" "env CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --permission-mode bypassPermissions -n 'SwarmForge Agent'"
+      "copilot" (str "copilot -C " (sq (str root))
+                     " --no-alt-screen --name 'SwarmForge Agent' --yolo")
+      "grok" (str "grok --cwd " (sq (str root))
+                  " --permission-mode bypassPermissions --minimal"))))
 
 (defn name-agent-window! [root]
   (let [window (str session-name ":0")

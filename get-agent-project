@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: get-agent-project <project-name> [--forge <forge-root>] [--profile standard|library]
+Usage: get-agent-project <project-name> [--forge <forge-root>] [--profile standard|library] [--agent codex|claude|copilot|grok]
        get-agent-project --upgrade <project-name-or-path> [--forge <forge-root>] [--check]
        get-agent-project --convert <project-name-or-path> [--forge <forge-root>] [--profile standard|library] [--apply]
 
@@ -16,6 +16,8 @@ reports whether the upgrade is still needed and changes nothing.
 
 --convert plans a six-pack project's conversion to one agent. It changes
 nothing unless --apply is given.
+
+--agent selects the single agent for a new project. It defaults to codex.
 USAGE
 }
 
@@ -29,6 +31,8 @@ template_dir="$script_dir/swarmforge/templates/agent-project"
 forge_root=""
 name=""
 profile="standard"
+agent="codex"
+agent_set=0
 mode=create
 check_only=0
 apply=0
@@ -61,6 +65,12 @@ while [[ $# -gt 0 ]]; do
       profile="$2"
       shift 2
       ;;
+    --agent)
+      [[ $# -ge 2 ]] || fail "--agent needs a value"
+      agent="$2"
+      agent_set=1
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -83,6 +93,16 @@ case "$profile" in
   standard|library) ;;
   *) fail "unknown profile: $profile (use standard or library)" ;;
 esac
+[[ "$mode" == create ]] || [[ "$agent_set" == 0 ]] ||
+  fail "--agent is only valid when creating a project"
+supported_agents_file="$script_dir/swarmforge/scripts/agents.conf"
+[[ -f "$supported_agents_file" ]] ||
+  fail "supported-agent definition not found: $supported_agents_file"
+if [[ ! "$agent" =~ ^[a-z][a-z0-9_-]*$ ]] ||
+   ! grep -Fxq "$agent" "$supported_agents_file"; then
+  supported="$(paste -sd, - < "$supported_agents_file")"
+  fail "unknown agent: $agent (use $supported)"
+fi
 
 if [[ -z "$forge_root" ]]; then
   forge_root="$(pwd)"
@@ -159,7 +179,7 @@ if [[ -f "$dest/scripts/run-qa-e2e.sh" ]]; then
 fi
 
 mkdir -p "$dest/.swarmforge"
-printf 'agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n' "$dest" \
+printf 'agent\tmaster\t%s\tswarmforge-agent\tAgent\t%s\ttask\n' "$dest" "$agent" \
   > "$dest/.swarmforge/roles.tsv"
 printf '%s\n' "$name" > "$dest/.swarmforge/single-agent"
 printf '%s\n' "$profile" > "$dest/.swarmforge/profile"
@@ -189,4 +209,5 @@ fi
 
 printf 'Single-agent project created: %s\n' "$dest"
 printf 'Profile: %s\n' "$profile"
+printf 'Agent: %s\n' "$agent"
 printf 'Next: %s\n' "$dest/swarm"

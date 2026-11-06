@@ -144,7 +144,26 @@
 
 (def receive-modes #{"task" "batch"})
 (def propagation-modes #{"forward-only" "back-one" "back-all"})
-(def known-agents #{"claude" "codex" "copilot" "grok"})
+
+(defn load-known-agents []
+  (let [file (or (some (fn [dir]
+                         (let [candidate (fs/path dir "agents.conf")]
+                           (when (fs/regular-file? candidate)
+                             candidate)))
+                       [(fs/path (fs/parent (fs/absolutize *file*)))
+                        (fs/path (System/getProperty "user.dir")
+                                 "swarmforge" "scripts")])
+                 (fs/path (System/getProperty "user.dir")
+                          "swarmforge" "scripts" "agents.conf"))
+        agents (when (and file (fs/regular-file? file))
+                 (->> (str/split-lines (slurp (str file)))
+                      (remove str/blank?)
+                      set))]
+    (when-not (seq agents)
+      (fail! "supported-agent definition not found: swarmforge/scripts/agents.conf"))
+    agents))
+
+(def known-agents (load-known-agents))
 
 (defn receive-fields [trailing]
   (let [[receive-mode after-receive]

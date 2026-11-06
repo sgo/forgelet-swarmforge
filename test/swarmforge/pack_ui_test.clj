@@ -2623,6 +2623,9 @@
                 "#!/usr/bin/env bb\n(println \"stop\")\n")
     (fs/create-dirs (fs/path project ".swarmforge"))
     (write-file (fs/path project ".swarmforge/single-agent") "agent\n")
+    (write-file (fs/path project ".swarmforge/roles.tsv")
+                (format "agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n"
+                        project))
     (let [open (pack-web-env root {"SWARMFORGE_SKIP_START" "1"}
                              "--test-open-project" (str root) "agent")]
       (is (zero? (:exit open)) (:err open))
@@ -2657,6 +2660,9 @@
       (seed-mini-forge! root)
       (use-full-forge-scripts! root)
       (write-file (fs/path project ".swarmforge/single-agent") "agent\n")
+      (write-file (fs/path project ".swarmforge/roles.tsv")
+                  (format "agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n"
+                          project))
       (let [opened (pack-web-env root open-env
                                  "--test-open-project" (str root) "agent")
             url (str/trim (slurp (str url-file)))]
@@ -2717,6 +2723,9 @@
       (seed-mini-forge! root)
       (use-full-forge-scripts! root)
       (write-file (fs/path project ".swarmforge/single-agent") "agent\n")
+      (write-file (fs/path project ".swarmforge/roles.tsv")
+                  (format "agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n"
+                          project))
       (write-file (fs/path root "swarmforge/scripts/agent-runner.bb")
                   "#!/usr/bin/env bb\n(println \"runner failed\")\n(System/exit 9)\n")
       (let [opened (run {:dir root

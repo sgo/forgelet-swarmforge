@@ -282,16 +282,8 @@
       (throw (ex-info (str "Single-agent project must name exactly one role: " project)
                       {:http-status 500 :error "invalid-single-agent-role"}))
       :else
-      (let [branch (or (not-empty
-                        (str/trim (:out (sh {:continue true}
-                                            "git" "-C" (str project)
-                                            "branch" "--show-current"))))
-                       "master")]
-        (fs/create-dirs (fs/parent file))
-        (spit (str file)
-              (format "agent\t%s\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n"
-                      branch project))
-        true))))
+      (throw (ex-info (str "Single-agent project has no agent role: " project)
+                      {:http-status 500 :error "missing-single-agent-role"})))))
 
 (defn refresh! [forge name]
   (let [dest (project-dir forge name)
@@ -512,16 +504,17 @@
               script (if single?
                        (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
                        (str (swarmforge-bb forge)))
-              agent-command (or (not-empty (System/getenv "SWARMFORGE_AGENT_COMMAND"))
-                                (str "codex -C " (shell-quote dest)
-                                     " --no-alt-screen"
-                                     " --dangerously-bypass-approvals-and-sandbox"))
+              runtime-agent-command (not-empty
+                                     (System/getenv "SWARMFORGE_AGENT_COMMAND"))
+              single-agent-args
+              (cond-> ["bb" script "--root" dest]
+                runtime-agent-command
+                (conj "--agent-command" runtime-agent-command))
               start-command (str/join
                              " "
                              (map shell-quote
                                   (if single?
-                                    ["bb" script "--root" dest
-                                     "--agent-command" agent-command]
+                                    single-agent-args
                                     ["bb" script "--start-project" dest])))
               tail (if single?
                      start-command

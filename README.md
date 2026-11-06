@@ -133,7 +133,7 @@ A forge can hold a project owned by one agent instead of a pack. From a layer
 checkout:
 
 ```sh
-./get-agent-project <name> --forge <forge-root>
+./get-agent-project <name> --forge <forge-root> [--agent codex|claude|copilot|grok]
 ```
 
 It composes `stages.edn`, `STAGES.md`, a one-row `roles.tsv` and the
@@ -143,11 +143,12 @@ own `pack_web` dashboard. `./swarm` starts the runner, which takes one dashboard
 request at a time, pastes it into the project's persistent `swarmforge-agent`
 tmux session, and appends `stage list` to the answer. The same session is what
 `forge-attach <forge> <project> agent` opens, so the phone and the laptop use
-one agent rather than two. The command defaults to
-`codex -C <project> --no-alt-screen --dangerously-bypass-approvals-and-sandbox`;
-set `SWARMFORGE_AGENT_COMMAND` to use another agent. The runner never creates
-a worktree or a handoff. The attached tmux window is named for the project,
-with automatic renaming disabled, so its status line reads
+one agent rather than two. The selected agent defaults to `codex` and is stored
+in the project's one-row `roles.tsv`; the runner constructs that agent's command
+from the stored value. `SWARMFORGE_AGENT_COMMAND` remains an explicit override
+for tests and recovery. The runner never creates a worktree or a handoff. The
+attached tmux window is named for the project, with automatic renaming disabled,
+so its status line reads
 `swarmforg0:<project>` rather than `swarmforg0:codex`.
 Closing the project stops both the relay and the `swarmforge-agent` session;
 `agent-runner.bb --stop-agent` stops only the agent, leaving the phone relay
@@ -164,8 +165,8 @@ project's `.swarmforge/runtime.edn` and `start.log`. A failed start stays closed
 and opening a project whose relay died replaces that relay rather than treating
 the stale open marker as healthy. Closing removes that project's runtime,
 dashboard and agent sessions without touching another project. Opening a
-single-agent project also restores its required one-row `.swarmforge/roles.tsv`
-if that runtime identity is missing; a file naming several roles is rejected.
+single-agent project requires its one-row `.swarmforge/roles.tsv`; a missing,
+invalid or multi-role identity is rejected rather than silently becoming Codex.
 
 An existing single-agent project can adopt structural additions from the
 current template with:

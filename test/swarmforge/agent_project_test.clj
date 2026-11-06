@@ -30,6 +30,13 @@
   [dir & args]
   (apply sh/sh (concat args [:dir (str dir)])))
 
+(defn run-env
+  [dir env & args]
+  (apply sh/sh
+         (concat args
+                 [:dir (str dir)
+                  :env (merge {"PATH" (System/getenv "PATH")} env)])))
+
 (defn tmp-dir []
   (fs/create-temp-dir {:dir "/tmp" :prefix "sf-agent-project."}))
 
@@ -140,7 +147,7 @@
         (is (= "Java\n" (slurp (str (fs/path project "swarmforge" "language.conf")))))
         (is (str/includes?
              (slurp (str (fs/path project ".swarmforge" "roles.tsv")))
-             (str "agent\tmaster\t" project "\tswarmforge-agent")))
+             (str "agent\tmaster\t" project "\tswarmforge-agent\tAgent\tcodex\ttask")))
         (let [second-run (run repo-root composer "--forge" (str forge) "agent")]
           (is (not (zero? (:exit second-run))))
           (is (str/includes? (:err second-run) "already exists"))))
@@ -222,6 +229,88 @@
             (is (str/starts-with? (slurp (str url-file)) "http://")))))
       (finally
         (stop-agent-session! project)
+        (delete-tree! forge)))))
+
+(deftest single-agent-projects-persist-and-start-the-chosen-agent
+  (let [forge (fixture-forge)
+        fake-bin (fs/path forge "fake-agent-bin")
+        fake (fs/path fake-bin "fake-agent")
+        agents ["codex" "claude" "copilot" "grok"]]
+    (write-file fake
+                (str "#!/bin/sh\n"
+                     "printf '%s %s\\n' \"$(basename \"$0\")\" \"$*\" "
+                     "> \"$SWARMFORGE_TEST_AGENT_LOG\"\n"
+                     "printf '<<AGENT READY>>\\n'\n"
+                     "sleep 30\n"))
+    (fs/set-posix-file-permissions fake "rwxr-xr-x")
+    (try
+      (doseq [agent agents]
+        (let [name (str "agent-" agent)
+              executable (fs/path fake-bin agent)
+              log (fs/path forge (str name ".argv"))]
+          (fs/copy fake executable)
+          (let [composed (run repo-root composer "--forge" (str forge)
+                              "--agent" agent name)]
+            (is (zero? (:exit composed)) (:err composed))
+            (is (str/includes? (:out composed) (str "Agent: " agent))))
+          (let [project (fs/path forge "projects" name)
+                role-line (slurp (str (fs/path project ".swarmforge" "roles.tsv")))
+                role-fields (str/split (first (str/split-lines role-line)) #"\t")]
+            (is (= agent (nth role-fields 5 nil)))
+            (let [started (run-env project
+                                   {"PATH" (str fake-bin ":" (System/getenv "PATH"))
+                                    "SWARMFORGE_TEST_AGENT_LOG" (str log)}
+                                   "bb" (str (fs/path project "swarmforge" "scripts"
+                                                       "agent-runner.bb"))
+                                   "--root" (str project)
+                                   "--once" "--no-serve")]
+              (is (zero? (:exit started)) (:err started))
+              (let [command (str/trim (slurp (str log)))]
+                (is (str/starts-with? command (str agent " ")))
+                (is (case agent
+                      "codex" (str/includes?
+                               command
+                               "--dangerously-bypass-approvals-and-sandbox")
+                      "claude" (str/includes?
+                                command
+                                "--permission-mode bypassPermissions")
+                      "copilot" (str/includes?
+                                 command "--name SwarmForge Agent --yolo")
+                      "grok" (str/includes?
+                              command "--permission-mode bypassPermissions --minimal")))))
+            (stop-agent-session! project))))
+      (let [project (fs/path forge "projects" "agent-missing")]
+        (write-file (fs/path project ".swarmforge" "single-agent") "agent\n")
+        (let [missing (run project
+                           "bb" (str (fs/path repo-root "swarmforge" "scripts"
+                                               "agent-runner.bb"))
+                           "--root" (str project)
+                           "--once" "--no-serve")]
+          (is (not (zero? (:exit missing))))
+          (is (str/includes? (:err missing) "has no agent role"))
+          (is (not (fs/exists? (fs/path project ".swarmforge" "agent-tmux.sock"))))))
+      (finally
+        (doseq [agent agents]
+          (stop-agent-session! (fs/path forge "projects" (str "agent-" agent))))
+        (delete-tree! forge)))))
+
+(deftest get-agent-project-rejects-invalid-agents-before-writing
+  (let [forge (fixture-forge)]
+    (try
+      (doseq [[index agent] (map-indexed vector
+                                        ["rust" "../codex" "codex/../claude" "Codex"])]
+        (let [name (str "invalid-" index)
+              result (run repo-root composer "--forge" (str forge)
+                          "--agent" agent name)]
+          (is (not (zero? (:exit result))))
+          (is (str/includes? (:err result) "unknown agent"))
+          (is (not (fs/exists? (fs/path forge "projects" name))))))
+      (let [missing (run repo-root composer "--forge" (str forge)
+                         "missing-value" "--agent")]
+        (is (not (zero? (:exit missing))))
+        (is (str/includes? (:err missing) "--agent needs a value"))
+        (is (not (fs/exists? (fs/path forge "projects" "missing-value")))))
+      (finally
         (delete-tree! forge)))))
 
 (deftest a-library-project-uses-the-verify-profile-instead-of-qa
