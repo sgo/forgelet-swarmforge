@@ -60,6 +60,14 @@ wrapper_current() {
   [ -x "$WRAPPER" ] && wrapper_text | cmp -s - "$WRAPPER"
 }
 
+replace_current() {
+  if [ "$(uname -s)" = "Darwin" ]; then
+    mv -f -h "$1" "$2"
+  else
+    mv -fT "$1" "$2"
+  fi
+}
+
 cache_valid() {
   release_complete "$CURRENT" && wrapper_current
 }
@@ -152,7 +160,7 @@ if ! cache_matches "$source_dir"; then
 
   next_current="$CACHE/.current.$$"
   ln -s "releases/$release_id" "$next_current"
-  mv -f "$next_current" "$CURRENT"
+  replace_current "$next_current" "$CURRENT"
   next_current=""
 fi
 

@@ -327,12 +327,22 @@
              "FORGELET_SWARM_FORGE_DIR" (str repo-root)}
         agents ["codex" "claude" "copilot" "grok"]]
     (try
+      ;; Start from the pre-fix shape: current points at a different release
+      ;; that lacks agents.conf.
+      (let [stale (fs/path cache "releases/stale")]
+        (fs/create-dirs (fs/path stale "swarmforge/templates"))
+        (write-file (fs/path stale "get-agent-project") "old composer\n")
+        (write-file (fs/path stale "convert-pack-project") "old converter\n")
+        (fs/create-dirs (fs/path cache))
+        (fs/create-sym-link (fs/path cache "current") "releases/stale"))
       (let [installed (run-env repo-root env (str installer))]
         (is (zero? (:exit installed)) (:err installed)))
       (is (fs/executable? wrapper))
       (is (not (fs/exists? (fs/path home "cmds/get-agent-project"))))
       (is (str/starts-with? (str (fs/read-link (fs/path cache "current")))
                            "releases/"))
+      (is (not= "releases/stale"
+                (str (fs/read-link (fs/path cache "current")))))
       (is (fs/regular-file?
            (fs/path cache "current/swarmforge/scripts/agents.conf")))
 
