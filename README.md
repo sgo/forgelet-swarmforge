@@ -136,6 +136,20 @@ checkout:
 ./get-agent-project <name> --forge <forge-root> [--agent codex|claude|copilot|grok]
 ```
 
+The layer owns the machine-wide composer cache installer:
+
+```sh
+./devbox/get-agent-project/install.sh
+./devbox/get-agent-project/install.sh --check
+```
+
+It writes immutable releases under
+`${FORGELET_AGENT_PROJECT_CACHE:-$HOME/.local/share/forgelet-swarmforge}`, points
+`current` at the selected complete release, and installs the dispatcher at
+`${FORGELET_CMDS_DIR:-$HOME/cmds}/get-agent-project`. The cached release
+includes `swarmforge/scripts/agents.conf`; a missing or stale copy makes
+`--check` fail and a reinstall rebuilds the release.
+
 It composes `stages.edn`, `STAGES.md`, a one-row `roles.tsv` and the
 `.swarmforge/single-agent` marker into `projects/<name>`. Open the project from
 the forge dashboard: the row is marked single-agent and links to the project's

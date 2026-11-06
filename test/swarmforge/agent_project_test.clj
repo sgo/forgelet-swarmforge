@@ -313,6 +313,61 @@
       (finally
         (delete-tree! forge)))))
 
+(deftest installed-agent-project-cache-is-complete-and-composes-every-agent
+  (let [root (tmp-dir)
+        forge (fixture-forge)
+        home (fs/path root "home")
+        cache (fs/path root "cache")
+        cmds (fs/path root "commands")
+        wrapper (fs/path cmds "get-agent-project")
+        installer (fs/path repo-root "devbox/get-agent-project/install.sh")
+        env {"HOME" (str home)
+             "FORGELET_AGENT_PROJECT_CACHE" (str cache)
+             "FORGELET_CMDS_DIR" (str cmds)
+             "FORGELET_SWARM_FORGE_DIR" (str repo-root)}
+        agents ["codex" "claude" "copilot" "grok"]]
+    (try
+      (let [installed (run-env repo-root env (str installer))]
+        (is (zero? (:exit installed)) (:err installed)))
+      (is (fs/executable? wrapper))
+      (is (not (fs/exists? (fs/path home "cmds/get-agent-project"))))
+      (is (str/starts-with? (str (fs/read-link (fs/path cache "current")))
+                           "releases/"))
+      (is (fs/regular-file?
+           (fs/path cache "current/swarmforge/scripts/agents.conf")))
+
+      (doseq [agent agents]
+        (let [name (str "cached-" agent)
+              result (run-env root env (str wrapper)
+                              "--forge" (str forge) "--agent" agent name)
+              project (fs/path forge "projects" name)
+              role-line (slurp (str (fs/path project ".swarmforge" "roles.tsv")))
+              role-fields (str/split (first (str/split-lines role-line)) #"\t")]
+          (is (zero? (:exit result)) (:err result))
+          (is (= agent (nth role-fields 5 nil)))))
+
+      (is (zero? (:exit (run-env repo-root env (str installer) "--check"))))
+
+      (fs/delete (fs/path cache "current/swarmforge/scripts/agents.conf"))
+      (let [missing (run-env repo-root env (str installer) "--check")]
+        (is (not (zero? (:exit missing))))
+        (is (str/includes? (str (:err missing) (:out missing))
+                           "run install.sh")))
+      (is (zero? (:exit (run-env repo-root env (str installer)))))
+      (is (zero? (:exit (run-env repo-root env (str installer) "--check"))))
+
+      (spit (str (fs/path cache "current/swarmforge/scripts/agents.conf"))
+            "codex\n")
+      (let [stale (run-env repo-root env (str installer) "--check")]
+        (is (not (zero? (:exit stale))))
+        (is (str/includes? (str (:err stale) (:out stale))
+                           "cache is behind")))
+      (is (zero? (:exit (run-env repo-root env (str installer)))))
+      (is (zero? (:exit (run-env repo-root env (str installer) "--check"))))
+      (finally
+        (delete-tree! forge)
+        (delete-tree! root)))))
+
 (deftest a-library-project-uses-the-verify-profile-instead-of-qa
   (let [forge (fixture-forge)
         project (fs/path forge "projects" "agent-lib")]
