@@ -7,6 +7,11 @@ root="$(git rev-parse --show-toplevel)"
 stage="$root/swarmforge/scripts/stage.bb"
 [[ -f "$stage" ]] || exit 0
 
+# The host records the operator-supplied mission before any agent card exists.
+# That one operator-owned file is not agent work and must not wait for a spec.
+staged="$(git -C "$root" diff --cached --name-only --diff-filter=ACMRTUXB)"
+[[ "$staged" == "mission.md" ]] && exit 0
+
 export PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"
 approved="$(
   bb "$stage" status --json --root "$root" 2>/dev/null \

@@ -960,6 +960,26 @@
         (stop-agent-session! project)
         (delete-tree! forge)))))
 
+(deftest the-host-can-commit-the-operator-mission-before-a-card-exists
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent")]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge) "agent"))))
+      (write-file (fs/path project "mission.md")
+                  "# Mission\n\nBuild the office app\n")
+      (is (zero? (:exit (sh/sh "git" "-C" (str project) "add" "mission.md"))))
+      (let [commit (sh/sh "git" "-C" (str project)
+                          "-c" "user.name=forgelet-host"
+                          "-c" "user.email=forgelet-host@localhost"
+                          "commit" "-m" "Record project mission")]
+        (is (zero? (:exit commit)) (:err commit))
+        (is (= "# Mission\n\nBuild the office app\n"
+               (:out (sh/sh "git" "-C" (str project)
+                            "show" "HEAD:mission.md")))))
+      (finally
+        (stop-agent-session! project)
+        (delete-tree! forge)))))
+
 (deftest a-pack-project-converts-in-place-after-a-safe-dry-run
   (let [forge (fixture-forge)
         project (fs/path forge "projects" "pack")

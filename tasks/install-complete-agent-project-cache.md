@@ -66,3 +66,8 @@ After the source fix is committed and pushed, reinstall the cache, retry
 - `.swarmforge/roles.tsv` records Claude;
 - `mission.md` carries the submitted mission and is committed;
 - the project opens and its agent session launches Claude rather than Codex.
+
+The live host sequence records the operator-owned mission before any agent card
+exists. An exact mission-only staged change is therefore allowed through the
+single-agent pre-commit hook; agent-authored changes still require the current
+approved spec bundle.
