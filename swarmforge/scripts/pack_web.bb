@@ -207,6 +207,23 @@
                     (Long/parseLong audit-count)
                     0)}))
 
+(declare tasks)
+
+(defn active-single-agent-card [root]
+  (when (fs/regular-file? (fs/path root ".swarmforge" "single-agent"))
+    (let [stages-file (fs/path root "stages.edn")
+          project-name (when (fs/regular-file? stages-file)
+                         (:task (edn/read-string (slurp (str stages-file)))))]
+      (first
+       (remove (fn [task]
+                 (or (= (:name task) project-name)
+                     (#{"done" "queued"} (:lane task))))
+               (tasks root))))))
+
+(defn project-idle? [root]
+  (and (fs/regular-file? (fs/path root ".swarmforge" "single-agent"))
+       (nil? (active-single-agent-card root))))
+
 (defn last-n-lines [text n]
   (vec (take-last n (str/split-lines (or text "")))))
 
@@ -854,6 +871,8 @@
      :master_display (display-name-for-role master)
      :lanes (lanes root)
      :tasks (tasks root)
+     :active_card (active-single-agent-card root)
+     :idle (project-idle? root)
      :approvals (approvals root)
      :resolved_approvals (resolved-approvals root)
      :work_in_flight (work-in-flight root)
@@ -880,6 +899,8 @@
       {:name name
        :open true
        :single_agent (single-agent-project? root)
+       :active_card (active-single-agent-card root)
+       :idle (project-idle? root)
        :dashboard_url (project-dashboard-url root)
        :lanes (lanes root)
        :tasks (tagged name (tasks root))
@@ -888,6 +909,8 @@
         {:name name
          :open true
          :single_agent (single-agent-project? root)
+         :active_card nil
+         :idle (project-idle? root)
          :dashboard_url (project-dashboard-url root)
          :lanes []
          :tasks []
@@ -1101,21 +1124,21 @@
     (throw (ex-info "Missing task name" {:http-status 400})))
   (let [single-agent? (single-agent-project? root)
         task-id (new-task-id name)
-        lane (if single-agent? "spec" (master-role root))]
-  (pack-board root "create"
-              "--name" name
-              "--lane" lane
-              "--task-id" task-id
-              "--text" (or text ""))
+        created
+        (if single-agent?
+          (pack-board root "route"
+                      "--name" name
+                      "--task-id" task-id
+                      "--text" (or text ""))
+          (pack-board root "create"
+                      "--name" name
+                      "--lane" (master-role root)
+                      "--task-id" task-id
+                      "--text" (or text "")))]
     (if single-agent?
+      created
       (do
-        (write-chat-request!
-         root
-         (str "New routed card: " name "\n"
-              "Task ID: " task-id "\n\n"
-              (or text "")))
-        :dashboard)
-      (do
+        created
         (queue-new-task-note! root task-id name (or text ""))
         :handoff))))
 

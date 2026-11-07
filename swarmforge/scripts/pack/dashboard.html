@@ -370,6 +370,19 @@ function projectBand(proj) {
     pill.className = "pill pill-ok";
     pill.textContent = "single-agent";
     header.append(pill);
+    if (proj.active_card) {
+      const active = document.createElement("span");
+      active.className = "pill";
+      active.id = "active-card-" + (proj.name || "");
+      active.textContent = "active: " + (proj.active_card.name || "");
+      header.append(active);
+    } else if (proj.idle) {
+      const idle = document.createElement("span");
+      idle.className = "pill";
+      idle.id = "idle-" + (proj.name || "");
+      idle.textContent = "idle";
+      header.append(idle);
+    }
     if (proj.dashboard_url) {
       const dash = document.createElement("button");
       dash.type = "button";

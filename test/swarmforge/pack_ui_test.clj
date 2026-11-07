@@ -1233,6 +1233,16 @@
         (> (System/currentTimeMillis) deadline) false
         :else (do (Thread/sleep 50) (recur))))))
 
+(defn wait-lines [path expected-count timeout-ms]
+  (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
+    (loop []
+      (let [lines (when (fs/regular-file? path)
+                    (str/split-lines (slurp (str path))))]
+        (cond
+          (>= (count lines) expected-count) true
+          (> (System/currentTimeMillis) deadline) false
+          :else (do (Thread/sleep 50) (recur)))))))
+
 (deftest pack-web-serve-writes-dashboard-url-and-binds-localhost
   ;; Given a pack root
   ;; When pack_web --serve <root>
@@ -2701,6 +2711,7 @@
         (is (zero? (:exit recovered)) (:err recovered))
         (is (= ["swarmforge-runtime"] (tmux-sessions runtime-socket)))
         (is (= ["swarmforge-agent"] (tmux-sessions agent-socket)))
+        (is (wait-lines runtime-env-log 2 3000))
         (is (= ["fixture-snapshots::default::file:///tmp/forge-runtime-snapshots"
                 "fixture-snapshots::default::file:///tmp/forge-runtime-snapshots"]
                (str/split-lines (slurp (str runtime-env-log))))))

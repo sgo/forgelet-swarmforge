@@ -174,6 +174,12 @@ when present. Values already present in the launcher environment win, so a
 caller can override the file. A missing file is harmless; unreadable or
 malformed content fails the launch visibly.
 
+Single-agent cards use one active lane at a time. The first approved card enters
+`spec`; later cards wait in `queued` in creation-time/task-id order with no
+dashboard request. `stage complete` is the promotion boundary: it marks the
+finished card done, promotes the oldest queued card to `spec`, and creates
+exactly one request for it. The dashboard shows `queued` before the gate lanes.
+
 Open and close work the same way for pack and single-agent projects. The
 long-lived project runner is held in a `swarmforge-runtime` tmux session on that
 project's `.swarmforge/runtime-tmux.sock`; the forge records the project in

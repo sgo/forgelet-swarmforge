@@ -257,7 +257,7 @@
 
 (defn select-card [root config state files]
   (let [active (->> (board-rows root)
-                    (remove #(= "done" (:lane %)))
+                    (remove #(contains? #{"done" "queued"} (:lane %)))
                     vec)
         project-name (:task config)
         routed (remove #(= project-name (:name %)) active)
@@ -849,9 +849,27 @@
       (save-state root (:task config)
                   (assoc state :complete {:tree tree :at (now)
                                           :card (:card state)}))
-      (update-board! root config
-                     (or (:card state) (fallback-card root config []))
-                     "done")
+      (let [card (or (:card state) (fallback-card root config []))
+            pack-board-sh (fs/path root "swarmforge" "scripts" "pack_board.sh")
+            pack-board-bb (let [project-script (fs/path root "swarmforge" "scripts"
+                                                         "pack_board.bb")]
+                            (if (fs/regular-file? project-script)
+                              project-script
+                              (fs/path (fs/parent *file*) "pack_board.bb")))
+            result (when (and (single-agent? root)
+                              (some #(= (:name card) (:name %)) (board-rows root)))
+                     (if (fs/executable? pack-board-sh)
+                       (sh/sh (str pack-board-sh) "complete-promote"
+                              "--name" (:name card) "--root" (str root))
+                       (sh/sh "bb" (str pack-board-bb) "complete-promote"
+                              "--name" (:name card) "--root" (str root))))]
+        (if result
+          (do
+            (when-not (zero? (:exit result))
+              (exit! (or (:exit result) 1)
+                     (str/trim (str (:err result) (:out result)))))
+            (print (:out result)))
+          (update-board! root config card "done")))
       (println (str "complete: " (:task config) " at tree " tree)))))
 
 (defn parse-args [args]

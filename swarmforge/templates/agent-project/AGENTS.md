@@ -41,6 +41,12 @@ Work in vertical slices: one public behaviour through every gate. Tests,
 cleanup, architecture, hardening and verification are part of that slice, not
 separate backlog items and not gates deferred to a later card.
 
+Single-agent routing keeps at most one active card. Additional approved cards
+wait in `queued`; do not edit a queued card into `spec` or invent a second
+request. Completing the active card through `stage complete` promotes the
+oldest queued card and creates its one request. Queued cards do not make an
+idle project active and do not depend on the agent's prompt readiness.
+
 Approved Gherkin is executable. Every step has a handler under `acceptance/src`
 that calls the public API, and `scripts/run-acceptance-tests.sh` must pass.
 Hand-written JUnit is unit coverage, not acceptance evidence.

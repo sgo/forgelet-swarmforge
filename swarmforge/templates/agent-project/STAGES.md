@@ -13,6 +13,14 @@ The project tools live in `.swarmforge/bin`. Before running a gate manually:
 export PATH="$PWD/.swarmforge/bin:$PWD/swarmforge/scripts:$PATH"
 ```
 
+Single-agent cards enter the board through `queued` or `spec`. When no card is
+active, routing creates the approved card directly in `spec`; otherwise it is
+durably queued in creation-time/task-id order and no dashboard request is
+created. `stage complete` is the only promotion boundary: after every required
+gate is current it completes the active card, promotes the oldest queued card
+to `spec`, and creates that card's request. An empty queue records project
+idleness instead. `queued` is a board state, not a gate.
+
 ## Vertical slices
 
 A task is one public behaviour through every gate, not a layer of a behaviour.

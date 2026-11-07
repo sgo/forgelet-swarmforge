@@ -563,7 +563,7 @@
       (let [lanes (run project "swarmforge/scripts/pack_board.sh"
                        "lanes" "--root" (str project))]
         (is (zero? (:exit lanes)) (:err lanes))
-        (is (= "spec" (first (str/split-lines (:out lanes))))))
+        (is (= "queued" (first (str/split-lines (:out lanes))))))
 
       (let [requests (fs/path project ".swarmforge" "dashboard" "requests" "pending")
             bodies (mapv #(slurp (str %)) (fs/list-dir requests))]
@@ -942,8 +942,10 @@
                             "--once" "--no-serve"
                             "--agent-command" fake-agent-command)]
         (is (zero? (:exit once-ready)) (:err once-ready))
-        (is (fs/regular-file? (fs/path project ".swarmforge" "dashboard" "requests"
-                                        "done" "req-busy.request"))
+        (is (wait-for-path
+             (fs/path project ".swarmforge" "dashboard" "requests"
+                      "done" "req-busy.request")
+             3000)
             (str "runner output: " (:out once-ready) (:err once-ready))))
       (finally
         (sh/sh "tmux" "-S" sock "kill-server")
@@ -1252,7 +1254,7 @@
           (let [lanes (str/split-lines
                        (:out (run project "swarmforge/scripts/pack_board.sh"
                                   "lanes" "--root" (str project))))]
-            (is (= "spec" (first lanes)))
+            (is (= "queued" (first lanes)))
             (is (= "done" (last lanes)))
             (is (some #{"qa"} lanes))
             (is (some #{"e2e"} lanes))

@@ -23,6 +23,8 @@
        "  pack_board.sh archive <role>\n"
        "  pack_board.sh archive-all [--root <dir>]\n"
        "  pack_board.sh increment-audit --task-id <task-id> [--root <dir>]\n"
+       "  pack_board.sh route --name <name> --task-id <task-id> --text <text> [--root <dir>]\n"
+       "  pack_board.sh complete-promote --name <name> [--root <dir>]\n"
        "  pack_board.sh delete --name <name> [--root <dir>]\n"
        "  pack_board.sh delete <name>"))
 
@@ -95,8 +97,10 @@
 (defn stage-lanes [root]
   (let [file (fs/path root "stages.edn")]
     (when (fs/regular-file? file)
-      (conj (mapv :name (:stages (edn/read-string (slurp (str file)))))
-            "done"))))
+      (let [lanes (mapv :name (:stages (edn/read-string (slurp (str file)))))]
+        (if (single-agent? root)
+          (into ["queued"] (conj lanes "done"))
+          (conj lanes "done"))))))
 
 (defn with-board-lock [root f]
   (let [dir (board-dir root)
@@ -370,8 +374,251 @@
                                     rows))
           (fs/delete-if-exists (task-body-file root name)))))))
 
+(defn project-task-name [root]
+  (let [file (fs/path root "stages.edn")]
+    (when (fs/regular-file? file)
+      (:task (edn/read-string (slurp (str file)))))))
+
+(defn live-task? [project-name row]
+  (let [[name lane] (str/split row #"\t" -1)]
+    (and (not= name project-name)
+         (not (str/blank? lane))
+         (not (#{"done" "queued"} lane)))))
+
+(defn project-active-cards [root rows]
+  (let [project-name (project-task-name root)]
+    (filterv #(live-task? project-name %) rows)))
+
+(defn queued-cards [root rows]
+  (let [project-name (project-task-name root)]
+    (->> rows
+         (filter (fn [row]
+                   (let [[name lane] (str/split row #"\t" -1)]
+                     (and (not= name project-name)
+                          (= lane "queued")))))
+         (sort-by (fn [row]
+                    (let [[_ _ created _ task-id] (str/split row #"\t" -1)]
+                      [created (or task-id "")])))
+         vec)))
+
+(defn request-dir [root]
+  (fs/path root ".swarmforge" "dashboard" "requests" "pending"))
+
+(defn done-request-dir [root]
+  (fs/path root ".swarmforge" "dashboard" "requests" "done"))
+
+(defn request-file [root request-id]
+  (fs/path (request-dir root) (str request-id ".request")))
+
+(defn request-present? [root request-id]
+  (or (fs/regular-file? (request-file root request-id))
+      (fs/regular-file? (fs/path (done-request-dir root)
+                                 (str request-id ".request")))))
+
+(defn atomic-spit! [path text]
+  (fs/create-dirs (fs/parent path))
+  (let [tmp (fs/create-temp-file {:dir (fs/parent path) :prefix ".write."})]
+    (spit (str tmp) text)
+    (fs/move tmp path {:replace-existing true :atomic-move true})))
+
+(defn request-id [task-id]
+  (str "req-promote-" (str/replace (str task-id) #"[^0-9A-Za-z._-]" "_")))
+
+(defn ensure-promotion-request! [root request-id name task-id text]
+  (when-not (request-present? root request-id)
+    (atomic-spit!
+     (request-file root request-id)
+     (str "id: " request-id "\n"
+          "status: pending\n"
+          "created_at: " (timestamp) "\n"
+          "\n"
+          "New routed card: " name "\n"
+          "Task ID: " task-id "\n\n"
+          (or text "")
+          (when-not (str/ends-with? (or text "") "\n") "\n")))))
+
+(defn route! [opts]
+  (let [root (resolve-root opts)
+        name (task-name opts)
+        task-id (:task-id opts)
+        text (or (:text opts) "")
+        file (tasks-file root)]
+    (require-value! name "task name")
+    (require-value! task-id "task ID")
+    (with-board-lock
+      root
+      (fn []
+        (let [rows (read-rows file)]
+          (when (find-task rows name)
+            (exit! 1 (str "Duplicate task name: " name)))
+          (let [active (project-active-cards root rows)]
+            (when (> (count active) 1)
+              (exit! 1 (str "More than one active card: "
+                            (str/join ", " (map row-name active)))))
+            (let [queued (when (empty? active) (queued-cards root rows))
+                  recover (first queued)
+                  recovery-name (when recover (row-name recover))
+                  recovery-id (when recover
+                                (nth (str/split recover #"\t" -1) 4 nil))
+                  lane (if (or (seq active) recover) "queued" "spec")
+                  row (task-row name lane (timestamp) task-id)
+                  recovered-rows (if recover
+                                   (mapv #(if (= (row-name %) recovery-name)
+                                            (rewrite-lane % recovery-name "spec")
+                                            %)
+                                         rows)
+                                   rows)]
+              (when recover
+                (let [body-file (task-body-file root recovery-name)]
+                  (ensure-promotion-request!
+                   root (request-id recovery-id) recovery-name recovery-id
+                   (if (fs/regular-file? body-file) (slurp (str body-file)) ""))))
+              (write-rows file (conj recovered-rows row))
+              (write-body! root name text)
+              (write-task-doc! root name text)
+              (cond
+                recover
+                (do
+                  (fs/delete-if-exists (fs/path root ".swarmforge" "project-idle"))
+                  (println (str "RECOVERED:" recovery-name ":" recovery-id))
+                  (println (str "QUEUED:" name ":" task-id)))
+
+                (= lane "spec")
+                (let [rid (request-id task-id)]
+                  (fs/delete-if-exists (fs/path root ".swarmforge" "project-idle"))
+                  (ensure-promotion-request! root rid name task-id text)
+                  (println (str "ACTIVE:" name ":" task-id ":" rid)))
+
+                :else
+                (println (str "QUEUED:" name ":" task-id))))))))))
+
+(defn promotion-file [root completed-id]
+  (fs/path root ".swarmforge" "card-promotions"
+           (str (str/replace (str completed-id) #"[^0-9A-Za-z._-]" "_") ".edn")))
+
+(defn read-promotion [root completed-id]
+  (let [file (promotion-file root completed-id)]
+    (when (fs/regular-file? file)
+      (edn/read-string (slurp (str file))))))
+
+(defn write-promotion! [root completed-id promotion]
+  (atomic-spit! (promotion-file root completed-id)
+                (str (pr-str promotion) "\n")))
+
+(defn row-for [rows name]
+  (some #(when (= (str/lower-case name)
+                  (str/lower-case (or (row-name %) "")))
+           %)
+        rows))
+
+(defn complete-row [line name]
+  (if (= (str/lower-case name)
+         (str/lower-case (or (row-name line) "")))
+    (rewrite-lane line name "done")
+    line))
+
+(defn row-body [root row]
+  (let [name (row-name row)]
+    (if (fs/regular-file? (task-body-file root name))
+      (slurp (str (task-body-file root name)))
+      "")))
+
+(defn promote-recorded! [root file rows promotion]
+  (let [target (row-for rows (:promoted-name promotion))]
+    (when target
+      (let [[target-name target-lane _ _ target-id] (str/split target #"\t" -1)]
+        (ensure-promotion-request! root (:request-id promotion)
+                                   target-name (or (:promoted-id promotion) target-id)
+                                   (row-body root target))
+        (when (= target-lane "queued")
+          (atomic-spit!
+           file
+           (str (str/join
+                 "\n"
+                 (mapv #(if (= (row-name %) target-name)
+                          (rewrite-lane % target-name "spec")
+                          %)
+                       rows))
+                "\n")))
+        (fs/delete-if-exists (fs/path root ".swarmforge" "project-idle"))))
+    (write-promotion! root (:completed-id promotion)
+                      (assoc promotion :status :complete
+                                       :completed-at (timestamp)))
+    (println (str "PROMOTED:" (:promoted-name promotion) ":"
+                  (:promoted-id promotion) ":" (:request-id promotion)))
+    (:request-id promotion)))
+
+(defn complete-promote! [opts]
+  (let [root (resolve-root opts)
+        completed-name (task-name opts)
+        file (tasks-file root)]
+    (require-value! completed-name "task name")
+    (with-board-lock
+      root
+      (fn []
+        (let [rows (read-rows file)
+              completed (row-for rows completed-name)]
+          (when-not completed
+            (exit! 1 (str "Unknown completed task name: " completed-name)))
+          (let [[_ _ _ _ completed-id] (str/split completed #"\t" -1)
+                existing (read-promotion root completed-id)
+                after-done (mapv #(complete-row % completed-name) rows)]
+            (if existing
+              (case (:status existing)
+                :idle (do (atomic-spit! file
+                                        (str (str/join "\n" after-done) "\n"))
+                          (println (str "IDLE:" completed-name))
+                          nil)
+                :waiting-active (do (atomic-spit! file
+                                                  (str (str/join "\n" after-done) "\n"))
+                                    (println (str "WAITING_ACTIVE:" completed-name))
+                                    nil)
+                (do
+                  (atomic-spit! file (str (str/join "\n" after-done) "\n"))
+                  (promote-recorded! root file after-done existing)))
+              (let [active-after (project-active-cards root after-done)
+                    target (when (empty? active-after)
+                             (first (queued-cards root after-done)))
+                    base {:completed-name completed-name
+                          :completed-id completed-id
+                          :created-at (timestamp)
+                          :status :intent}
+                    promotion (cond
+                                (seq active-after)
+                                (assoc base :status :waiting-active)
+
+                                target
+                                (let [[name _ _ _ task-id]
+                                      (str/split target #"\t" -1)]
+                                  (assoc base
+                                         :status :promoting
+                                         :promoted-name name
+                                         :promoted-id task-id
+                                         :request-id (request-id task-id)))
+
+                                :else
+                                (assoc base :status :idle))]
+                (write-promotion! root completed-id promotion)
+                (atomic-spit! file (str (str/join "\n" after-done) "\n"))
+                (case (:status promotion)
+                  :idle
+                  (do
+                    (atomic-spit! (fs/path root ".swarmforge" "project-idle")
+                                  (str (:created-at promotion) "\n"))
+                    (println (str "IDLE:" completed-name))
+                    nil)
+
+                  :waiting-active
+                  (do (println (str "WAITING_ACTIVE:" completed-name))
+                      nil)
+
+                  :promoting
+                  (promote-recorded! root file after-done promotion))))))))))
+
 (def commands
   {"create" create!
+   "route" route!
+   "complete-promote" complete-promote!
    "move" move!
    "done" done!
    "list" list!

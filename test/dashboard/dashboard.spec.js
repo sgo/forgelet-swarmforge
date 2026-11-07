@@ -60,6 +60,19 @@ function seedForge(root) {
   seedProject(project);
   const agent = path.join(root, "projects/agent");
   writeFile(path.join(agent, ".swarmforge/single-agent"), "agent\n");
+  writeFile(
+    path.join(agent, ".swarmforge/roles.tsv"),
+    `agent\tmaster\t${agent}\tswarmforge-agent\tAgent\tcodex\ttask\n`
+  );
+  writeFile(
+    path.join(agent, "stages.edn"),
+    '{:task "agent" :stages [{:name "spec" :approval :operator :spec ["tasks/*.md"]} {:name "code" :runs [["true"]]}]}\n'
+  );
+  writeFile(
+    path.join(agent, ".swarmforge/board/tasks.tsv"),
+    "active-card\tspec\t2026-01-01T00:00:00Z\t2026-01-01T00:00:00Z\ttask-active\t0\n" +
+      "waiting-card\tqueued\t2026-01-01T00:01:00Z\t2026-01-01T00:01:00Z\ttask-waiting\t0\n"
+  );
   writeFile(path.join(agent, ".swarmforge/dashboard-url"), "http://127.0.0.1:9999\n");
   writeFile(path.join(root, ".swarmforge/open-projects"), "htw\nagent\n");
   writeFile(
@@ -130,7 +143,10 @@ test.describe("pack dashboard", () => {
   test("marks a single-agent project and links its own dashboard", async ({ page }) => {
     await page.goto(handle.url);
     const band = page.locator('[data-project="agent"]');
-    await expect(band.locator(".pill")).toHaveText("single-agent");
+    await expect(band.getByText("single-agent", { exact: true })).toBeVisible();
+    await expect(band.getByText("active: active-card", { exact: true })).toBeVisible();
+    await expect(band.locator('[data-lane="queued"]')).toBeVisible();
+    await expect(band.locator('[data-lane="queued"]')).toContainText("waiting-card");
     await expect(band.getByRole("button", { name: "Project dashboard" })).toBeVisible();
     await expect(band.getByRole("button", { name: "New Task" })).toHaveCount(0);
   });
