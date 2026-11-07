@@ -56,4 +56,5 @@ if [[ -n "$env_file" && -e "$env_file" ]]; then
   trap - EXIT
 fi
 
+unset NO_COLOR
 exec bash -c "$1"

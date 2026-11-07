@@ -246,6 +246,8 @@
                 (str "#!/bin/sh\n"
                      "printf '%s %s\\n' \"$(basename \"$0\")\" \"$*\" "
                      "> \"$SWARMFORGE_TEST_AGENT_LOG\"\n"
+                     "printf '%s|%s|%s\\n' \"${NO_COLOR-unset}\" \"$TERM\" \"$COLORTERM\" "
+                     "> \"$SWARMFORGE_TEST_AGENT_ENV_LOG\"\n"
                      "printf '<<AGENT READY>>\\n'\n"
                      "sleep 30\n"))
     (fs/set-posix-file-permissions fake "rwxr-xr-x")
@@ -253,7 +255,8 @@
       (doseq [agent agents]
         (let [name (str "agent-" agent)
               executable (fs/path fake-bin agent)
-              log (fs/path forge (str name ".argv"))]
+              log (fs/path forge (str name ".argv"))
+              env-log (fs/path forge (str name ".env"))]
           (fs/copy fake executable)
           (let [composed (run repo-root composer "--forge" (str forge)
                               "--agent" agent name)]
@@ -265,7 +268,11 @@
             (is (= agent (nth role-fields 5 nil)))
             (let [started (run-env project
                                    {"PATH" (str fake-bin ":" (System/getenv "PATH"))
-                                    "SWARMFORGE_TEST_AGENT_LOG" (str log)}
+                                    "NO_COLOR" "1"
+                                    "TERM" "xterm-kitty"
+                                    "COLORTERM" "truecolor"
+                                    "SWARMFORGE_TEST_AGENT_LOG" (str log)
+                                    "SWARMFORGE_TEST_AGENT_ENV_LOG" (str env-log)}
                                    "bb" (str (fs/path project "swarmforge" "scripts"
                                                        "agent-runner.bb"))
                                    "--root" (str project)
@@ -283,8 +290,10 @@
                       "copilot" (str/includes?
                                  command "--name SwarmForge Agent --yolo")
                       "grok" (str/includes?
-                              command "--permission-mode bypassPermissions --minimal")))))
-            (stop-agent-session! project))))
+                              command "--permission-mode bypassPermissions --minimal"))))
+              (is (= "unset|tmux-256color|truecolor\n"
+                     (slurp (str env-log))))
+            (stop-agent-session! project)))))
       (let [project (fs/path forge "projects" "agent-missing")]
         (write-file (fs/path project ".swarmforge" "single-agent") "agent\n")
         (let [missing (run project
@@ -326,22 +335,7 @@
         missing-env (fs/path forge "private" "missing.env")
         log (fs/path forge "agent-env.log")
         probe (fs/path project ".swarmforge" "env-probe.sh")
-        runner (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))
-        run-probe
-        (fn [env-file log-path unset-snapshot? extra-env]
-          (let [base {"PATH" (System/getenv "PATH")
-                      "NO_COLOR" "1"
-                      "SWARMFORGE_PROJECT_RUNTIME_ENV" (str env-file)
-                      "SWARMFORGE_TEST_AGENT_LOG" (str log-path)}
-                env (merge base extra-env)
-                prefix (cond-> ["env"]
-                         unset-snapshot?
-                         (conj "-u" "SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY"))]
-            (apply run-env project env
-                   (concat prefix
-                           ["bb" runner "--root" (str project)
-                            "--once" "--no-serve"
-                            "--agent-command" (str probe)]))))]
+        runner (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))]
     (try
       (is (zero? (:exit (run repo-root composer "--forge" (str forge)
                             "agent-env"))))
@@ -352,50 +346,73 @@
                        "'file-snapshots::default::file:///tmp/file-snapshots'\n"))
       (write-file probe
                   (str "#!/bin/sh\n"
-                       "printf '%s|%s|%s|%s\\n' "
+                       "printf '%s|%s|%s|%s|%s|%s\\n' "
                        "\"${SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY:-}\" "
                        "\"${RUNTIME_FILE_ONLY:-}\" \"${NO_COLOR:-}\" \"$PATH\" "
+                       "\"${TERM:-}\" \"${COLORTERM:-}\" "
                        "> \"$SWARMFORGE_TEST_AGENT_LOG\"\n"
                        "printf '<<AGENT READY>>\\n'\n"
                        "sleep 30\n"))
       (fs/set-posix-file-permissions probe "rwxr-xr-x")
 
-      (let [started (run-probe runtime-env log true {})]
-        (is (zero? (:exit started)) (:err started))
-        (is (re-find
-             #"file-snapshots::default::file:///tmp/file-snapshots\|from-file\|1\|.*\.swarmforge/bin:.*swarmforge/scripts"
-             (slurp (str log)))))
-      (stop-agent-session! project)
+      (let [run-probe
+            (fn [env-file unset-snapshot? extra-env]
+              (let [env (merge {"PATH" (System/getenv "PATH")
+                                "NO_COLOR" "1"
+                                "TERM" "xterm-kitty"
+                                "COLORTERM" "truecolor"
+                                "SWARMFORGE_PROJECT_RUNTIME_ENV" (str env-file)
+                                "SWARMFORGE_TEST_AGENT_LOG" (str log)}
+                               extra-env)
+                    prefix (cond-> ["env"]
+                             unset-snapshot?
+                             (conj "-u"
+                                   "SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY"))]
+                (apply run-env project env
+                       (concat prefix
+                               ["bb" runner "--root" (str project)
+                                "--once" "--no-serve"
+                                "--agent-command" (str probe)]))))]
+        (let [started (run-probe runtime-env true {})]
+          (is (zero? (:exit started)) (:err started))
+          (is (re-find
+               #"file-snapshots::default::file:///tmp/file-snapshots\|from-file\|\|.*\.swarmforge/bin:.*swarmforge/scripts:.*\|tmux-[^|]+\|truecolor"
+               (slurp (str log)))))
+        (stop-agent-session! project)
 
-      (let [started (run-probe runtime-env log false
-                               {"SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY"
-                                "caller-snapshots::default::file:///tmp/caller-snapshots"})]
-        (is (zero? (:exit started)) (:err started))
-        (is (str/starts-with?
-             (slurp (str log))
-             "caller-snapshots::default::file:///tmp/caller-snapshots|from-file|1|")))
-      (stop-agent-session! project)
+        (let [started
+              (run-probe
+               runtime-env false
+               {"SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY"
+                "caller-snapshots::default::file:///tmp/caller-snapshots"})]
+          (is (zero? (:exit started)) (:err started))
+          (is (str/starts-with?
+               (slurp (str log))
+               "caller-snapshots::default::file:///tmp/caller-snapshots|from-file||")))
+        (stop-agent-session! project)
 
-      (let [started (run-probe missing-env log true {})]
-        (is (zero? (:exit started)) (:err started))
-        (is (str/starts-with? (slurp (str log)) "||1|")))
-      (stop-agent-session! project)
+        (let [started (run-probe missing-env true {})]
+          (is (zero? (:exit started)) (:err started))
+          (is (re-find #"^\|\|\|.*\|tmux-[^|]+\|truecolor$"
+                       (slurp (str log)))))
+        (stop-agent-session! project)
 
-      (doseq [[label body expected]
-              [["malformed" "not-an-assignment\n" "malformed assignment"]
-               ["syntax" "export BROKEN='unterminated\n" "malformed shell syntax"]]]
-        (write-file runtime-env body)
-        (let [failed (run-probe runtime-env log true {})]
-          (is (not (zero? (:exit failed))) label)
-          (is (str/includes? (:err failed) expected) label)))
-      (stop-agent-session! project)
+        (doseq [[label body expected]
+                [["malformed" "not-an-assignment\n" "malformed assignment"]
+                 ["syntax" "export BROKEN='unterminated\n"
+                  "malformed shell syntax"]]]
+          (write-file runtime-env body)
+          (let [failed (run-probe runtime-env true {})]
+            (is (not (zero? (:exit failed))) label)
+            (is (str/includes? (:err failed) expected) label)))
+        (stop-agent-session! project)
 
-      (write-file runtime-env
-                  "SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY=unreadable\n")
-      (fs/set-posix-file-permissions runtime-env "---------")
-      (let [failed (run-probe runtime-env log true {})]
-        (is (not (zero? (:exit failed))))
-        (is (str/includes? (:err failed) "cannot read")))
+        (write-file runtime-env
+                    "SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY=unreadable\n")
+        (fs/set-posix-file-permissions runtime-env "---------")
+        (let [failed (run-probe runtime-env true {})]
+          (is (not (zero? (:exit failed))))
+          (is (str/includes? (:err failed) "cannot read"))))
       (finally
         (when (fs/exists? runtime-env)
           (fs/set-posix-file-permissions runtime-env "rw-r--r--"))

@@ -35,3 +35,12 @@ lifecycle, restart its agent session, prove `NO_COLOR` is absent from the live
 child environment, and ask the operator to verify syntax and diff colours in
 Kitty. Then update and close the three receiving-forge requests once each forge
 has applied the same compose/refresh/restart sequence.
+
+## Verification boundary
+
+This layer checkout has no property suite, architecture module, Gherkin
+acceptance tree, documentation contract, mutation manifest, or application
+mutation profile. Its supported gates are `bb test` (including dashboard and
+upgrade exercise) and `bb crap`. DRY covers the changed Clojure test; the
+mutation tool does not parse the shell launch helper, and no valid project
+mutation profile exists here.

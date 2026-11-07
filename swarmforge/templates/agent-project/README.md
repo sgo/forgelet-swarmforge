@@ -13,6 +13,8 @@ Before starting the agent, the runner loads
 when present. The file contains assignment-only environment defaults; values
 already supplied to the runner win. A missing file is allowed, while an
 unreadable or malformed file fails the launch visibly.
+The launch boundary always removes `NO_COLOR`; terminal variables such as
+`TERM` and `COLORTERM` are preserved.
 
 ## Documentation contract
 
