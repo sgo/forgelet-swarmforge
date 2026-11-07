@@ -11,6 +11,10 @@ deployment rules.
 The runner puts `.swarmforge/bin` and `swarmforge/scripts` first on `PATH`. Do
 the same in a manual shell before running a stage.
 
+The runner also loads project runtime defaults from
+`${SWARMFORGE_PROJECT_RUNTIME_ENV:-$HOME/.config/forgelet/project-runtime.env}`.
+Caller-supplied values win over that file. Do not commit device-specific values.
+
 The operator gives the card. You write the task note and Gherkin, validate
 them, and record the spec bundle. It is approved automatically by default, or
 proposed for operator approval when the forge opts back into that policy. Do

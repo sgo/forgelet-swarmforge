@@ -2467,7 +2467,7 @@
     []))
 
 (def supervised-fake-agent
-  "sh -c 'echo \"<<AGENT READY>>\"; while IFS= read -r line; do case \"$line\" in \"[phone \"*) id=${line#\\[phone }; id=${id%%]*}; mkdir -p tmp; printf \"fake answer from %s\\n\" \"$id\" > tmp/answer.txt; ./swarmforge/scripts/pack_dashboard_request.sh answer \"$id\" ./tmp/answer.txt; echo \"<<AGENT READY>>\";; esac; done'")
+  "sh -c 'if [ -n \"${SWARMFORGE_TEST_RUNTIME_ENV_LOG:-}\" ]; then printf \"%s\\n\" \"${SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY:-}\" >> \"$SWARMFORGE_TEST_RUNTIME_ENV_LOG\"; fi; echo \"<<AGENT READY>>\"; while IFS= read -r line; do case \"$line\" in \"[phone \"*) id=${line#\\[phone }; id=${id%%]*}; mkdir -p tmp; printf \"fake answer from %s\\n\" \"$id\" > tmp/answer.txt; ./swarmforge/scripts/pack_dashboard_request.sh answer \"$id\" ./tmp/answer.txt; echo \"<<AGENT READY>>\";; esac; done'")
 
 (deftest forge-infers-github-project-name
   (let [result (pack-web (tmp-dir) true "--test-inferred-name" "unclebob/swarm-forge" "github")]
@@ -2652,13 +2652,19 @@
         runtime-socket (fs/path project ".swarmforge/runtime-tmux.sock")
         agent-socket (fs/path project ".swarmforge/agent-tmux.sock")
         url-file (fs/path project ".swarmforge/dashboard-url")
+        runtime-env (fs/path root "private" "project-runtime.env")
+        runtime-env-log (fs/path root "runtime-env.log")
         open-env {"SWARMFORGE_AGENT_COMMAND" supervised-fake-agent
+                  "SWARMFORGE_PROJECT_RUNTIME_ENV" (str runtime-env)
+                  "SWARMFORGE_TEST_RUNTIME_ENV_LOG" (str runtime-env-log)
                   "SWARMFORGE_OPEN_BROWSER" "0"
                   "SWARMFORGE_PREVENT_SLEEP" "0"
                   "SWARMFORGE_RUNTIME_READY_TIMEOUT_MS" "10000"}]
     (try
       (seed-mini-forge! root)
       (use-full-forge-scripts! root)
+      (write-file runtime-env
+                  "SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY='fixture-snapshots::default::file:///tmp/forge-runtime-snapshots'\n")
       (write-file (fs/path project ".swarmforge/single-agent") "agent\n")
       (write-file (fs/path project ".swarmforge/roles.tsv")
                   (format "agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n"
@@ -2672,6 +2678,8 @@
              "agent"))
         (is (= ["swarmforge-runtime"] (tmux-sessions runtime-socket)))
         (is (= ["swarmforge-agent"] (tmux-sessions agent-socket)))
+        (is (= ["fixture-snapshots::default::file:///tmp/forge-runtime-snapshots"]
+               (str/split-lines (slurp (str runtime-env-log)))))
         (is (str/includes? (slurp url) "SwarmForge"))
         (is (str/includes? (slurp (str url "/api/state")) "\"lanes\""))
         (is (fs/regular-file? (fs/path project ".swarmforge/runtime.edn")))
@@ -2685,12 +2693,17 @@
 
       (run {:dir root} "tmux" "-S" (str runtime-socket)
            "kill-session" "-t" "=swarmforge-runtime")
+      (run {:dir root :ok? false} "tmux" "-S" (str agent-socket) "kill-server")
       (is (= [] (tmux-sessions runtime-socket)))
+      (is (= [] (tmux-sessions agent-socket)))
       (let [recovered (pack-web-env root open-env
                                     "--test-open-project" (str root) "agent")]
         (is (zero? (:exit recovered)) (:err recovered))
         (is (= ["swarmforge-runtime"] (tmux-sessions runtime-socket)))
-        (is (= ["swarmforge-agent"] (tmux-sessions agent-socket))))
+        (is (= ["swarmforge-agent"] (tmux-sessions agent-socket)))
+        (is (= ["fixture-snapshots::default::file:///tmp/forge-runtime-snapshots"
+                "fixture-snapshots::default::file:///tmp/forge-runtime-snapshots"]
+               (str/split-lines (slurp (str runtime-env-log))))))
 
       (let [closed (pack-web-env root {}
                                  "--test-close-project" (str root) "agent")

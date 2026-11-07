@@ -298,17 +298,31 @@
                (not (fs/regular-file? (socket-file root))))
       (delete-socket-file! root))
     (spit (str (socket-file root)) (str (agent-socket root) "\n"))
-    (let [result (tmux root "new-session" "-d" "-s" session-name
+    (let [env-loader (fs/path (fs/parent *file*)
+                              "load-project-runtime-env.sh")
+          _ (when-not (fs/regular-file? env-loader)
+              (exit! 1 (str "Project runtime environment loader not found: "
+                            env-loader)))
+          validation (process/sh {:continue true} "bash" (str env-loader) "--check")
+          _ (when-not (zero? (:exit validation))
+              (exit! 1 "Project runtime environment failed:"
+                      (str/trim (str (:err validation) (:out validation)))))
+          result (tmux root "new-session" "-d" "-s" session-name
                        "-c" (str root)
                        (str "export PATH=" (sq (str (fs/path root ".swarmforge" "bin")
                                                     ":"
                                                     (fs/path root "swarmforge" "scripts")
                                                     ":"
                                                     (or (System/getenv "PATH") "")))
-                            "; exec " command))]
+                            "; exec bash " (sq (str env-loader)) " "
+                            (sq command)))]
       (when-not (zero? (:exit result))
         (exit! 1 "Could not start the agent session: " (:err result))))
-    (settle-agent-session! root))
+    (when-not (settle-agent-session! root)
+      (let [message (str/trim (or (visible-pane root) ""))]
+        (stop-agent! root)
+        (exit! 1 "Agent session did not become ready:"
+                (when-not (str/blank? message) message)))))
   ;; Also correct a session that predates the project-name behavior. The
   ;; persistent session survives a relay restart, so naming only a new session
   ;; would leave an upgraded project showing "codex" until it was killed.
@@ -319,6 +333,9 @@
     (let [text (or (visible-pane root) "")]
       (cond
         (ready? root (some-> (pending-request root) :id)) true
+
+        (str/includes? text "load-project-runtime-env:")
+        false
 
         (str/includes? text "Trust this folder?")
         (do

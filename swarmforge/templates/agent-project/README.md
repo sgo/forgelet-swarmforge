@@ -8,6 +8,12 @@ request at a time.
 The forge dashboard marks this project as single-agent and links to the
 project's own dashboard.
 
+Before starting the agent, the runner loads
+`${SWARMFORGE_PROJECT_RUNTIME_ENV:-$HOME/.config/forgelet/project-runtime.env}`
+when present. The file contains assignment-only environment defaults; values
+already supplied to the runner win. A missing file is allowed, while an
+unreadable or malformed file fails the launch visibly.
+
 ## Documentation contract
 
 Every completed card includes the `docs` gate. The maintained surfaces are:

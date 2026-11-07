@@ -168,6 +168,12 @@ Closing the project stops both the relay and the `swarmforge-agent` session;
 `agent-runner.bb --stop-agent` stops only the agent, leaving the phone relay
 running.
 
+Each single-agent launch also loads assignment-only defaults from
+`${SWARMFORGE_PROJECT_RUNTIME_ENV:-$HOME/.config/forgelet/project-runtime.env}`
+when present. Values already present in the launcher environment win, so a
+caller can override the file. A missing file is harmless; unreadable or
+malformed content fails the launch visibly.
+
 Open and close work the same way for pack and single-agent projects. The
 long-lived project runner is held in a `swarmforge-runtime` tmux session on that
 project's `.swarmforge/runtime-tmux.sock`; the forge records the project in
