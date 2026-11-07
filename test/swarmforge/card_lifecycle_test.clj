@@ -4,7 +4,8 @@
             [clojure.edn :as edn]
             [clojure.java.shell :as sh]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]))
+            [clojure.test :refer [deftest is testing]]
+            [route-card :as route-card]))
 
 (def repo-root (fs/cwd))
 (def scripts (fs/path repo-root "swarmforge" "scripts"))
@@ -312,15 +313,29 @@
                             id (second (re-find #"PROPOSED: (\S+)"
                                                 (:out proposed)))]
                         (is (zero? (:exit proposed)) (:err proposed))
-                        (sh/sh "bb" (str (fs/path scripts "route_card.bb"))
-                               "commit" id "--forge-root" (str forge)))))]
+                        {:id id
+                         :result
+                         (sh/sh "bb" (str (fs/path scripts "route_card.bb"))
+                                "commit" id "--forge-root" (str forge))})))]
         (let [first (route "first")]
-          (is (zero? (:exit first)) (:err first))
-          (is (str/includes? (:out first) "in lane spec")))
+          (is (zero? (:exit (:result first))) (:err (:result first)))
+          (is (str/includes? (:out (:result first)) "in lane spec"))
+          (let [proposal (edn/read-string
+                          (slurp (str (fs/path forge ".swarmforge" "route-proposals"
+                                              (str (:id first) ".edn")))))]
+            (is (= "spec" (:lane proposal)))
+            (is (= "spec" (:created-lane proposal)))))
         (let [second-card (route "second")]
-          (is (zero? (:exit second-card)) (:err second-card))
-          (is (str/includes? (:out second-card) "in lane queued"))
-          (is (str/includes? (:out second-card) "will be requested after")))
+          (is (zero? (:exit (:result second-card))) (:err (:result second-card)))
+          (is (str/includes? (:out (:result second-card)) "in lane queued"))
+          (is (str/includes? (:out (:result second-card)) "will be requested after"))
+          (let [proposal (edn/read-string
+                          (slurp (str (fs/path forge ".swarmforge" "route-proposals"
+                                              (str (:id second-card) ".edn")))))]
+            (is (= "queued" (:lane proposal)))
+            (is (= "queued" (:created-lane proposal)))
+            (is (= (:task-id (first (filter #(= "second" (:name %)) (rows root))))
+                   (:task-id proposal)))))
         (is (= 1 (count (request-files root)))))
       (let [active (first (filter #(= "first" (:name %)) (rows root)))
             pending (first (request-files root))
@@ -335,4 +350,59 @@
                     (count (filter #(= "spec" (:lane %)) (rows root)))]))
       (finally
         (fs/delete-tree root)
+        (fs/delete-tree forge)))))
+
+(deftest route-report-refuses-a-missing-or-malformed-board-row
+  (let [root (tmp-project)]
+    (try
+      (is (try
+            (route-card/created-task-row root "missing")
+            false
+            (catch clojure.lang.ExceptionInfo e
+              (str/includes? (ex-message e) "task id missing is missing"))))
+      (write-file (fs/path root ".swarmforge/board/tasks.tsv")
+                  (str "one\tspec\t2026-11-07T00:00:00Z\t2026-11-07T00:00:00Z\tsame\t0\n"
+                       "two\tqueued\t2026-11-07T00:00:01Z\t2026-11-07T00:00:01Z\tsame\t0\n"))
+      (is (try
+            (route-card/created-task-row root "same")
+            false
+            (catch clojure.lang.ExceptionInfo e
+              (str/includes? (ex-message e)
+                             "more than one board row names task id same"))))
+      (is (= 2 (count (rows root))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest pack-routing-keeps-its-master-lane-report
+  (let [forge (fs/create-temp-dir {:dir "/tmp" :prefix "sf-pack-route-forge."})
+        project (fs/path forge "projects" "pack")
+        note (fs/path forge "pack-card.md")]
+    (try
+      (write-file (fs/path forge ".swarmforge/roles.tsv")
+                  (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tgrok\ttask\n"
+                          forge))
+      (write-file (fs/path project ".swarmforge/roles.tsv")
+                  (format "specifier\tmaster\t%s\tswarmforge-specifier\tSpecifier\tcodex\ttask\n"
+                          project))
+      (write-file (fs/path project "stages.edn")
+                  (pr-str {:task "pack" :stages [{:name "spec"}]}))
+      (write-file note "# pack-card\n\nPack card.\n")
+      (let [proposal
+            (sh/sh "bb" (str (fs/path scripts "route_card.bb"))
+                   "propose" (str project) "pack-card" (str note)
+                   "--forge-root" (str forge) "--operator-said" "yes")
+            id (second (re-find #"PROPOSED: (\S+)" (:out proposal)))
+            committed
+            (sh/sh "bb" (str (fs/path scripts "route_card.bb"))
+                   "commit" id "--forge-root" (str forge))
+            record (edn/read-string
+                    (slurp (str (fs/path forge ".swarmforge" "route-proposals"
+                                        (str id ".edn")))))]
+        (is (zero? (:exit proposal)) (:err proposal))
+        (is (zero? (:exit committed)) (:err committed))
+        (is (str/includes? (:out committed) "in lane specifier"))
+        (is (= "specifier" (:lane record)))
+        (is (= "specifier" (:created-lane record)))
+        (is (= "specifier" (:lane (first (rows project))))))
+      (finally
         (fs/delete-tree forge)))))

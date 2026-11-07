@@ -37,3 +37,12 @@ architecture/documentation checks where available, cleanup and mutation gates.
 Preserve unrelated uncommitted shared-script refresh changes. Publish the commit
 to `origin/forgelet`; rollout to project-local copies happens through the normal
 compose/refresh sequence.
+
+## Verification boundary
+
+This layer checkout has no property suite, architecture module, Gherkin
+acceptance tree, documentation contract, mutation manifest, or application
+mutation profile. Its supported gates are `bb test` (including dashboard and
+upgrade exercise) and `bb crap`; the family DRY tool and mutation scan cover the
+changed Clojure tests and Babashka module but do not replace missing project
+gates.

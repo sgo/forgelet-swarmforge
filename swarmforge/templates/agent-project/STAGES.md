@@ -21,6 +21,10 @@ gate is current it completes the active card, promotes the oldest queued card
 to `spec`, and creates that card's request. An empty queue records project
 idleness instead. `queued` is a board state, not a gate.
 
+`route_card.sh commit` reports the lane read back from the created board row.
+Its consumed proposal record keeps the original proposed `lane` and the actual
+`created-lane` separately, so a queued placement is visible in the audit trail.
+
 An operator or automatic spec approval moves the active card from `spec` to
 `code`. That is visibility only: it records the approved spec evidence but
 does not run or complete the code gate. The code stage stays todo until
