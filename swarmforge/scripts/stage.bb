@@ -625,11 +625,12 @@
 (defn advance-approved-card! [root config card]
   (when (single-agent? root)
     (let [lane (active-card-board-lane! root card)]
-      (case lane
-        "spec" (update-board! root config card "code")
-        "code" nil
+      (cond
+        (= lane "spec") (update-board! root config card "code")
+        (#{"queued" "done"} lane)
         (exit! 1 (str "Cannot advance spec approval: active card " (:name card)
-                      " (" (:id card) ") is in lane " lane))))))
+                      " (" (:id card) ") is in lane " lane))
+        :else nil))))
 
 (defn propose! [root config state patterns replace?]
   (let [files (spec-files root patterns)]

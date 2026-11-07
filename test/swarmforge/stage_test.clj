@@ -332,6 +332,24 @@
       (finally
         (fs/delete-tree root)))))
 
+(deftest correction-approval-does-not-demote-a-later-gate-lane
+  (let [root (fixture)]
+    (try
+      (seed-single-agent-card! root)
+      (run-stage root "propose" "spec" "spec.md" "features/extra.feature")
+      (let [board (fs/path root ".swarmforge" "board" "tasks.tsv")]
+        (write-file board
+                    (str/replace (slurp (str board)) "\tcode\t" "\tclean\t")))
+      (write-file (fs/path root "spec.md")
+                  "# Fixture spec\n\nA correction after the code gate.\n")
+      (let [correction (run-stage root "propose" "spec"
+                                  "spec.md" "features/extra.feature")]
+        (is (zero? (:exit correction)) (:err correction))
+        (is (= "clean" (board-lane root "fixture-card")))
+        (is (nil? (get-in (state root) [:stages "code"]))))
+      (finally
+        (fs/delete-tree root)))))
+
 (deftest a-pack-project-ignores-the-single-agent-approval-policy
   (let [forge (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-pack-forge."})
         root (fs/path forge "projects" "fixture")]
