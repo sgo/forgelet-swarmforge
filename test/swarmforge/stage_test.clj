@@ -47,17 +47,17 @@
   (fs/create-dirs (fs/parent path))
   (spit (str path) text))
 
-(defn run-stage [root & args]
+(defn run-script [script root & args]
   (apply sh/sh
-         (concat ["bb" (str stage-script)]
+         (concat ["bb" (str script)]
                  args
                  [:dir (str root)])))
 
+(defn run-stage [root & args]
+  (apply run-script stage-script root args))
+
 (defn run-pack-web-test [root & args]
-  (apply sh/sh
-         (concat ["bb" (str pack-web-test)]
-                 args
-                 [:dir (str root)])))
+  (apply run-script pack-web-test root args))
 
 (defn state [root]
   (edn/read-string
@@ -65,6 +65,13 @@
 
 (defn latest-proposal-id [root]
   (last (sort (keys (:proposals (state root))))))
+
+(defn board-lane [root name]
+  (let [file (fs/path root ".swarmforge" "board" "tasks.tsv")]
+    (some (fn [line]
+            (let [[row-name lane] (str/split line #"\t" -1)]
+              (when (= row-name name) lane)))
+          (str/split-lines (slurp (str file))))))
 
 (defn fixture-at [root]
   (sh/sh "git" "init" "-q" :dir (str root))
@@ -90,6 +97,14 @@
 (defn fixture []
   (fixture-at (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage."})))
 
+(defn seed-single-agent-card!
+  ([root] (seed-single-agent-card! root "fixture-card"))
+  ([root name]
+   (write-file (fs/path root ".swarmforge" "single-agent") "agent\n")
+   (write-file (fs/path root ".swarmforge" "board" "tasks.tsv")
+               (str name "\tspec\t2026-11-07T00:00:00Z\t"
+                    "2026-11-07T00:00:00Z\tfixture-task\t0\n"))))
+
 (deftest a-fixture-walks-every-stage
   (let [root (fixture)]
     (try
@@ -104,7 +119,8 @@
               "proposal bodies are transient, not stage state"))
         (let [approve (run-stage root "approve" (latest-proposal-id root)
                                  "--words" "approve")]
-          (is (zero? (:exit approve)) (:err approve))))
+          (is (zero? (:exit approve)) (:err approve))
+          (is (= "spec" (board-lane root "fixture")))))
 
       (testing "the ordered stages run"
         (doseq [stage ["code" "clean" "architect" "harden" "qa"]]
@@ -150,7 +166,7 @@
   (let [root (fixture)
         stages-file (fs/path root "stages.edn")]
     (try
-      (write-file (fs/path root ".swarmforge" "single-agent") "agent\n")
+      (seed-single-agent-card! root)
       (let [missing (run-stage root "complete")]
         (is (not (zero? (:exit missing))))
         (is (str/includes? (:err missing) "required deploy stage")))
@@ -211,12 +227,23 @@
                         (fs/path root ".swarmforge" "handoffs"
                                  "pending_approval" (str id ".handoff")))]
     (try
-      (write-file (fs/path root ".swarmforge" "single-agent") "agent\n")
-      (run-stage root "propose" "spec" "spec.md" "features/extra.feature")
+      (seed-single-agent-card! root)
+      (let [automatic (run-stage root "propose" "spec"
+                                 "spec.md" "features/extra.feature")]
+        (is (zero? (:exit automatic)) (:err automatic)))
       (let [first-id (latest-proposal-id root)]
         (is (= :approved (get-in (state root) [:proposals first-id :status])))
         (is (= "forge policy: automatic spec approval"
                (get-in (state root) [:proposals first-id :approval-policy])))
+        (is (= "code" (board-lane root "fixture-card")))
+        (is (= first-id (get-in (state root) [:stages "spec" :evidence 0 :proposal])))
+        (is (nil? (get-in (state root) [:stages "code"])))
+        (is (not (fs/exists? (fs/path root "target" "code.txt"))))
+        (let [parsed (-> (run-stage root "status" "--json")
+                         :out
+                         (json/parse-string true))
+              code-stage (some #(when (= "code" (:name %)) %) (:stages parsed))]
+          (is (= "todo" (:status code-stage))))
         (is (not (fs/exists? (approval-file first-id))))
         (is (str/includes? (:out (run-stage root "list"))
                            "(automatic approval)"))
@@ -236,6 +263,8 @@
           (is (= :approved (get-in (state root) [:proposals correction-id :status])))
           (is (= "forge policy: automatic spec approval"
                  (get-in (state root) [:proposals correction-id :approval-policy])))
+          (is (= "code" (board-lane root "fixture-card")))
+          (is (nil? (get-in (state root) [:stages "code"])))
           (is (not (fs/exists? (approval-file correction-id)))))
 
         (let [current (state root)
@@ -262,7 +291,7 @@
     (try
       (fs/create-dirs root)
       (fixture-at root)
-      (write-file (fs/path root ".swarmforge" "single-agent") "agent\n")
+      (seed-single-agent-card! root)
       (write-file (fs/path forge "swarmforge" "local-spec-approval.conf")
                   "# Restore the explicit operator gate.\nspec=operator\n")
       (let [proposal (run-stage root "propose" "spec"
@@ -279,9 +308,29 @@
                (-> (run-stage root "status" "--json")
                    :out
                    (json/parse-string true)
-                   :spec_approval_mode))))
+                   :spec_approval_mode)))
+        (let [approved (run-stage root "approve" id "--words" "approve")]
+          (is (zero? (:exit approved)) (:err approved))
+          (is (= "code" (board-lane root "fixture-card")))
+          (is (= id (get-in (state root) [:stages "spec" :evidence 0 :proposal])))
+          (is (nil? (get-in (state root) [:stages "code"])))
+          (is (not (fs/exists? (fs/path root "target" "code.txt"))))))
       (finally
         (fs/delete-tree forge)))))
+
+(deftest spec-approval-refuses-a-missing-active-card
+  (let [root (fixture)]
+    (try
+      (write-file (fs/path root ".swarmforge" "single-agent") "agent\n")
+      (write-file (fs/path root ".swarmforge" "board" "tasks.tsv")
+                  "unrelated\tqueued\t2026-11-07T00:00:00Z\t2026-11-07T00:00:00Z\tother\t0\n")
+      (let [proposal (run-stage root "propose" "spec"
+                                "spec.md" "features/extra.feature")]
+        (is (not (zero? (:exit proposal))))
+        (is (str/includes? (:err proposal) "active card fixture"))
+        (is (= "queued" (board-lane root "unrelated"))))
+      (finally
+        (fs/delete-tree root)))))
 
 (deftest a-pack-project-ignores-the-single-agent-approval-policy
   (let [forge (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-pack-forge."})

@@ -21,6 +21,11 @@ gate is current it completes the active card, promotes the oldest queued card
 to `spec`, and creates that card's request. An empty queue records project
 idleness instead. `queued` is a board state, not a gate.
 
+An operator or automatic spec approval moves the active card from `spec` to
+`code`. That is visibility only: it records the approved spec evidence but
+does not run or complete the code gate. The code stage stays todo until
+`stage check code` succeeds.
+
 ## Vertical slices
 
 A task is one public behaviour through every gate, not a layer of a behaviour.

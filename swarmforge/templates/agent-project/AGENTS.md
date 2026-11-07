@@ -47,6 +47,10 @@ request. Completing the active card through `stage complete` promotes the
 oldest queued card and creates its one request. Queued cards do not make an
 idle project active and do not depend on the agent's prompt readiness.
 
+Approving the spec, automatically or by the operator, moves the active card's
+visible board lane to `code`. This does not run the code gate or record its
+evidence; run `stage check code` when the implementation is ready.
+
 Approved Gherkin is executable. Every step has a handler under `acceptance/src`
 that calls the public API, and `scripts/run-acceptance-tests.sh` must pass.
 Hand-written JUnit is unit coverage, not acceptance evidence.

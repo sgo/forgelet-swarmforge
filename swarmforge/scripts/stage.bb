@@ -604,6 +604,33 @@
        (filter (fn [[_ proposal]] (= :pending (:status proposal))))
        (sort-by key)))
 
+(defn active-card-board-lane! [root card]
+  (let [name (:name card)
+        id (:id card)]
+    (when (or (str/blank? name) (str/blank? id))
+      (exit! 1 (str "Cannot advance spec approval: malformed active card "
+                    (pr-str card))))
+    (let [matches (->> (board-rows root)
+                       (filter #(and (= name (:name %))
+                                     (= id (:id %))))
+                       vec)]
+      (when (empty? matches)
+        (exit! 1 (str "Cannot advance spec approval: active card " name
+                      " (" id ") is not on the board")))
+      (when (> (count matches) 1)
+        (exit! 1 (str "Cannot advance spec approval: more than one board row "
+                      "matches " name " (" id ")")))
+      (:lane (first matches)))))
+
+(defn advance-approved-card! [root config card]
+  (when (single-agent? root)
+    (let [lane (active-card-board-lane! root card)]
+      (case lane
+        "spec" (update-board! root config card "code")
+        "code" nil
+        (exit! 1 (str "Cannot advance spec approval: active card " (:name card)
+                      " (" (:id card) ") is in lane " lane))))))
+
 (defn propose! [root config state patterns replace?]
   (let [files (spec-files root patterns)]
     (when (empty? files)
@@ -611,6 +638,8 @@
     (let [id (str "spec-" (System/currentTimeMillis))
           pending (pending-proposals state)
           card (select-card root config state files)
+          _ (when (single-agent? root)
+              (active-card-board-lane! root card))
           automatic-spec? (= :automatic (spec-approval-mode root))
           correction-auto? (and (not automatic-spec?)
                                 (not replace?)
@@ -664,13 +693,14 @@
                     state)]
         (save-state root (:task config) state)
         (remove-stage-approvals! root)
-        (update-board! root config card "spec")
         (when auto-approve?
+          (advance-approved-card! root config card)
           (record-resolution! root config card id
                               (if automatic-spec?
                                 "automatic_spec_approval"
                                 "auto_approved")))
         (when-not auto-approve?
+          (update-board! root config card "spec")
           (write-stage-approval! root config (assoc proposal :body body)))
         (println (str (if correction-auto? "spec correction " "spec proposal ") id))
         (println (str "files: " (str/join ", " files)))
@@ -714,7 +744,7 @@
         (save-state root (:task config) state)
         (record-resolution! root config (:card proposal) id "approved")
         (remove-stage-approvals! root)
-        (update-board! root config (:card proposal) "spec")
+        (advance-approved-card! root config (:card proposal))
         (println (str "approved " id " at tree " tree))))))
 
 (defn reject! [root config state id words]

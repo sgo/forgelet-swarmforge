@@ -12,6 +12,11 @@
   (fs/create-dirs (fs/parent path))
   (spit (str path) text))
 
+(defn seed-active-board-card! [project]
+  (write-file
+   (fs/path project ".swarmforge" "board" "tasks.tsv")
+   "agent\tspec\t2026-11-07T00:00:00Z\t2026-11-07T00:00:00Z\tagent\t0\n"))
+
 (defn delete-tree! [path]
   (loop [attempt 0]
     (let [retry?
@@ -164,6 +169,7 @@
                     "Feature: agent\n\n  Scenario: agent\n    Given a card\n")
         (write-file (fs/path project "tasks" "agent.md")
                     "# agent\n\n## Operator-observed problem\n\nA card.\n")
+        (seed-active-board-card! project)
         (run-stage project "propose" "spec"
                    "features/*.feature" "tasks/*.md")
         (is (= :approved
@@ -503,6 +509,7 @@
                   "Feature: agent\n\n  Scenario: agent\n    Given a card\n")
       (write-file (fs/path project "tasks" "agent.md")
                   "# agent\n\n## Operator-observed problem\n\nA card.\n")
+      (seed-active-board-card! project)
       (run-stage project "propose" "spec" "features/*.feature" "tasks/*.md")
       (is (= :approved
              (-> (state project) :proposals vals first :status)))
@@ -1111,6 +1118,7 @@
                   "Feature: agent\n\n  Scenario: agent\n    Given a card\n")
       (write-file (fs/path project "tasks" "agent.md")
                   "# agent\n\n## Operator-observed problem\n\nA card.\n")
+      (seed-active-board-card! project)
       (write-file (fs/path forge "swarmforge" "local-spec-approval.conf")
                   "spec=operator\n")
       (run-stage project "propose" "spec" "features/*.feature" "tasks/*.md")
