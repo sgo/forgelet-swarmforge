@@ -99,6 +99,31 @@
          (remove str/blank?)
          (mapv read-string))))
 
+(defn completion-project!
+  [forge name]
+  (let [project (fs/path forge "projects" name)]
+    (fs/create-dirs (fs/path project ".swarmforge" "board"))
+    (write-file (fs/path project "stages.edn")
+                (pr-str {:task name :stages []}))
+    (write-file (fs/path forge ".swarmforge/open-projects")
+                (str name "\n"))
+    project))
+
+(defn completion-row
+  [name lane created updated task-id]
+  (str/join "\t" [name lane created updated task-id "0"]))
+
+(defn write-completion-board!
+  [project rows]
+  (write-file (fs/path project ".swarmforge/board/tasks.tsv")
+              (str (str/join "\n" rows) "\n")))
+
+(defn write-activation!
+  [project task-id activated-at]
+  (write-file (fs/path project ".swarmforge/card-activations"
+                        (str task-id ".edn"))
+              (pr-str {:task_id task-id :activated_at activated-at})))
+
 (defn create-task
   ([root name lane] (create-task root name lane true))
   ([root name lane ok?]
@@ -2919,6 +2944,103 @@
           project-state (first (:projects state))]
       (is (true? (:single_agent project-state)))
       (is (= "http://127.0.0.1:9999" (:dashboard_url project-state))))))
+
+(deftest forge-project-completion-stats-are-null-without-valid-completions
+  (let [forge (tmp-dir)]
+    (seed-mini-forge! forge)
+    (let [project (completion-project! forge "stats-app")]
+      (write-completion-board!
+       project
+       [(completion-row "stats-app" "spec"
+                        "2026-01-01T00:00:00Z"
+                        "2026-01-01T01:00:00Z"
+                        "project-placeholder")
+        (completion-row "live-card" "spec"
+                        "2026-01-01T00:00:00Z"
+                        "2026-01-01T01:00:00Z"
+                        "live-card")
+        (completion-row "bad-time" "done"
+                        "not-a-time"
+                        "2026-01-01T01:00:00Z"
+                        "bad-time")
+        (completion-row "negative" "done"
+                        "2026-01-01T02:00:00Z"
+                        "2026-01-01T01:00:00Z"
+                        "negative")
+        (completion-row "bad-activation" "done"
+                        "2026-01-01T00:00:00Z"
+                        "2026-01-01T01:00:00Z"
+                        "bad-activation")])
+      (write-file
+       (fs/path project ".swarmforge/card-activations/bad-activation.edn")
+       "{:activated_at}\n")
+      (let [stats (-> (web-state forge) :projects first :completion_stats)]
+        (is (= {:completed_cards 0
+                :median_seconds nil
+                :mean_seconds nil
+                :min_seconds nil
+                :max_seconds nil}
+               stats))
+        (is (= #{:completed_cards :median_seconds :mean_seconds
+                 :min_seconds :max_seconds}
+               (set (keys stats))))))))
+
+(deftest forge-project-completion-stats-handle-one-completed-card
+  (let [forge (tmp-dir)]
+    (seed-mini-forge! forge)
+    (let [project (completion-project! forge "one-app")]
+      (write-completion-board!
+       project
+       [(completion-row "one-card" "done"
+                        "2026-01-01T00:00:00Z"
+                        "2026-01-01T00:22:00Z"
+                        "one-card")])
+      (is (= {:completed_cards 1
+              :median_seconds 1320
+              :mean_seconds 1320
+              :min_seconds 1320
+              :max_seconds 1320}
+             (-> (web-state forge) :projects first :completion_stats))))))
+
+(deftest forge-project-completion-stats-use-active-time-and-stay-deterministic
+  (let [forge (tmp-dir)]
+    (seed-mini-forge! forge)
+    (let [project (completion-project! forge "mixed-app")]
+      (write-completion-board!
+       project
+       [(completion-row "mixed-app" "spec"
+                        "2026-01-01T00:00:00Z"
+                        "2026-01-02T00:00:00Z"
+                        "project-placeholder")
+        (completion-row "legacy" "done"
+                        "2026-01-01T00:00:00Z"
+                        "2026-01-01T00:10:00Z"
+                        "legacy")
+        (completion-row "queued" "done"
+                        "2026-01-01T00:00:00Z"
+                        "2026-01-01T03:00:00Z"
+                        "queued")
+        (completion-row "reopened" "done"
+                        "2026-01-01T00:00:00Z"
+                        "2026-01-01T04:30:00Z"
+                        "reopened")
+        (completion-row "long-tail" "done"
+                        "2026-01-01T00:00:00Z"
+                        "2026-01-02T09:00:00Z"
+                        "long-tail")
+        (completion-row "still-active" "code"
+                        "2026-01-01T00:00:00Z"
+                        "2026-01-03T00:00:00Z"
+                        "still-active")])
+      (write-activation! project "queued" "2026-01-01T02:30:00Z")
+      (write-activation! project "reopened" "2026-01-01T04:00:00Z")
+      (write-activation! project "long-tail" "2026-01-01T05:00:00Z")
+      (is (= {:completed_cards 4
+              :median_seconds 1800
+              :mean_seconds 26250
+              :min_seconds 600
+              :max_seconds 100800}
+             (-> (web-state forge) :projects first :completion_stats))))))
 
 (deftest forge-pane-capture-uses-project-root
   ;; Given a forge with an open project and a recorded specifier pane

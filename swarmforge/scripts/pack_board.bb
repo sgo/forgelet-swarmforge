@@ -168,6 +168,8 @@
             ""))
     (fs/move tmp file {:replace-existing true :atomic-move true})))
 
+(declare atomic-spit! record-activation!)
+
 (defn row-name [line]
   (first (str/split line #"\t")))
 
@@ -204,28 +206,44 @@
         (let [rows (read-rows file)]
           (when (find-task rows name)
             (exit! 1 (str "Duplicate task name: " name)))
-          (write-rows file (conj rows (task-row name lane (timestamp) (or (:task-id opts) (new-task-id name)))))
+          (let [activated-at (timestamp)
+                task-id (or (:task-id opts) (new-task-id name))]
+            (when (= lane "spec")
+              (record-activation! root task-id activated-at))
+            (write-rows file (conj rows (task-row name lane activated-at task-id))))
           (write-body! root name (:text opts))
           (write-task-doc! root name (:text opts)))))))
 
-(defn rewrite-lane [line name lane]
-  (let [[row-name _ created _updated task-id audit-count] (str/split line #"\t" -1)]
-    (if (= (str/lower-case (or name "")) (str/lower-case (or row-name "")))
-      (str/join "\t" [row-name lane created (timestamp) task-id (or (not-empty audit-count) "0")])
-      line)))
+(defn rewrite-lane
+  ([line name lane]
+   (rewrite-lane line name lane (timestamp)))
+  ([line name lane updated]
+   (let [[row-name _ created _updated task-id audit-count]
+         (str/split line #"\t" -1)]
+     (if (= (str/lower-case (or name "")) (str/lower-case (or row-name "")))
+       (str/join "\t" [row-name lane created updated task-id
+                       (or (not-empty audit-count) "0")])
+       line))))
 
 (defn set-lane! [opts lane]
   (let [name (task-name opts)
-        file (tasks-file (resolve-root opts))]
+        root (resolve-root opts)
+        file (tasks-file root)]
     (require-value! name "task name")
     (require-value! lane "lane")
     (with-board-lock
-      (resolve-root opts)
+      root
       (fn []
-        (let [rows (read-rows file)]
-          (when-not (find-task rows name)
+        (let [rows (read-rows file)
+              task (find-task rows name)]
+          (when-not task
             (exit! 1 (str "Unknown task name: " name)))
-          (write-rows file (mapv #(rewrite-lane % name lane) rows)))))))
+          (let [activated-at (timestamp)
+                [_ _ _ _ task-id] (str/split task #"\t" -1)]
+            (when (= lane "spec")
+              (record-activation! root task-id activated-at))
+            (write-rows file (mapv #(rewrite-lane % name lane activated-at)
+                                   rows))))))))
 
 (defn move! [opts]
   (set-lane! opts (task-lane opts)))
@@ -421,6 +439,17 @@
     (spit (str tmp) text)
     (fs/move tmp path {:replace-existing true :atomic-move true})))
 
+(defn activation-file [root task-id]
+  (fs/path root ".swarmforge" "card-activations"
+           (str (str/replace (str task-id) #"[^0-9A-Za-z._-]" "_") ".edn")))
+
+(defn record-activation! [root task-id activated-at]
+  (when-not (str/blank? (or task-id ""))
+    (atomic-spit! (activation-file root task-id)
+                  (str (pr-str {:task_id (str task-id)
+                                :activated_at activated-at})
+                       "\n"))))
+
 (defn request-id [task-id]
   (str "req-promote-" (str/replace (str task-id) #"[^0-9A-Za-z._-]" "_")))
 
@@ -461,18 +490,25 @@
                   recovery-id (when recover
                                 (nth (str/split recover #"\t" -1) 4 nil))
                   lane (if (or (seq active) recover) "queued" "spec")
-                  row (task-row name lane (timestamp) task-id)
+                  activated-at (timestamp)
+                  row (task-row name lane activated-at task-id)
                   recovered-rows (if recover
                                    (mapv #(if (= (row-name %) recovery-name)
-                                            (rewrite-lane % recovery-name "spec")
+                                            (rewrite-lane %
+                                                          recovery-name
+                                                          "spec"
+                                                          activated-at)
                                             %)
                                          rows)
                                    rows)]
               (when recover
+                (record-activation! root recovery-id activated-at)
                 (let [body-file (task-body-file root recovery-name)]
                   (ensure-promotion-request!
                    root (request-id recovery-id) recovery-name recovery-id
                    (if (fs/regular-file? body-file) (slurp (str body-file)) ""))))
+              (when (= lane "spec")
+                (record-activation! root task-id activated-at))
               (write-rows file (conj recovered-rows row))
               (write-body! root name text)
               (write-task-doc! root name text)
@@ -527,20 +563,26 @@
   (let [target (row-for rows (:promoted-name promotion))]
     (when target
       (let [[target-name target-lane _ _ target-id] (str/split target #"\t" -1)]
-        (ensure-promotion-request! root (:request-id promotion)
-                                   target-name (or (:promoted-id promotion) target-id)
-                                   (row-body root target))
-        (when (= target-lane "queued")
-          (atomic-spit!
-           file
-           (str (str/join
-                 "\n"
-                 (mapv #(if (= (row-name %) target-name)
-                          (rewrite-lane % target-name "spec")
-                          %)
-                       rows))
-                "\n")))
-        (fs/delete-if-exists (fs/path root ".swarmforge" "project-idle"))))
+        (let [activated-at (timestamp)]
+          (when (= target-lane "queued")
+            (record-activation! root
+                                (or (:promoted-id promotion) target-id)
+                                activated-at))
+          (ensure-promotion-request! root (:request-id promotion)
+                                     target-name
+                                     (or (:promoted-id promotion) target-id)
+                                     (row-body root target))
+          (when (= target-lane "queued")
+            (atomic-spit!
+             file
+             (str (str/join
+                   "\n"
+                   (mapv #(if (= (row-name %) target-name)
+                            (rewrite-lane % target-name "spec" activated-at)
+                            %)
+                         rows))
+                  "\n")))
+          (fs/delete-if-exists (fs/path root ".swarmforge" "project-idle")))))
     (write-promotion! root (:completed-id promotion)
                       (assoc promotion :status :complete
                                        :completed-at (timestamp)))

@@ -190,6 +190,18 @@ whether approval is automatic or operator-recorded. It does not run or complete
 the code gate; the card remains in code until the agent records that gate and
 later gates normally.
 
+Every transition into `spec` records `.swarmforge/card-activations/<task-id>.edn`
+with `activated_at`, including queue promotion and reopening. A done card's
+active completion time runs from that activation to its final `done` timestamp.
+Cards without an activation record use their board `created_at` for legacy
+compatibility; malformed or negative timestamps are omitted.
+
+Each forge `/api/state` project entry includes `completion_stats` with exactly
+`completed_cards`, `median_seconds`, `mean_seconds`, `min_seconds` and
+`max_seconds`. The dashboard computes it once in the shared project slice, so
+desktop and phone clients consume the same values. With no valid completed
+durations, the count is zero and the four statistics are `null`.
+
 Open and close work the same way for pack and single-agent projects. The
 long-lived project runner is held in a `swarmforge-runtime` tmux session on that
 project's `.swarmforge/runtime-tmux.sock`; the forge records the project in

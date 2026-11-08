@@ -108,6 +108,12 @@
       (let [first (route! root "active" (get ids "active"))]
         (is (zero? (:exit first)) (:err first))
         (is (str/includes? (:out first) "ACTIVE:active:task-active:")))
+      (let [active-row (first (filter #(= "active" (:name %)) (rows root)))
+            activation (edn/read-string
+                        (slurp (str (fs/path root ".swarmforge/card-activations"
+                                            "task-active.edn"))))]
+        (is (= (:created active-row) (:activated_at activation)))
+        (is (= "task-active" (:task_id activation))))
       (is (= 1 (count (request-files root))))
 
       (doseq [name ["second" "third"]]
@@ -125,6 +131,11 @@
       (let [complete (board root "complete-promote" "--name" "active")]
         (is (zero? (:exit complete)) (:err complete))
         (is (str/includes? (:out complete) "PROMOTED:second:task-second:")))
+      (is (= "task-second"
+             (:task_id
+              (edn/read-string
+               (slurp (str (fs/path root ".swarmforge/card-activations"
+                                    "task-second.edn")))))))
       (is (= {"active" "done" "second" "spec" "third" "queued"}
              (into {} (map (juxt :name :lane)) (rows root))))
       (is (= ["req-promote-task-second.request"]
