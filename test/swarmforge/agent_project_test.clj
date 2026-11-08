@@ -1,5 +1,6 @@
 (ns swarmforge.agent-project-test
   (:require [babashka.fs :as fs]
+            [forge :as forge]
             [clojure.edn :as edn]
             [clojure.java.shell :as sh]
             [clojure.string :as str]
@@ -65,6 +66,22 @@
   (apply run project
          "bb" (str (fs/path project "swarmforge" "scripts" "stage.bb"))
          (concat args ["--root" (str project)])))
+
+(defn git [project & args]
+  (apply sh/sh "git" "-C" (str project) args))
+
+(defn git-out [project & args]
+  (str/trim (:out (apply git project args))))
+
+(defn open-without-start! [forge-root name]
+  (let [started (atom false)]
+    (with-redefs [forge/skip-start? (constantly true)
+                  forge/start-project-runtime!
+                  (fn [_ _]
+                    (reset! started true)
+                    {:name name :started true :reused false})]
+      (let [result (forge/open-project! (str forge-root) name)]
+        {:result result :started @started}))))
 
 (defn stop-agent-session! [project]
   (sh/sh "tmux" "-S" (str (fs/path project ".swarmforge" "agent-tmux.sock"))
@@ -1167,6 +1184,212 @@
       (finally
         (stop-agent-session! project)
         (delete-tree! forge)))))
+
+(deftest opening-commits-only-refreshed-runtime-files-and-preserves-user-work
+  (let [forge-root (fixture-forge)
+        project (fs/path forge-root "projects" "agent")]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge-root)
+                            "agent"))))
+      (let [shared-stage (fs/path forge-root "swarmforge/scripts/stage.bb")
+            shared-article (fs/path forge-root "swarmforge/constitution/articles"
+                                    "engineering.prompt")]
+        (write-file shared-stage
+                    (str (slurp (str shared-stage)) "\n;; managed runtime marker\n"))
+        (write-file shared-article "engineering refreshed\n"))
+      (write-file (fs/path project "notes" "user.md") "staged user work\n")
+      (is (zero? (:exit (git project "add" "notes/user.md"))))
+      (write-file (fs/path project "AGENTS.md")
+                  (str (slurp (str (fs/path project "AGENTS.md")))
+                       "\nunstaged user work\n"))
+      (let [subject-at-start (atom nil)]
+        (with-redefs [forge/skip-start? (constantly false)
+                      forge/start-project-runtime!
+                      (fn [_ _]
+                        (reset! subject-at-start
+                                (git-out project "log" "-1" "--format=%s"))
+                        {:name "agent" :started true :reused false})]
+          (forge/open-project! (str forge-root) "agent"))
+        (is (= "Sync SwarmForge runtime" @subject-at-start))
+        (is (= "Sync SwarmForge runtime"
+               (git-out project "log" "-1" "--format=%s")))
+        (is (= "SwarmForge Runtime"
+               (git-out project "log" "-1" "--format=%an")))
+        (is (= "swarmforge-runtime@localhost"
+               (git-out project "log" "-1" "--format=%ae")))
+        (is (= #{"swarmforge/constitution/articles/engineering.prompt"
+                 "swarmforge/scripts/stage.bb"}
+               (set (str/split-lines
+                     (git-out project "show" "--pretty=" "--name-only" "HEAD")))))
+        (is (= (str/trim
+                (slurp (str (fs/path forge-root "swarmforge/scripts/stage.bb"))))
+               (git-out project "show" "HEAD:swarmforge/scripts/stage.bb")))
+        (is (= ["notes/user.md"]
+               (str/split-lines
+                (git-out project "diff" "--cached" "--name-only"))))
+        (is (str/includes? (git-out project "diff" "--" "AGENTS.md")
+                           "unstaged user work"))
+        (is (fs/executable? (fs/path project ".git/hooks/pre-commit")))
+        (is (= (str/trim
+                (slurp (str (fs/path repo-root
+                                     "swarmforge/scripts/agent-pre-commit.sh"))))
+               (str/trim
+                (slurp (str (fs/path project ".git/hooks/pre-commit")))))))
+      (let [head (git-out project "rev-parse" "HEAD")]
+        (with-redefs [forge/skip-start? (constantly true)]
+          (forge/close-project! (str forge-root) "agent"))
+        (open-without-start! forge-root "agent")
+        (is (= head (git-out project "rev-parse" "HEAD"))))
+      (finally
+        (delete-tree! forge-root)))))
+
+(deftest managed-runtime-hook-exception-does-not-admit-non-runtime-work
+  (let [forge-root (fixture-forge)
+        project (fs/path forge-root "projects" "agent")]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge-root)
+                            "agent"))))
+      (write-file (fs/path project "README.md") "unapproved source\n")
+      (is (zero? (:exit (git project "add" "README.md"))))
+      (let [commit (run-env project
+                            {"SWARMFORGE_MANAGED_RUNTIME_SYNC" "1"
+                             "HOME" (System/getenv "HOME")
+                             "PATH" (System/getenv "PATH")}
+                            "git" "commit" "-m" "not a runtime sync")]
+        (is (not (zero? (:exit commit))))
+        (is (str/includes? (str (:err commit) (:out commit))
+                           "Commit refused")))
+      (finally
+        (delete-tree! forge-root)))))
+
+(deftest opening-refuses-detached-head-and-a-failing-managed-hook
+  (let [forge-root (fixture-forge)
+        project (fs/path forge-root "projects" "agent")]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge-root)
+                            "agent"))))
+      (is (zero? (:exit (git project "checkout" "--detach" "HEAD"))))
+      (let [started-ref (atom false)
+            error (try
+                    (with-redefs [forge/skip-start? (constantly true)
+                                  forge/start-project-runtime!
+                                  (fn [_ _] (reset! started-ref true))]
+                      (forge/open-project! (str forge-root) "agent"))
+                    nil
+                    (catch Exception e e))]
+        (is error)
+        (is (str/includes? (ex-message error) "HEAD is detached"))
+        (is (false? @started-ref))
+        (let [open-file (fs/path forge-root ".swarmforge/open-projects")]
+          (is (or (not (fs/exists? open-file))
+                  (not (str/includes? (slurp (str open-file)) "agent"))))))
+
+      (is (zero? (:exit (git project "checkout" "master"))))
+      (write-file (fs/path forge-root "swarmforge/scripts/agent-pre-commit.sh")
+                  "#!/usr/bin/env bash\necho managed hook refused >&2\nexit 7\n")
+      (write-file (fs/path project "notes" "staged.md") "user staged\n")
+      (is (zero? (:exit (git project "add" "notes/staged.md"))))
+      (let [started (atom false)
+            error (try
+                    (with-redefs [forge/skip-start? (constantly true)
+                                  forge/start-project-runtime!
+                                  (fn [_ _] (reset! started true))]
+                      (forge/open-project! (str forge-root) "agent"))
+                    nil
+                    (catch Exception e e))]
+        (is error)
+        (is (str/includes? (ex-message error) "Managed runtime sync failed"))
+        (is (str/includes? (ex-message error) "managed hook refused"))
+        (is (false? @started))
+        (is (= ["notes/staged.md"]
+               (str/split-lines
+                (git-out project "diff" "--cached" "--name-only")))))
+      (finally
+        (delete-tree! forge-root)))))
+
+(deftest the-source-layer-project-does-not-commit-its-own-source-during-open
+  (let [forge-root (fixture-forge)
+        project (fs/path forge-root "projects" "forgelet-swarmforge")]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge-root)
+                            "forgelet-swarmforge"))))
+      (let [stage (fs/path project "swarmforge/scripts/stage.bb")
+            head-before (git-out project "rev-parse" "HEAD")]
+        (write-file stage (str (slurp (str stage)) "\n;; source edit\n"))
+        (write-file (fs/path forge-root "swarmforge/scripts/stage.bb")
+                    "#!/usr/bin/env bb\n(println :runtime-copy)\n")
+        (let [{:keys [started]} (open-without-start! forge-root
+                                                    "forgelet-swarmforge")]
+          (is (false? started))
+          (is (= head-before (git-out project "rev-parse" "HEAD")))
+          (is (str/includes? (slurp (str stage)) ";; source edit"))
+          (is (not (= "Sync SwarmForge runtime"
+                      (git-out project "log" "-1" "--format=%s"))))))
+      (finally
+        (delete-tree! forge-root)))))
+
+(deftest queue-aware-stage-is-in-head-before-stashed-work-is-restored
+  (let [forge-root (fixture-forge)
+        project (fs/path forge-root "projects" "queue")]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge-root)
+                            "queue"))))
+      (let [stage (fs/path forge-root "swarmforge/scripts/stage.bb")]
+        (write-file stage
+                    (str (slurp (str stage))
+                         "\n;; queue-aware managed runtime marker\n")))
+      (open-without-start! forge-root "queue")
+      (let [board (fs/path project "swarmforge/scripts/pack_board.sh")
+            route (fn [name id]
+                    (run project (str board) "route"
+                         "--name" name "--task-id" id
+                         "--text" (str name " card\n")))]
+        (is (zero? (:exit (route "active" "task-active"))))
+        (is (zero? (:exit (route "queued" "task-queued")))))
+      (doseq [name ["active" "queued"]]
+        (fs/delete-if-exists (fs/path project "tasks" (str name ".md"))))
+      (let [tree (git-out project "rev-parse" "HEAD^{tree}")
+            stages (edn/read-string
+                    (slurp (str (fs/path project "stages.edn"))))]
+        (write-file
+         (fs/path project ".swarmforge/stages/queue.edn")
+         (pr-str {:task (:task stages)
+                  :card {:name "active"
+                         :lane "spec"
+                         :created "2026-11-08T08:00:00Z"
+                         :updated "2026-11-08T08:00:00Z"
+                         :id "task-active"
+                         :audit "0"
+                         :display "active"}
+                  :proposals {}
+                  :stages (into {} (map (fn [stage] [(:name stage) {:tree tree}]))
+                                (:stages stages))})))
+      (let [head-stage (git-out project "show" "HEAD:swarmforge/scripts/stage.bb")]
+        (is (str/includes? head-stage "queue-aware managed runtime marker"))
+        (is (str/includes? head-stage "complete-promote")))
+      (write-file (fs/path project "AGENTS.md")
+                  (str (slurp (str (fs/path project "AGENTS.md")))
+                       "\noperator work to restore\n"))
+      (is (zero? (:exit (git project "stash" "push" "-m" "user work"
+                             "--" "AGENTS.md"))))
+      (is (= "" (git-out project "status" "--porcelain")))
+      (let [complete (run project "bb"
+                          (str (fs/path project "swarmforge/scripts/stage.bb"))
+                          "complete" "--root" (str project))]
+        (is (zero? (:exit complete)) (:err complete))
+        (is (str/includes? (:out complete) "PROMOTED:queued:task-queued:")))
+      (is (= {"active" "done" "queued" "spec"}
+             (into {}
+                   (map (fn [line]
+                          (let [[name lane] (str/split line #"\t" -1)]
+                            [name lane])))
+                   (str/split-lines
+                    (slurp (str (fs/path project ".swarmforge/board/tasks.tsv")))))))
+      (is (zero? (:exit (git project "stash" "pop"))))
+      (is (str/includes? (slurp (str (fs/path project "AGENTS.md")))
+                         "operator work to restore"))
+      (finally
+        (delete-tree! forge-root)))))
 
 (deftest a-pack-project-converts-in-place-after-a-safe-dry-run
   (let [forge (fixture-forge)

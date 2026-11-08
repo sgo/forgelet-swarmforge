@@ -75,6 +75,14 @@
      (fs/create-dirs (fs/path (pack-worktree root roles role) dir)))
    (fs/create-dirs (fs/path root ".swarmforge/handoffs/pending_approval"))))
 
+(defn init-project-git! [project]
+  (run {:dir project} "git" "init" "-q")
+  (run {:dir project} "git" "add" "-A")
+  (run {:dir project} "git"
+       "-c" "user.name=Fixture"
+       "-c" "user.email=fixture@test.invalid"
+       "commit" "-q" "--allow-empty" "-m" "fixture"))
+
 (defn pack-board
   ([root ok? & args]
    (apply run {:dir root :ok? ok?} (script "pack_board.sh") args)))
@@ -2641,6 +2649,7 @@
   (let [root (tmp-dir)]
     (seed-mini-forge! root)
     (fs/create-dirs (fs/path root "projects/orphan"))
+    (init-project-git! (fs/path root "projects/orphan"))
     (let [result (run {:dir root :env {"SWARMFORGE_SKIP_START" "1"} :ok? false}
                       (script "pack_web.sh")
                       "--test-open-project" (str root) "orphan")]
@@ -2661,6 +2670,7 @@
     (write-file (fs/path project ".swarmforge/roles.tsv")
                 (format "agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n"
                         project))
+    (init-project-git! project)
     (let [open (pack-web-env root {"SWARMFORGE_SKIP_START" "1"}
                              "--test-open-project" (str root) "agent")]
       (is (zero? (:exit open)) (:err open))
@@ -2704,6 +2714,7 @@
       (write-file (fs/path project ".swarmforge/roles.tsv")
                   (format "agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n"
                           project))
+      (init-project-git! project)
       (let [opened (pack-web-env root open-env
                                  "--test-open-project" (str root) "agent")
             url (str/trim (slurp (str url-file)))]
@@ -2775,6 +2786,7 @@
       (write-file (fs/path project ".swarmforge/roles.tsv")
                   (format "agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n"
                           project))
+      (init-project-git! project)
       (write-file (fs/path root "swarmforge/scripts/agent-runner.bb")
                   "#!/usr/bin/env bb\n(println \"runner failed\")\n(System/exit 9)\n")
       (let [opened (run {:dir root
@@ -2828,6 +2840,7 @@
                        "    (process/sh {:continue true} \"tmux\" \"-S\" (str socket) \"kill-server\")\n"
                        "    :else (System/exit 2)))\n"))
       (write-file (fs/path project ".swarmforge/pack") "two-pack\n")
+      (init-project-git! project)
       (run {:dir root} "tmux" "-S" (str neighbour-socket)
            "new-session" "-d" "-s" "neighbour" "sleep" "120")
       (let [opened (pack-web-env root {"SWARMFORGE_PREVENT_SLEEP" "0"

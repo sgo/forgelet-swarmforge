@@ -202,6 +202,18 @@ Each forge `/api/state` project entry includes `completion_stats` with exactly
 desktop and phone clients consume the same values. With no valid completed
 durations, the count is zero and the four statistics are `null`.
 
+Opening a project refreshes its runtime files and records that synchronization in
+one `Sync SwarmForge runtime` commit before the runtime starts. The managed
+allowlist is `swarmforge/scripts/**`, `swarmforge/roles/**`,
+`swarmforge/constitution/articles/**`, `swarmforge/swarmforge.conf` and
+`swarmforge/constitution.prompt`. The commit uses a temporary Git index, then
+updates only those paths in the real index, so unrelated staged and unstaged
+work is preserved. It uses `SwarmForge Runtime
+<swarmforge-runtime@localhost>` as its identity and skips when nothing changed.
+Detached HEADs and in-progress Git operations are refused before the runtime
+starts. The `forgelet-swarmforge` source checkout skips generated runtime copies
+so its own source edits are never mistaken for synchronized files.
+
 Open and close work the same way for pack and single-agent projects. The
 long-lived project runner is held in a `swarmforge-runtime` tmux session on that
 project's `.swarmforge/runtime-tmux.sock`; the forge records the project in

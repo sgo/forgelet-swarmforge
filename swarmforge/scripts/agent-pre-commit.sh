@@ -12,6 +12,27 @@ stage="$root/swarmforge/scripts/stage.bb"
 staged="$(git -C "$root" diff --cached --name-only --diff-filter=ACMRTUXB)"
 [[ "$staged" == "mission.md" ]] && exit 0
 
+# Opening a project records refreshed runtime files as one managed checkpoint.
+# This exception is deliberately narrow: the invoking process must identify the
+# managed sync, and every staged path must be one forge.bb owns.
+if [[ "${SWARMFORGE_MANAGED_RUNTIME_SYNC:-}" == "1" && -n "$staged" ]]; then
+  managed_runtime=true
+  while IFS= read -r path; do
+    case "$path" in
+      swarmforge/scripts/*|\
+      swarmforge/roles/*|\
+      swarmforge/constitution/articles/*|\
+      swarmforge/swarmforge.conf|\
+      swarmforge/constitution.prompt)
+        ;;
+      *)
+        managed_runtime=false
+        ;;
+    esac
+  done <<< "$staged"
+  [[ "$managed_runtime" == "true" ]] && exit 0
+fi
+
 export PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"
 approved="$(
   bb "$stage" status --json --root "$root" 2>/dev/null \

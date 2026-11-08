@@ -3,16 +3,41 @@
 (ns forge
   (:require [babashka.fs :as fs]
             [babashka.process :as process]
+            [clojure.edn :as edn]
             [clojure.string :as str]))
 
 (def pack-names ["two-pack" "four-pack" "six-pack"])
 (def shared-articles ["engineering.prompt" "workflow.prompt" "handoffs.prompt" "privacy.prompt"])
+(def runtime-commit-message "Sync SwarmForge runtime")
+(def runtime-commit-marker "SWARMFORGE_MANAGED_RUNTIME_SYNC")
+(def runtime-git-name "SwarmForge Runtime")
+(def runtime-git-email "swarmforge-runtime@localhost")
 
 (defn sh [& args]
   (apply process/sh args))
 
 (defn shell-quote [value]
   (str "'" (str/replace (str value) "'" "'\"'\"'") "'"))
+
+(defn single-agent? [project]
+  (fs/regular-file? (fs/path project ".swarmforge" "single-agent")))
+
+(defn stage-task-name [project]
+  (let [file (fs/path project "stages.edn")]
+    (when (fs/regular-file? file)
+      (try
+        (:task (edn/read-string (slurp (str file))))
+        (catch Exception _ nil)))))
+
+(defn source-layer-project? [project]
+  (let [name (str (fs/file-name project))
+        mission (fs/path project "mission.md")
+        mission-text (when (fs/regular-file? mission) (slurp (str mission)))]
+    (or (= "forgelet-swarmforge" name)
+        (= "forgelet-swarmforge" (stage-task-name project))
+        (fs/regular-file? (fs/path project ".swarmforge" "source-layer"))
+        (and mission-text
+             (str/includes? mission-text "shared Forgelet layer")))))
 
 (defn forge? [root]
   (fs/directory? (fs/path root "projects")))
@@ -122,9 +147,6 @@
   (let [file (pack-name-file project)]
     (fs/create-dirs (fs/parent file))
     (spit (str file) (str pack "\n"))))
-
-(defn single-agent? [project]
-  (fs/regular-file? (fs/path project ".swarmforge" "single-agent")))
 
 (defn copy-tree-replace! [src dest]
   (when (fs/exists? dest)
@@ -285,25 +307,176 @@
       (throw (ex-info (str "Single-agent project has no agent role: " project)
                       {:http-status 500 :error "missing-single-agent-role"})))))
 
+(defn runtime-managed-path? [path]
+  (let [path (str path)]
+    (or (str/starts-with? path "swarmforge/scripts/")
+        (str/starts-with? path "swarmforge/roles/")
+        (str/starts-with? path "swarmforge/constitution/articles/")
+        (= path "swarmforge/swarmforge.conf")
+        (= path "swarmforge/constitution.prompt"))))
+
+(defn managed-runtime-paths [project]
+  (if (source-layer-project? project)
+    []
+    (->> ["swarmforge/scripts"
+          "swarmforge/constitution/articles"
+          "swarmforge/roles"
+          "swarmforge/swarmforge.conf"
+          "swarmforge/constitution.prompt"]
+         (filter #(fs/exists? (fs/path project %)))
+         vec)))
+
+(defn git-result [project env & args]
+  (apply process/sh
+         {:continue true
+          :env (merge (into {} (System/getenv)) env)}
+         "git" "-C" (str project) args))
+
+(defn git-output [project & args]
+  (str/trim (:out (apply git-result project {} args))))
+
+(defn git-path [project path]
+  (let [value (git-output project "rev-parse" "--git-path" path)]
+    (if (fs/absolute? value)
+      (fs/path value)
+      (fs/path project value))))
+
+(defn git-state-problem [project]
+  (let [inside (git-result project {} "rev-parse" "--is-inside-work-tree")
+        toplevel (git-result project {} "rev-parse" "--show-toplevel")]
+    (cond
+      (not (zero? (:exit inside)))
+      "project is not a Git worktree"
+
+      (not= (str (fs/canonicalize project))
+            (str (fs/canonicalize (str/trim (:out toplevel)))))
+      "project root is not the Git worktree root"
+
+      (not (zero? (:exit (git-result project {} "symbolic-ref" "-q" "HEAD"))))
+      "HEAD is detached"
+
+      (not (zero? (:exit (git-result project {} "rev-parse" "--verify"
+                                              "HEAD"))))
+      "HEAD has no commit"
+
+      (some #(fs/exists? (git-path project %))
+            ["MERGE_HEAD" "CHERRY_PICK_HEAD" "REVERT_HEAD"
+             "rebase-merge" "rebase-apply" "BISECT_LOG"])
+      "another Git operation is in progress"
+
+      :else nil)))
+
+(defn staged-names [project env]
+  (->> (git-result project env "diff" "--cached" "--name-only"
+                   "--diff-filter=ACMRTUXB")
+       :out
+       str/split-lines
+       (remove str/blank?)
+       vec))
+
+(defn commit-managed-runtime-sync!
+  "Commit only refreshed runtime-owned paths without changing unrelated staged
+  paths. The candidate commit is built in a temporary index; the real index is
+  adjusted only after the commit succeeds."
+  [project paths]
+  (let [paths (vec (distinct paths))]
+    (when-let [problem (git-state-problem project)]
+      (throw (ex-info (str "Managed runtime sync failed: " problem
+                           " in " project)
+                      {:kind :runtime-sync-refused
+                       :name (str (fs/file-name project))
+                       :reason problem})))
+    (if (empty? paths)
+      {:committed false :reason :source-layer}
+      (let [dir (fs/create-temp-dir {:prefix "swarmforge-runtime-index."})
+            index (fs/path dir "index")
+            git-env {"GIT_INDEX_FILE" (str index)}]
+        (try
+          (let [read (git-result project git-env "read-tree" "HEAD")]
+            (when-not (zero? (:exit read))
+              (throw (ex-info
+                      (str "Managed runtime sync failed: could not prepare Git index: "
+                           (str/trim (str (:err read) (:out read))))
+                      {:kind :runtime-sync-failed}))))
+          (let [add (apply git-result project git-env
+                           (concat ["add" "-A" "--"] paths))]
+            (when-not (zero? (:exit add))
+              (throw (ex-info
+                      (str "Managed runtime sync failed: could not stage managed paths: "
+                           (str/trim (str (:err add) (:out add))))
+                      {:kind :runtime-sync-failed}))))
+          (let [changed (staged-names project git-env)
+                refused (remove runtime-managed-path? changed)]
+            (when (seq refused)
+              (throw (ex-info
+                      (str "Managed runtime sync failed: staged path is outside "
+                           "the runtime-owned allowlist: "
+                           (str/join ", " refused))
+                      {:kind :runtime-sync-refused
+                       :paths refused})))
+            (if (empty? changed)
+              {:committed false :reason :unchanged}
+              (let [commit-env (assoc git-env runtime-commit-marker "1")
+                    commit-args ["-c" (str "user.name=" runtime-git-name)
+                                 "-c" (str "user.email=" runtime-git-email)
+                                 "-c" "commit.gpgsign=false"
+                                 "commit" "-q" "-m" runtime-commit-message]
+                    result (apply git-result project commit-env commit-args)]
+                (when-not (zero? (:exit result))
+                  (throw (ex-info
+                          (str "Managed runtime sync failed while committing: "
+                               (str/trim (str (:err result) (:out result))))
+                          {:kind :runtime-sync-failed
+                           :paths changed})))
+                (let [reset (apply git-result
+                                   project {}
+                                   (concat ["reset" "-q" "HEAD" "--"] paths))]
+                  (when-not (zero? (:exit reset))
+                    (throw (ex-info
+                            (str "Managed runtime sync committed, but could not "
+                                 "update the project index: "
+                                 (str/trim (str (:err reset) (:out reset))))
+                            {:kind :runtime-sync-index-failed
+                             :paths changed}))))
+                {:committed true
+                 :commit (git-output project "rev-parse" "HEAD")
+                 :paths changed})))
+          (finally
+            (fs/delete-tree dir)))))))
+
 (defn refresh! [forge name]
   (let [dest (project-dir forge name)
-        pack (stored-pack dest)]
+        pack (stored-pack dest)
+        source-layer? (source-layer-project? dest)]
     (when-not (fs/directory? dest)
       (throw (ex-info (str "Unknown project: " name) {:http-status 404})))
     (if (single-agent? dest)
       (do
-        (copy-shared-scripts! forge dest)
-        (copy-shared-articles! forge dest)
+        (when-not source-layer?
+          (copy-shared-scripts! forge dest)
+          (copy-shared-articles! forge dest))
         (ensure-single-agent-role! dest)
         (let [installer (fs/path dest "swarmforge" "scripts" "install-agent-hooks.sh")]
           (when (fs/regular-file? installer)
-            (process/sh {:continue true} "bash" (str installer) (str dest))))
-        {:name name :single-agent true})
+            (let [installed (process/sh {:continue true}
+                                        "bash" (str installer) (str dest))]
+              (when-not (zero? (:exit installed))
+                (throw (ex-info
+                        (str "Agent hook installation failed: "
+                             (str/trim (str (:err installed) (:out installed))))
+                        {:kind :hook-install-failed
+                         :name name}))))))
+        {:name name
+         :single-agent true
+         :managed-paths (managed-runtime-paths dest)})
       (do
         (when (str/blank? pack)
           (throw (ex-info (str "No pack recorded for " name) {:http-status 400})))
-        (overlay-pack! forge dest pack true)
-        {:name name :pack pack}))))
+        (when-not source-layer?
+          (overlay-pack! forge dest pack true))
+        {:name name
+         :pack pack
+         :managed-paths (managed-runtime-paths dest)}))))
 
 (defn skip-start? []
   (= "1" (System/getenv "SWARMFORGE_SKIP_START")))
@@ -578,6 +751,12 @@
   (let [project (project-dir forge name)]
     (when-not (fs/directory? project)
       (throw (ex-info (str "Unknown project: " name) {:http-status 404})))
+    (when-let [problem (git-state-problem project)]
+      (throw (ex-info (str "Managed runtime sync failed: " problem
+                           " in " project)
+                      {:kind :runtime-sync-refused
+                       :name name
+                       :reason problem})))
     (when (and (project-open? forge name)
                (or (skip-start?) (runtime-ready? project)))
       (throw (ex-info (str "Project already open: " name)
@@ -586,7 +765,19 @@
     ;; reason to leave the project permanently open and unreachable.
     (when (project-open? forge name)
       (stop-project-runtime! forge name))
-    (refresh! forge name)
+    (let [refreshed
+          (try
+            (refresh! forge name)
+            (catch Exception error
+              (if (:kind (ex-data error))
+                (throw error)
+                (throw (ex-info
+                        (str "Managed runtime sync failed while refreshing "
+                             name ": " (or (ex-message error) (str error)))
+                        {:kind :runtime-sync-failed
+                         :name name}
+                        error)))))]
+      (commit-managed-runtime-sync! (str project) (:managed-paths refreshed)))
     (when-not (skip-start?)
       (start-project-runtime! forge name))
     (mark-open! forge name)
