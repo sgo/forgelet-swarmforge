@@ -22,22 +22,52 @@
   (fs/create-dirs (fs/parent path))
   (spit (str path) text))
 
+(defn init-project! [root]
+  (write-file (fs/path root ".swarmforge/single-agent") "agent\n")
+  (write-file (fs/path root ".swarmforge/roles.tsv")
+              (format "agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n"
+                      root))
+  (write-file (fs/path root "stages.edn")
+              (pr-str {:task "agent"
+                       :stages [{:name "spec"
+                                 :approval :operator
+                                 :spec ["tasks/*.md"]}
+                                {:name "code"
+                                 :runs [["true"]]
+                                 :stamp [:whole-tree]}]}))
+  (fs/create-dirs (fs/path root "tasks"))
+  root)
+
 (defn tmp-project []
-  (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-card-lifecycle."})]
-    (write-file (fs/path root ".swarmforge/single-agent") "agent\n")
+  (init-project!
+   (fs/create-temp-dir {:dir "/tmp" :prefix "sf-card-lifecycle."})))
+
+(defn tmp-forge []
+  (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-route-forge."})]
     (write-file (fs/path root ".swarmforge/roles.tsv")
-                (format "agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n"
+                (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tgrok\ttask\n"
                         root))
-    (write-file (fs/path root "stages.edn")
-                (pr-str {:task "agent"
-                         :stages [{:name "spec"
-                                   :approval :operator
-                                   :spec ["tasks/*.md"]}
-                                  {:name "code"
-                                   :runs [["true"]]
-                                   :stamp [:whole-tree]}]}))
-    (fs/create-dirs (fs/path root "tasks"))
+    (fs/create-dirs (fs/path root "projects"))
     root))
+
+(defn route-result [& args]
+  (apply sh/sh "bb" (str (fs/path scripts "route_card.bb")) args))
+
+(defn route-json [& args]
+  (let [result (apply route-result args)]
+    (when-not (zero? (:exit result))
+      (throw (ex-info "route-card command failed"
+                      {:result result :args args})))
+    (json/parse-string (:out result) true)))
+
+(defn propose! [forge project name note]
+  (let [file (fs/path forge (str name ".md"))]
+    (write-file file note)
+    (let [result (route-result "propose" (str project) name (str file)
+                               "--forge-root" (str forge)
+                               "--operator-said" "yes")]
+      (is (zero? (:exit result)) (:err result))
+      (second (re-find #"PROPOSED: (\S+)" (:out result))))))
 
 (defn board [root & args]
   (apply sh/sh
@@ -404,5 +434,137 @@
         (is (= "specifier" (:lane record)))
         (is (= "specifier" (:created-lane record)))
         (is (= "specifier" (:lane (first (rows project))))))
+      (finally
+        (fs/delete-tree forge)))))
+
+(deftest machine-proposal-list-detail-filter-and-note-fidelity
+  (let [forge (tmp-forge)
+        alpha (init-project! (fs/path forge "projects" "alpha-app"))
+        beta (init-project! (fs/path forge "projects" "beta-app"))
+        note "# Quote the proposal\n\nA \"quoted\" line and a backslash: \\\\\n\nUnicode: λ\n"]
+    (try
+      (let [alpha-id (propose! forge alpha "alpha-card" note)
+            beta-id (propose! forge beta "beta-card" "# Beta\n\nReview beta.\n")
+            listed (route-json "list" "--forge-root" (str forge) "--json")
+            alpha-listed (route-json "list" "--project" "alpha-app"
+                                     "--forge-root" (str forge) "--json")
+            detail (route-json "detail" alpha-id
+                               "--forge-root" (str forge) "--json")
+            inspected (route-json "inspect" beta-id
+                                  "--forge-root" (str forge) "--json")]
+        (is (= [alpha-id beta-id]
+               (mapv :id (:proposals listed))))
+        (is (= ["alpha-app" "beta-app"]
+               (mapv :project (:proposals listed))))
+        (is (= ["pending" "pending"]
+               (mapv :status (:proposals listed))))
+        (is (= ["spec" "spec"]
+               (mapv :proposed_lane (:proposals listed))))
+        (is (= [alpha-id] (mapv :id (:proposals alpha-listed))))
+        (is (= (str/trimr note) (:note detail)))
+        (is (= "alpha-card" (:name detail)))
+        (is (= "spec" (:lane detail)))
+        (is (= "beta-app" (:project inspected)))
+        (is (not (str/includes? (:out (route-result
+                                      "list" "--forge-root" (str forge) "--json"))
+                                (str forge)))))
+      (finally
+        (fs/delete-tree forge)))))
+
+(deftest machine-proposal-approval-is-single-use-and-reports-the-actual-lane
+  (let [forge (tmp-forge)
+        project (init-project! (fs/path forge "projects" "queue-app"))]
+    (try
+      (let [spec-id (propose! forge project "first-card" "# First\n\nFirst note.\n")
+            queued-id (propose! forge project "second-card" "# Second\n\nSecond note.\n")
+            spec-approved (route-json "approve" spec-id
+                                      "--operator-said" "approve"
+                                      "--forge-root" (str forge) "--json")
+            queued-approved (route-json "approve" queued-id
+                                        "--operator-said" "approve"
+                                        "--forge-root" (str forge) "--json")
+            pending (route-json "list" "--forge-root" (str forge) "--json")
+            duplicate (route-result "approve" spec-id
+                                    "--operator-said" "approve"
+                                    "--forge-root" (str forge) "--json")
+            duplicate-json (json/parse-string (:out duplicate) true)]
+        (is (= ["spec" "consumed"]
+               [(:lane spec-approved) (:status spec-approved)]))
+        (is (= "spec" (:created_lane spec-approved)))
+        (is (not (str/blank? (:task_id spec-approved))))
+        (is (= ["queued" "consumed"]
+               [(:lane queued-approved) (:status queued-approved)]))
+        (is (= "queued" (:created_lane queued-approved)))
+        (is (not (str/blank? (:task_id queued-approved))))
+        (is (= [] (:proposals pending)))
+        (is (= 2 (count (rows project))))
+        (is (not (zero? (:exit duplicate))))
+        (is (= "proposal_consumed"
+               (get-in duplicate-json [:error :code])))
+        (is (= 2 (count (rows project)))))
+      (finally
+        (fs/delete-tree forge)))))
+
+(deftest machine-proposal-operations-handle-superseded-invalid-and-sensitive-records
+  (let [forge (tmp-forge)
+        project (init-project! (fs/path forge "projects" "safe-app"))
+        secret-path (str (fs/path project "private" "note.txt"))
+        token "ghp_1234567890abcdefghijklmnopqrstuvwxyz"]
+    (try
+      (let [superseded-id
+            (propose! forge project "old-card" "# Old\n\nReplaced proposal.\n")
+            sensitive-id
+            (propose! forge project "safe-card"
+                      (str "# Safe\n\nPath " secret-path "\nToken " token "\n"))
+            superseded-file
+            (fs/path forge ".swarmforge" "route-proposals"
+                     (str superseded-id ".edn"))]
+        (write-file superseded-file
+                    (pr-str (assoc (edn/read-string (slurp (str superseded-file)))
+                                   :status :superseded)))
+        (let [superseded (route-json "detail" superseded-id
+                                     "--forge-root" (str forge) "--json")
+              sensitive (route-json "detail" sensitive-id
+                                    "--forge-root" (str forge) "--json")
+              pending (route-json "list" "--forge-root" (str forge) "--json")]
+          (is (= "superseded" (:status superseded)))
+          (is (= [sensitive-id] (mapv :id (:proposals pending))))
+          (is (str/includes? (:note sensitive) "[redacted-path]"))
+          (is (str/includes? (:note sensitive) "[redacted-token]"))
+          (is (not (str/includes? (:out (route-result
+                                        "detail" sensitive-id
+                                        "--forge-root" (str forge) "--json"))
+                                  secret-path)))
+          (is (not (str/includes? (:out (route-result
+                                        "list" "--forge-root" (str forge) "--json"))
+                                  token)))))
+      (let [invalid-id (route-result "detail" "../escape"
+                                     "--forge-root" (str forge) "--json")
+            missing-filter (route-result "list" "--project" "missing-app"
+                                         "--forge-root" (str forge) "--json")
+            malformed (fs/path forge ".swarmforge" "route-proposals"
+                               "proposal-malformed.edn")]
+        (write-file malformed "not an edn map\n")
+        (is (= "invalid_proposal_id"
+               (get-in (json/parse-string (:out invalid-id) true)
+                       [:error :code])))
+        (is (= "invalid_project"
+               (get-in (json/parse-string (:out missing-filter) true)
+                       [:error :code])))
+        (let [broken (route-result "list" "--forge-root" (str forge) "--json")]
+          (is (not (zero? (:exit broken))))
+          (is (= "proposal_invalid"
+                 (get-in (json/parse-string (:out broken) true)
+                         [:error :code])))))
+      (fs/delete-tree project)
+      (let [orphan (propose! forge (doto (fs/path forge "projects" "orphan-app")
+                                     init-project!)
+                             "orphan-card" "# Orphan\n")
+            _ (fs/delete-tree (fs/path forge "projects" "orphan-app"))
+            listed (route-result "detail" orphan
+                                 "--forge-root" (str forge) "--json")]
+        (is (= "invalid_project"
+               (get-in (json/parse-string (:out listed) true)
+                       [:error :code]))))
       (finally
         (fs/delete-tree forge)))))
