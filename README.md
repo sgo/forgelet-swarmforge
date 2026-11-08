@@ -459,6 +459,10 @@ whose tooling predates one of them is refreshed first, or left out. And the
 forge's own adapter, `swarmforge/scripts/matrix-bridge.sh`, which arrives with
 the bridge's installation rather than with this fork.
 
+Chat entries in `/api/state` carry an optional `proposal_id` when that request
+belongs to a proposal discussion. Ordinary chat requests omit the field, and
+chat ordering, answering and approval behavior are unchanged.
+
 Getting the kit into a forge is the bridge's own step, `install-kit` and
 `install-rules` on the adapter. Its paths default to a bridge that lives *inside
 the forge it serves*, so there are two shapes:

@@ -770,12 +770,14 @@
                       (for [line (str/split-lines header)
                             :let [[k v] (str/split line #": " 2)]
                             :when (and k v)]
-                        [k v]))]
-    {:id (get headers "id")
-     :status (get headers "status")
-     :body (or body "")
-     :response (str/replace (get headers "response" "") #"\\n" "\n")
-     :created_at (get headers "created_at")}))
+                        [k v]))
+        proposal-id (not-empty (get headers "proposal_id"))]
+    (cond-> {:id (get headers "id")
+             :status (get headers "status")
+             :body (or body "")
+             :response (str/replace (get headers "response" "") #"\\n" "\n")
+             :created_at (get headers "created_at")}
+      proposal-id (assoc :proposal_id proposal-id))))
 
 (defn list-chat [root]
   (vec (concat (map parse-chat (chat-files (chat-pending-dir root)))

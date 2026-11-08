@@ -1465,6 +1465,31 @@
         (is (str/includes? stored "response: the spec is ready\\nwith two documents\n"))
         (is (= "done" (:status row)))))))
 
+(deftest pack-web-chat-preserves-an-optional-proposal-id
+  (let [root (tmp-dir)]
+    (setup-pack! root)
+    (write-file
+     (fs/path root ".swarmforge/dashboard/requests/pending/req-proposal.request")
+     (str "id: req-proposal\n"
+          "status: pending\n"
+          "proposal_id: proposal-20261108T130900Z\n"
+          "created_at: 2026-11-08T13:10:00Z\n\n"
+          "Continue the proposal discussion.\n"))
+    (write-file
+     (fs/path root ".swarmforge/dashboard/requests/done/req-ordinary.request")
+     (str "id: req-ordinary\n"
+          "status: done\n"
+          "response: ordinary answer\n"
+          "created_at: 2026-11-08T13:09:00Z\n\n"
+          "Ordinary chat.\n"))
+    (let [chat (into {} (map (juxt :id identity) (:chat (web-state root))))
+          proposal (get chat "req-proposal")
+          ordinary (get chat "req-ordinary")]
+      (is (= "proposal-20261108T130900Z" (:proposal_id proposal)))
+      (is (not (contains? ordinary :proposal_id)))
+      (is (= "Ordinary chat." (str/trim (:body ordinary))))
+      (is (= "ordinary answer" (:response ordinary))))))
+
 
 
 
