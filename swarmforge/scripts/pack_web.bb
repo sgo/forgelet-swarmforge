@@ -763,6 +763,13 @@
          vec)
     []))
 
+(def chat-thread-id-re #"[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}")
+
+(defn chat-thread-id [headers]
+  (let [value (some-> (get headers "thread_id") str/trim not-empty)]
+    (when (and value (re-matches chat-thread-id-re value))
+      value)))
+
 (defn parse-chat [path]
   (let [raw (slurp (str path))
         [header body] (str/split raw #"\n\n" 2)
@@ -771,13 +778,15 @@
                             :let [[k v] (str/split line #": " 2)]
                             :when (and k v)]
                         [k v]))
-        proposal-id (not-empty (get headers "proposal_id"))]
+        proposal-id (not-empty (get headers "proposal_id"))
+        thread-id (chat-thread-id headers)]
     (cond-> {:id (get headers "id")
              :status (get headers "status")
              :body (or body "")
              :response (str/replace (get headers "response" "") #"\\n" "\n")
              :created_at (get headers "created_at")}
-      proposal-id (assoc :proposal_id proposal-id))))
+      proposal-id (assoc :proposal_id proposal-id)
+      thread-id (assoc :thread_id thread-id))))
 
 (defn list-chat [root]
   (vec (concat (map parse-chat (chat-files (chat-pending-dir root)))

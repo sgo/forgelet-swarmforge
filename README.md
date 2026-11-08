@@ -460,8 +460,10 @@ forge's own adapter, `swarmforge/scripts/matrix-bridge.sh`, which arrives with
 the bridge's installation rather than with this fork.
 
 Chat entries in `/api/state` carry an optional `proposal_id` when that request
-belongs to a proposal discussion. Ordinary chat requests omit the field, and
-chat ordering, answering and approval behavior are unchanged.
+belongs to a proposal discussion and an optional `thread_id` when it belongs to
+a durable conversation. Thread IDs are opaque safe identifiers; malformed values
+are omitted without dropping the chat turn. Ordinary chat requests omit both
+fields, and chat ordering, answering and approval behavior are unchanged.
 
 Getting the kit into a forge is the bridge's own step, `install-kit` and
 `install-rules` on the adapter. Its paths default to a bridge that lives *inside

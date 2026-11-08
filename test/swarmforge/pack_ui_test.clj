@@ -1490,6 +1490,51 @@
       (is (= "Ordinary chat." (str/trim (:body ordinary))))
       (is (= "ordinary answer" (:response ordinary))))))
 
+(deftest pack-web-chat-preserves-safe-thread-ids-per-turn
+  (let [root (tmp-dir)
+        pending (fs/path root ".swarmforge/dashboard/requests/pending")
+        done (fs/path root ".swarmforge/dashboard/requests/done")]
+    (setup-pack! root)
+    (write-file
+     (fs/path pending "req-thread-a.request")
+     (str "id: req-thread-a\n"
+          "status: pending\n"
+          "thread_id: thread-completed-report-42\n"
+          "created_at: 2026-11-08T14:20:00Z\n\n"
+          "First turn.\n"))
+    (write-file
+     (fs/path done "req-thread-b.request")
+     (str "id: req-thread-b\n"
+          "status: done\n"
+          "thread_id: thread-completed-report-42\n"
+          "response: Second answer\n"
+          "created_at: 2026-11-08T14:21:00Z\n\n"
+          "Second turn.\n"))
+    (write-file
+     (fs/path pending "req-ordinary.request")
+     (str "id: req-ordinary\n"
+          "status: pending\n"
+          "created_at: 2026-11-08T14:22:00Z\n\n"
+          "Ordinary turn.\n"))
+    (write-file
+     (fs/path pending "req-malformed.request")
+     (str "id: req-malformed\n"
+          "status: pending\n"
+          "thread_id: ../not-a-thread\n"
+          "created_at: 2026-11-08T14:23:00Z\n\n"
+          "Malformed thread remains an ordinary turn.\n"))
+    (let [chat (into {} (map (juxt :id identity) (:chat (web-state root))))]
+      (is (= 4 (count chat)))
+      (is (= "thread-completed-report-42" (get-in chat ["req-thread-a" :thread_id])))
+      (is (= "thread-completed-report-42" (get-in chat ["req-thread-b" :thread_id])))
+      (is (not (contains? (get chat "req-ordinary") :thread_id)))
+      (is (not (contains? (get chat "req-malformed") :thread_id)))
+      (is (= "pending" (get-in chat ["req-thread-a" :status])))
+      (is (= "done" (get-in chat ["req-thread-b" :status])))
+      (is (= "Second answer" (get-in chat ["req-thread-b" :response])))
+      (is (= "2026-11-08T14:23:00Z"
+             (get-in chat ["req-malformed" :created_at]))))))
+
 
 
 
