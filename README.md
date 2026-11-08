@@ -369,6 +369,13 @@ The layer currently ships:
 - `java-maven-project` for Maven build wiring, local SNAPSHOT installation and
   release-only registry publishing.
 
+Cross-forge issues pass through `forge_request.sh` in the receiving forge.
+`intake` validates the repository and `forge-requesters`, records the issue
+digest under `.swarmforge/forge-requests/`, and creates no work. Only local
+operator words can `approve` that record. A local route-card proposal is then
+`bind`-ed, its consumed card is `link-card`-ed, and `guard` must pass immediately
+before execution. Pending, changed, reused or unlinked requests fail closed.
+
 Composition also creates repo-scoped `.agents/skills/<name>` symlinks in the forge root, pointing at
 `swarmforge/skills/<name>`. A lieutenant launched in the forge therefore discovers the shared skills
 without a user-scoped link. Project directories are separate Git repositories, so they do not

@@ -4,6 +4,7 @@
         :task (do
                 (require 'clojure.test)
                 (require 'swarmforge.layer-gate-test)
+                (require 'swarmforge.forge-request-test)
                 (require 'swarmforge.card-lifecycle-test)
                 (require 'swarmforge.handoff-test)
                 (require 'swarmforge.script-test)
@@ -13,6 +14,7 @@
                 (require 'swarmforge.pack-ui-test)
                 (require 'swarmforge.coverage-in-process-test)
                 (let [{:keys [fail error]} (clojure.test/run-tests 'swarmforge.layer-gate-test
+                                                                    'swarmforge.forge-request-test
                                                                     'swarmforge.card-lifecycle-test
                                                                     'swarmforge.handoff-test
                                                                     'swarmforge.script-test
