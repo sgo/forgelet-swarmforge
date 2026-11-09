@@ -22,6 +22,7 @@
        "  pack_web.sh --test-post-task <root> <name> <text>\n"
        "  pack_web.sh --test-post-chat <root> <text>\n"
        "  pack_web.sh --test-post-chat-json <root> <json>\n"
+       "  pack_web.sh --test-post-chat-file <root> <json-file>\n"
        "  pack_web.sh --test-inject-payload [name text]\n"
        "  pack_web.sh --test-inject-argv <root> <file> <text>\n"
        "  pack_web.sh --test-approve <root> <id>\n"
@@ -102,6 +103,11 @@
     (fs/create-dirs dir))
   (spit (str file) (str (pr-str (vec argv)) "\n") :append true))
 
+(defn record-buffer! [file text]
+  (when-let [dir (fs/parent file)]
+    (fs/create-dirs dir))
+  (spit (str file ".stdin") text :append true))
+
 (defn send-keys! [socket session & keys]
   (let [argv (into ["tmux" "-S" socket "send-keys" "-t" session] keys)]
     (if-let [stub (tmux-stub)]
@@ -117,6 +123,16 @@
       (let [result (apply sh argv)]
         (when-not (zero? (:exit result))
           (throw (ex-info "tmux failed" result)))))))
+
+(defn tmux-load-buffer! [socket buffer text]
+  (let [argv ["tmux" "-S" socket "load-buffer" "-b" buffer "-"]]
+    (if-let [stub (tmux-stub)]
+      (do
+        (record-argv! stub argv)
+        (record-buffer! stub text))
+      (let [result (apply sh (concat argv [:in text]))]
+        (when-not (zero? (:exit result))
+          (throw (ex-info "tmux load-buffer failed" result)))))))
 
 (defn role-rows [root]
   (let [file (fs/path root ".swarmforge" "roles.tsv")]
@@ -155,7 +171,7 @@
 
 (defn inject-target! [socket target text]
   (when (and socket target (not (str/blank? text)))
-    (tmux! socket "set-buffer" "-b" wake-buffer text)
+    (tmux-load-buffer! socket wake-buffer text)
     (tmux! socket "paste-buffer" "-d" "-p" "-b" wake-buffer "-t" target)
     (tmux! socket "send-keys" "-t" target "C-m")))
 
@@ -2292,6 +2308,11 @@
                               {:method "POST"
                                :uri "/api/chat"
                                :body body-json})))
+
+(defn test-post-chat-file! [root body-file]
+  (when-not (fs/regular-file? body-file)
+    (exit! 1 "Missing chat request body file"))
+  (test-post-chat-json! root (slurp (str body-file))))
 
 (defn test-approval! [root id action]
   (when (str/blank? id)

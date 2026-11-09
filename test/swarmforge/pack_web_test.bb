@@ -21,6 +21,7 @@
     "--test-post-task" (test-post-task! (second args) (nth args 2 nil) (nth args 3 nil))
     "--test-post-chat" (test-post-chat! (second args) (nth args 2 nil))
     "--test-post-chat-json" (test-post-chat-json! (second args) (nth args 2 nil))
+    "--test-post-chat-file" (test-post-chat-file! (second args) (nth args 2 nil))
     "--test-inject-payload" (test-inject-payload! (second args) (nth args 2 nil))
     "--test-inject-argv" (test-inject-argv! (second args) (nth args 2 nil) (nth args 3 nil))
     "--test-chat-wake" (println (chat-wake (second args) (nth args 2 nil)))

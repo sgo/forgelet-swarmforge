@@ -259,6 +259,30 @@
       (run {:dir root} "tmux" "-S" sock "new-session" "-d" "-s" session "sleep" "120"))
     sock))
 
+(defn start-tmux-command!
+  [root session window command]
+  (let [sock (str (fs/path root "tmux.sock"))]
+    (write-file (fs/path root ".swarmforge/tmux-socket") (str sock "\n"))
+    (run {:dir root} "tmux" "-S" sock "new-session" "-d" "-s" session
+         "sh" "-c" command)
+    (run {:dir root} "tmux" "-S" sock "rename-window" "-t" (str session ":0")
+         window)
+    sock))
+
+(defn wait-for-file-size [file size]
+  (let [deadline (+ (System/nanoTime) 15000000000)]
+    (loop []
+      (if (and (fs/regular-file? file)
+               (>= (fs/size file) size))
+        true
+        (do
+          (when (> (System/nanoTime) deadline)
+            (throw (ex-info (str "Timed out waiting for " file)
+                            {:expected-size size
+                             :actual-size (when (fs/exists? file) (fs/size file))})))
+          (Thread/sleep 50)
+          (recur))))))
+
 (defn stop-tmux! [sock]
   (run {:dir "." :ok? false} "tmux" "-S" sock "kill-server"))
 
@@ -1023,16 +1047,19 @@
      (str "specifier\tmaster\t" root "\tswarmforge-specifier\tSpecifier\tcodex\ttask\n"))
     (write-file (fs/path root ".swarmforge/tmux-socket") (str sock "\n"))
     (let [result (pack-web root false "--test-inject-argv" (str root) argv-file text)
-          argv (read-argv argv-file)]
+          argv (read-argv argv-file)
+          stdin (slurp (str argv-file ".stdin"))]
       (is (zero? (:exit result)))
-      (is (= ["tmux" "-S" sock "set-buffer" "-b" "swarmforge-wake" text]
+      (is (= ["tmux" "-S" sock "load-buffer" "-b" "swarmforge-wake" "-"]
              (first argv)))
+      (is (= text stdin))
       (is (= ["tmux" "-S" sock "paste-buffer" "-d" "-p" "-b" "swarmforge-wake"
               "-t" "swarmforge-specifier:Specifier.0"]
              (second argv)))
       (is (= ["tmux" "-S" sock "send-keys" "-t" "swarmforge-specifier:Specifier.0" "C-m"]
              (nth argv 2)))
       (is (= 3 (count argv)))
+      (is (not-any? #(str/includes? (str %) text) argv))
       (is (empty? (filter #(some #{"-l"} %) argv))))))
 
 (deftest pack-web-post-task-queues-a-note-for-master
@@ -1072,12 +1099,14 @@
     (write-file (fs/path root ".swarmforge/tmux-socket") (str sock "\n"))
     (let [result (pack-web-env root {"SWARMFORGE_TMUX_STUB" argv-file}
                                "--test-post-chat" (str root) text)
-          argv (read-argv argv-file)]
+          argv (read-argv argv-file)
+          stdin (slurp (str argv-file ".stdin"))]
       (is (zero? (:exit result)))
-      (is (str/includes? (str (last (first argv))) text))
-      (is (re-find #"\[req-" (str (last (first argv)))))
-      (is (not (str/starts-with? (str (last (first argv))) "Task:")))
-      (is (= "set-buffer" (nth (first argv) 3)))
+      (is (str/includes? stdin text))
+      (is (re-find #"\[req-" stdin))
+      (is (not (str/starts-with? stdin "Task:")))
+      (is (= "load-buffer" (nth (first argv) 3)))
+      (is (not-any? #(str/includes? (str %) text) argv))
       (is (= "paste-buffer" (nth (second argv) 3)))
       (is (= "C-m" (last (nth argv 2))))
       (is (= 3 (count argv)))
@@ -1156,6 +1185,49 @@
       (is (= 1 (count (fs/list-dir
                        (fs/path root ".swarmforge/dashboard/requests/pending"))))))))
 
+(deftest completed-card-report-beyond-arg-max-uses-stdin-only
+  ;; Given a report body larger than ARG_MAX
+  ;; When the wake is staged through the tmux stub
+  ;; Then the full body is on stdin and no tmux argument contains it
+  (let [root (tmp-dir)
+        argv-file (fs/path root "tmux.argv")
+        sock (fs/path root "tmux.sock")
+        arg-max (Long/parseLong
+                 (str/trim (:out (run {:dir root} "getconf" "ARG_MAX"))))
+        filler (apply str (repeat 7000 "x"))
+        report (str "Completed cards:\n"
+                    (str/join
+                     "\n"
+                     (map (fn [n]
+                            (format (str "- project: huge-app; task_id: task-%03d; "
+                                         "task_name: card %03d; completed_at: "
+                                         "2026-11-09T20:00:00Z; notes: %s")
+                                    n n filler))
+                          (range 178))))
+        request-id "req-report-99999999999999999999999999999999"
+        request {:text report
+                 :request_id request-id
+                 :thread_id "thread-99999999999999999999999999999999"
+                 :source "app.completed-card-report"}
+        request-file (fs/path root "tmp" "arg-max-report.json")
+        wake (str "[" request-id "]\n" report "\n"
+                  "Answer with: pack_dashboard_request.sh answer " request-id
+                  " ./tmp/answer.txt (a reply only in this pane reaches nobody).")]
+    (setup-pack! root ["specifier"])
+    (write-file (fs/path root ".swarmforge/tmux-socket") (str sock "\n"))
+    (write-file request-file (json/generate-string request))
+    (let [result (pack-web-env root {"SWARMFORGE_TMUX_STUB" (str argv-file)}
+                               "--test-post-chat-file" (str root)
+                               (str request-file))
+          argv (read-argv argv-file)
+          stdin (slurp (str argv-file ".stdin"))]
+      (is (> (count report) arg-max))
+      (is (= request-id (:request_id (json/parse-string (:out result) true))))
+      (is (= wake stdin))
+      (is (= 3 (count argv)))
+      (is (= "load-buffer" (nth (first argv) 3)))
+      (is (not-any? #(str/includes? (str %) "- project: huge-app") argv)))))
+
 (deftest pack-web-chat-refuses-malformed-report-metadata
   ;; Given malformed request, thread and source values
   ;; When each is submitted
@@ -1214,6 +1286,67 @@
                          "req-report-wake-failure.request"))))
       (is (not (fs/exists? argv-file))))))
 
+(deftest completed-card-report-beyond-argv-limit-reaches-a-real-tmux-pane
+  ;; Given a completed-card report larger than the OS argument limit
+  ;; When it is submitted through the metadata-bearing chat endpoint
+  ;; Then stdin loads the exact wake into a real pane, and retry/conflict do not wake again
+  (let [root (tmp-dir)
+        capture (fs/path root "captured-wake.txt")
+        request-id "req-report-e7758be367cfd93c5bb338d95c6b791b"
+        thread-id "thread-fb9f3f9a9affc19f5c192e2d17352894"
+        filler (apply str (repeat 140 "x"))
+        report (str "Completed cards:\n"
+                    (str/join
+                     "\n"
+                     (map (fn [n]
+                            (format (str "- project: large-app; task_id: task-%03d; "
+                                         "task_name: completed card %03d; "
+                                         "completed_at: 2026-11-09T20:%02d:00Z; notes: %s")
+                                    n n (mod n 60) filler))
+                          (range 178))))
+        request {:text report
+                 :request_id request-id
+                 :thread_id thread-id
+                 :source "app.completed-card-report"}
+        request-file (fs/path root "tmp" "large-report.json")
+        conflict-file (fs/path root "tmp" "large-report-conflict.json")
+        wake (str "[" request-id "]\n" report "\n"
+                  "Answer with: pack_dashboard_request.sh answer " request-id
+                  " ./tmp/answer.txt (a reply only in this pane reaches nobody).\n")
+        sock (atom nil)]
+    (setup-pack! root ["specifier"])
+    (write-file request-file (json/generate-string request))
+    (write-file conflict-file
+                (json/generate-string (assoc request :text "Different report.")))
+    (try
+      (reset! sock (start-tmux-command!
+                    root "specifier" "Specifier"
+                    (str "cat > " (str capture))))
+      (let [first-result (pack-web root true "--test-post-chat-file"
+                                   (str root) (str request-file))]
+        (is (zero? (:exit first-result)))
+        (is (>= (count (re-seq #"(?m)^- project:" report)) 178))
+        (is (> (count report) 29000))
+        (wait-for-file-size capture (count (.getBytes wake "UTF-8")))
+        (is (= wake (slurp (str capture))))
+        (pack-web root true "--test-post-chat-file" (str root) (str request-file))
+        (Thread/sleep 200)
+        (is (= wake (slurp (str capture))))
+        (let [conflict (pack-web root false "--test-post-chat-file"
+                                 (str root) (str conflict-file))]
+          (is (= 1 (:exit conflict)))
+          (is (str/includes? (str (:out conflict) (:err conflict))
+                             "Request id was reused with different content."))
+          (is (not (str/includes? (str (:out conflict) (:err conflict))
+                                  (str root)))))
+        (Thread/sleep 200)
+        (is (= wake (slurp (str capture))))
+        (is (= 1 (count (fs/list-dir
+                         (fs/path root ".swarmforge/dashboard/requests/pending"))))))
+      (finally
+        (when @sock (stop-tmux! @sock))
+        (fs/delete-tree root)))))
+
 (deftest attention-reject-injects-a-message-to-master
   ;; Given a pending approval and a tmux argv stub
   ;; When retry with comments
@@ -1244,9 +1377,10 @@
         (is (zero? (:exit result)))
         (is (= [] (pending-names root)))
         (is (not (fs/exists? (fs/path root ".swarmforge/notify/reject-htw-console-app"))))
-        (is (str/includes? (str (last (first argv))) "use an RNG"))
+        (is (str/includes? (slurp (str argv-file ".stdin")) "use an RNG"))
         (is (empty? (filter #(str/includes? (fs/file-name %) "New_Task") notes)))
-        (is (= "set-buffer" (nth (first argv) 3)))
+        (is (= "load-buffer" (nth (first argv) 3)))
+        (is (not-any? #(str/includes? (str %) "use an RNG") argv))
         (is (= "paste-buffer" (nth (second argv) 3)))
         (is (= "C-m" (last (nth argv 2))))
         (is (= 3 (count argv)))))))
@@ -2443,7 +2577,7 @@
       (let [result (pack-web-env root {"SWARMFORGE_TMUX_STUB" argv-file}
                                  "--test-retry-task" (str root) "50_hello" "")
             argv (read-argv argv-file)
-            injected (str (last (first argv)))]
+            injected (slurp (str argv-file ".stdin"))]
         (is (zero? (:exit result)))
         (is (str/includes? injected "features/console.feature"))
         (is (str/includes? injected "use an RNG"))
@@ -2512,13 +2646,15 @@
       (is (= "pending" (:status item)))
       (pack-web-env root {"SWARMFORGE_TMUX_STUB" argv-file}
                     "--test-answer-clarification" (str root) id "Yes, 1 to 20.\nUse all rooms.")
-      (let [argv (slurp argv-file)
+      (let [argv (read-argv argv-file)
+            stdin (slurp (str argv-file ".stdin"))
             done (first (:clarifications (web-state root)))
             stored (slurp (str (first (fs/list-dir
                                        (fs/path root ".swarmforge/dashboard/clarifications/done")))))]
-        (is (str/includes? argv id))
-        (is (str/includes? argv "Yes, 1 to 20."))
-        (is (str/includes? argv "Use all rooms."))
+        (is (str/includes? stdin id))
+        (is (str/includes? stdin "Yes, 1 to 20."))
+        (is (str/includes? stdin "Use all rooms."))
+        (is (not-any? #(str/includes? (str %) "Use all rooms.") argv))
         (is (= "done" (:status done)))
         (is (= "Yes, 1 to 20.\nUse all rooms." (:response done)))
         (is (str/includes? stored "response: Yes, 1 to 20.\\nUse all rooms.\n"))))))
@@ -2700,10 +2836,12 @@
                                   "clarify" (str question))))]
       (pack-web-env root {"SWARMFORGE_TMUX_STUB" argv-file}
                     "--test-answer-clarification" (str root) id "Yes, 1 to 20.")
-      (let [argv (slurp argv-file)]
-        (is (str/includes? argv "Clarification requested from: QA"))
-        (is (str/includes? argv "Does the bat drop to any of 20 rooms?"))
-        (is (str/includes? argv "Yes, 1 to 20."))))))
+      (let [argv (read-argv argv-file)
+            stdin (slurp (str argv-file ".stdin"))]
+        (is (str/includes? stdin "Clarification requested from: QA"))
+        (is (str/includes? stdin "Does the bat drop to any of 20 rooms?"))
+        (is (str/includes? stdin "Yes, 1 to 20."))
+        (is (not-any? #(str/includes? (str %) "Yes, 1 to 20.") argv))))))
 
 (defn seed-mini-forge! [root]
   (fs/create-dirs (fs/path root "projects"))

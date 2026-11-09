@@ -522,7 +522,11 @@ part of the same call, and removes the new request if the wake fails. An
 unchanged retry with the same request id returns the existing request without
 writing or waking again; reusing that id with different text or metadata is
 refused. Calling the endpoint with only `text` retains the original
-best-effort-wake behavior.
+best-effort-wake behavior. The wake buffer is loaded through
+`tmux load-buffer -` with the full request on stdin, then pasted once and
+submitted with one Enter. Request bodies, credentials and dashboard paths never
+appear in tmux process arguments, so completed-card reports are not limited by
+the OS command-line argument size.
 
 Getting the kit into a forge is the bridge's own step, `install-kit` and
 `install-rules` on the adapter. Its paths default to a bridge that lives *inside
