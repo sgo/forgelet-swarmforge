@@ -1080,7 +1080,139 @@
       (is (= "set-buffer" (nth (first argv) 3)))
       (is (= "paste-buffer" (nth (second argv) 3)))
       (is (= "C-m" (last (nth argv 2))))
-      (is (= 3 (count argv))))))
+      (is (= 3 (count argv)))
+      (is (str/starts-with? (:request_id (json/parse-string (:out result) true))
+                            "req-")))))
+
+(deftest pack-web-chat-accepts-idempotent-report-metadata-and-wakes
+  ;; Given a report request with deterministic request, thread and source metadata
+  ;; When it is submitted and retried unchanged
+  ;; Then one pending request exists, one master wake occurs, and state exposes it
+  (let [root (tmp-dir)
+        argv-file (fs/path root "tmux.argv")
+        sock (fs/path root "tmux.sock")
+        request {:text "Verify the completed cards."
+                 :request_id "req-report-0123456789abcdef0123456789abcdef"
+                 :thread_id "thread-0123456789abcdef0123456789abcdef"
+                 :source "app.completed-card-report"}
+        post! (fn []
+                (pack-web-env root {"SWARMFORGE_TMUX_STUB" (str argv-file)}
+                              "--test-post-chat-json" (str root)
+                              (json/generate-string request)))]
+    (setup-pack! root ["specifier"])
+    (write-file (fs/path root ".swarmforge/tmux-socket") (str sock "\n"))
+    (let [first-result (post!)
+          first-argv (read-argv argv-file)
+          first-response (json/parse-string (:out first-result) true)
+          request-file (fs/path root ".swarmforge/dashboard/requests/pending"
+                                "req-report-0123456789abcdef0123456789abcdef.request")
+          stored (slurp (str request-file))
+          chat (into {} (map (juxt :id identity) (:chat (web-state root))))
+          second-result (post!)
+          second-response (json/parse-string (:out second-result) true)
+          second-argv (read-argv argv-file)]
+      (is (= "req-report-0123456789abcdef0123456789abcdef"
+             (:request_id first-response)))
+      (is (str/includes? stored "thread_id: thread-0123456789abcdef0123456789abcdef\n"))
+      (is (str/includes? stored "source: app.completed-card-report\n"))
+      (is (= "thread-0123456789abcdef0123456789abcdef"
+             (get-in chat ["req-report-0123456789abcdef0123456789abcdef" :thread_id])))
+      (is (= "app.completed-card-report"
+             (get-in chat ["req-report-0123456789abcdef0123456789abcdef" :source])))
+      (is (= 3 (count first-argv)))
+      (is (= first-response second-response))
+      (is (= first-argv second-argv))
+      (is (= 1 (count (fs/list-dir (fs/path root ".swarmforge/dashboard/requests/pending"))))))))
+
+(deftest pack-web-chat-refuses-conflicting-request-ids
+  ;; Given one accepted report request
+  ;; When the id is reused with different content
+  ;; Then it is refused without another write or wake
+  (let [root (tmp-dir)
+        argv-file (fs/path root "tmux.argv")
+        sock (fs/path root "tmux.sock")
+        id "req-report-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        base {:text "Verify the completed cards."
+              :request_id id
+              :thread_id "thread-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              :source "app.completed-card-report"}
+        submit! (fn [request ok?]
+                  (run {:dir root
+                        :ok? ok?
+                        :env {"SWARMFORGE_TMUX_STUB" (str argv-file)}}
+                       (script "pack_web.sh")
+                       "--test-post-chat-json" (str root)
+                       (json/generate-string request)))]
+    (setup-pack! root ["specifier"])
+    (write-file (fs/path root ".swarmforge/tmux-socket") (str sock "\n"))
+    (submit! base true)
+    (let [argv-before (read-argv argv-file)
+          conflict (submit! (assoc base :text "Different report.") false)]
+      (is (= 1 (:exit conflict)))
+      (is (str/includes? (str (:out conflict) (:err conflict))
+                         "Request id was reused with different content."))
+      (is (not (str/includes? (str (:out conflict) (:err conflict)) (str root))))
+      (is (= argv-before (read-argv argv-file)))
+      (is (= 1 (count (fs/list-dir
+                       (fs/path root ".swarmforge/dashboard/requests/pending"))))))))
+
+(deftest pack-web-chat-refuses-malformed-report-metadata
+  ;; Given malformed request, thread and source values
+  ;; When each is submitted
+  ;; Then every call is refused without a request or wake and without a path
+  (let [root (tmp-dir)
+        argv-file (fs/path root "tmux.argv")
+        sock (fs/path root "tmux.sock")
+        valid {:text "Verify the completed cards."
+               :request_id "req-report-valid"
+               :thread_id "thread-valid"
+               :source "app.completed-card-report"}
+        submit! (fn [request]
+                  (run {:dir root
+                        :ok? false
+                        :env {"SWARMFORGE_TMUX_STUB" (str argv-file)}}
+                       (script "pack_web.sh")
+                       "--test-post-chat-json" (str root)
+                       (json/generate-string request)))]
+    (setup-pack! root ["specifier"])
+    (write-file (fs/path root ".swarmforge/tmux-socket") (str sock "\n"))
+    (doseq [request [(assoc valid :request_id "../escape")
+                     (assoc valid :thread_id "/Users/operator/thread")
+                     (assoc valid :source (str (fs/path root "private" "source")))
+                     (assoc valid :source
+                            "ghp_1234567890abcdefghijklmnopqrstuvwxyz")
+                     (assoc valid :source "")]]
+      (let [result (submit! request)]
+        (is (= 1 (:exit result)))
+        (is (not (str/includes? (str (:out result) (:err result)) (str root))))))
+    (is (not (fs/directory?
+              (fs/path root ".swarmforge/dashboard/requests/pending"))))
+    (is (not (fs/exists? argv-file)))))
+
+(deftest pack-web-chat-rolls-back-a-failed-metadata-wake
+  ;; Given no tmux target for the master wake
+  ;; When a metadata-bearing chat request is submitted
+  ;; Then the failure is reported and no pending request remains
+  (let [root (tmp-dir)
+        argv-file (fs/path root "tmux.argv")
+        request {:text "Verify the completed cards."
+                 :request_id "req-report-wake-failure"
+                 :thread_id "thread-wake-failure"
+                 :source "app.completed-card-report"}]
+    (setup-pack! root ["specifier"])
+    (let [result (run {:dir root
+                       :ok? false
+                       :env {"SWARMFORGE_TMUX_STUB" (str argv-file)}}
+                      (script "pack_web.sh")
+                      "--test-post-chat-json" (str root)
+                      (json/generate-string request))]
+      (is (= 1 (:exit result)))
+      (is (str/includes? (str (:out result) (:err result)) "Master wake failed."))
+      (is (not (str/includes? (str (:out result) (:err result)) (str root))))
+      (is (not (fs/exists?
+                (fs/path root ".swarmforge/dashboard/requests/pending"
+                         "req-report-wake-failure.request"))))
+      (is (not (fs/exists? argv-file))))))
 
 (deftest attention-reject-injects-a-message-to-master
   ;; Given a pending approval and a tmux argv stub
@@ -1544,6 +1676,7 @@
      (str "id: req-malformed\n"
           "status: pending\n"
           "thread_id: ../not-a-thread\n"
+          (str "source: " (fs/path root "unsafe" "source") "\n")
           "created_at: 2026-11-08T14:23:00Z\n\n"
           "Malformed thread remains an ordinary turn.\n"))
     (let [chat (into {} (map (juxt :id identity) (:chat (web-state root))))]
@@ -1552,6 +1685,7 @@
       (is (= "thread-completed-report-42" (get-in chat ["req-thread-b" :thread_id])))
       (is (not (contains? (get chat "req-ordinary") :thread_id)))
       (is (not (contains? (get chat "req-malformed") :thread_id)))
+      (is (not (contains? (get chat "req-malformed") :source)))
       (is (= "pending" (get-in chat ["req-thread-a" :status])))
       (is (= "done" (get-in chat ["req-thread-b" :status])))
       (is (= "Second answer" (get-in chat ["req-thread-b" :response])))

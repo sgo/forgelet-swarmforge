@@ -503,9 +503,20 @@ the bridge's installation rather than with this fork.
 
 Chat entries in `/api/state` carry an optional `proposal_id` when that request
 belongs to a proposal discussion and an optional `thread_id` when it belongs to
-a durable conversation. Thread IDs are opaque safe identifiers; malformed values
-are omitted without dropping the chat turn. Ordinary chat requests omit both
-fields, and chat ordering, answering and approval behavior are unchanged.
+a durable conversation. An optional bounded `source`, such as
+`app.completed-card-report`, identifies an app-originated request. Thread IDs
+and sources are opaque safe identifiers; malformed values are omitted without
+dropping the chat turn. Ordinary chat requests omit all three fields, and chat
+ordering, answering and approval behavior are unchanged.
+
+`POST /api/chat` accepts the optional `request_id`, `thread_id` and `source`
+fields alongside `text`, and returns the resulting request id. Supplying any of
+those fields publishes the pending request atomically, wakes the master role as
+part of the same call, and removes the new request if the wake fails. An
+unchanged retry with the same request id returns the existing request without
+writing or waking again; reusing that id with different text or metadata is
+refused. Calling the endpoint with only `text` retains the original
+best-effort-wake behavior.
 
 Getting the kit into a forge is the bridge's own step, `install-kit` and
 `install-rules` on the adapter. Its paths default to a bridge that lives *inside

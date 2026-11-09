@@ -255,6 +255,32 @@
   (let [missing (pack-web/handle-request nil {:method "HEAD" :uri "/missing" :body nil})]
     (is (= 404 (:status missing)))))
 
+(deftest pack-web-chat-metadata-helpers
+  (is (= "app.completed-card-report"
+         (pack-web/chat-source {"source" "app.completed-card-report"})))
+  (is (nil? (pack-web/chat-source {"source" "../unsafe"})))
+  (is (nil? (pack-web/chat-source
+             {"source" "ghp_1234567890abcdefghijklmnopqrstuvwxyz"})))
+  (is (pack-web/same-chat-content?
+       {:body "request\n"
+        :thread_id "thread-a"
+        :source "app.completed-card-report"}
+       "request"
+       "thread-a"
+       "app.completed-card-report"))
+  (is (not (pack-web/same-chat-content?
+            {:body "request"
+             :thread_id "thread-a"}
+            "different"
+            "thread-a"
+            nil)))
+  (is (try
+        (pack-web/supplied-chat-id "../escape" "Request id"
+                                   pack-web/chat-request-id-re)
+        false
+        (catch clojure.lang.ExceptionInfo e
+          (str/includes? (ex-message e) "Request id is invalid")))))
+
 (deftest swarmforge-launch-helpers
   (is (= "iterm2" (swarmforge/normalize-terminal-backend "iTerm")))
   (is (= "terminal-app" (swarmforge/normalize-terminal-backend "terminal")))

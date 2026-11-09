@@ -6,7 +6,9 @@
             [clojure.edn :as edn]
             [clojure.java.shell :refer [sh]]
             [clojure.string :as str]
-            [org.httpkit.server :as http]))
+            [org.httpkit.server :as http])
+  (:import [java.nio.channels FileChannel]
+           [java.nio.file OpenOption StandardOpenOption]))
 
 (def script-dir (fs/parent *file*))
 (load-file (str (fs/path script-dir "forge.bb")))
@@ -19,6 +21,7 @@
        "  pack_web.sh --test-html\n"
        "  pack_web.sh --test-post-task <root> <name> <text>\n"
        "  pack_web.sh --test-post-chat <root> <text>\n"
+       "  pack_web.sh --test-post-chat-json <root> <json>\n"
        "  pack_web.sh --test-inject-payload [name text]\n"
        "  pack_web.sh --test-inject-argv <root> <file> <text>\n"
        "  pack_web.sh --test-approve <root> <id>\n"
@@ -174,6 +177,19 @@
 (defn inject-master! [root text]
   (when-let [row (master-row root)]
     (inject-role! root (first row) text)))
+
+(defn inject-master-strict! [root text]
+  (let [row (master-row root)]
+    (when-not row
+      (throw (ex-info "Master wake failed." {:http-status 502})))
+    (let [socket (tmux-socket root)
+          target (pane-target row)]
+      (when-not (and socket target)
+        (throw (ex-info "Master wake failed." {:http-status 502})))
+      (try
+        (inject-target! socket target text)
+        (catch Exception _
+          (throw (ex-info "Master wake failed." {:http-status 502})))))))
 
 (defn pack-board-result [root & args]
   (let [script (str (fs/path script-dir "pack_board.sh"))]
@@ -765,10 +781,21 @@
     []))
 
 (def chat-thread-id-re #"[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}")
+(def chat-request-id-re #"[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}")
+(def chat-source-re #"[A-Za-z0-9][A-Za-z0-9._~:-]{0,127}")
+(def chat-token-re
+  #"\b(?:gh[pousr]_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|sk-[A-Za-z0-9_-]{10,}|xox[baprs]-[A-Za-z0-9-]{10,}|Bearer\s+[A-Za-z0-9._~+/=-]{10,})\b")
 
 (defn chat-thread-id [headers]
   (let [value (some-> (get headers "thread_id") str/trim not-empty)]
     (when (and value (re-matches chat-thread-id-re value))
+      value)))
+
+(defn chat-source [headers]
+  (let [value (some-> (get headers "source") str/trim not-empty)]
+    (when (and value
+               (re-matches chat-source-re value)
+               (not (re-find chat-token-re value)))
       value)))
 
 (defn parse-chat [path]
@@ -780,14 +807,16 @@
                             :when (and k v)]
                         [k v]))
         proposal-id (not-empty (get headers "proposal_id"))
-        thread-id (chat-thread-id headers)]
+        thread-id (chat-thread-id headers)
+        source (chat-source headers)]
     (cond-> {:id (get headers "id")
              :status (get headers "status")
              :body (or body "")
              :response (str/replace (get headers "response" "") #"\\n" "\n")
              :created_at (get headers "created_at")}
       proposal-id (assoc :proposal_id proposal-id)
-      thread-id (assoc :thread_id thread-id))))
+      thread-id (assoc :thread_id thread-id)
+      source (assoc :source source))))
 
 (defn list-chat [root]
   (vec (concat (map parse-chat (chat-files (chat-pending-dir root)))
@@ -820,6 +849,43 @@
 
 (defn chat-id []
   (str "req-" (str/replace (str (java.time.Instant/now)) #"[^0-9A-Za-z]" "")))
+
+(defn chat-request-file [root state id]
+  (fs/path root ".swarmforge" "dashboard" "requests" state
+           (str id ".request")))
+
+(defn existing-chat-request [root id]
+  (some (fn [path]
+          (when (fs/regular-file? path)
+            {:path path :entry (parse-chat path)}))
+        [(chat-request-file root "pending" id)
+         (chat-request-file root "done" id)]))
+
+(defn fresh-chat-id [root]
+  (loop []
+    (let [id (chat-id)]
+      (if (existing-chat-request root id)
+        (recur)
+        id))))
+
+(defn with-chat-request-lock [root f]
+  (let [path (fs/path root ".swarmforge" "dashboard" "requests" "requests.lock")
+        options (into-array OpenOption [StandardOpenOption/CREATE
+                                        StandardOpenOption/WRITE])]
+    (fs/create-dirs (fs/parent path))
+    (with-open [channel (FileChannel/open path options)]
+      (.lock channel)
+      (f))))
+
+(defn chat-request-invalid! [message]
+  (throw (ex-info message {:http-status 400})))
+
+(defn supplied-chat-id [value kind pattern]
+  (when-not (and (string? value)
+                 (re-matches pattern value)
+                 (not (re-find chat-token-re value)))
+    (chat-request-invalid! (str kind " is invalid.")))
+  value)
 
 ;; A request typed into the pane without the command that answers it leaves the
 ;; operator with nothing: the request is written down, and the reply lands only
@@ -863,19 +929,27 @@
        "Question:\n" (str/trimr (or question "")) "\n"
        "Answer:\n" (str/trimr (or answer ""))))
 
-(defn write-chat-request! [root text]
-  (let [id (chat-id)
-        file (fs/path (chat-pending-dir root) (str id ".request"))]
-    (fs/create-dirs (fs/parent file))
-    (spit (str file)
-          (str "id: " id "\n"
-               "status: pending\n"
-               "created_at: " (.format java.time.format.DateTimeFormatter/ISO_INSTANT
-                                       (java.time.Instant/now)) "\n"
-               "\n"
-               text
-               (when-not (str/ends-with? text "\n") "\n")))
-    id))
+(defn write-chat-request!
+  ([root text]
+   (write-chat-request! root text {}))
+  ([root text {:keys [request_id thread_id source]}]
+   (let [id (or request_id (fresh-chat-id root))
+         text (str/trimr (or text ""))
+         file (fs/path (chat-pending-dir root) (str id ".request"))]
+     (fs/create-dirs (fs/parent file))
+     (let [tmp (fs/create-temp-file {:dir (fs/parent file)
+                                     :prefix ".chat-request."})]
+       (spit (str tmp)
+             (str "id: " id "\n"
+                  "status: pending\n"
+                  "created_at: " (.format java.time.format.DateTimeFormatter/ISO_INSTANT
+                                          (java.time.Instant/now)) "\n"
+                  (when thread_id (str "thread_id: " thread_id "\n"))
+                  (when source (str "source: " source "\n"))
+                  "\n"
+                  text "\n"))
+       (fs/move tmp file {:replace-existing true :atomic-move true}))
+     id)))
 
 (defn dashboard-state [root]
   (let [master (master-role root)]
@@ -1281,14 +1355,72 @@
       (catch Exception e
         (http-error (or (:http-status (ex-data e)) 400) (.getMessage e))))))
 
+(defn parse-chat-request-body [body]
+  (try
+    (let [value (json/parse-string (or body "{}") true)]
+      (when-not (map? value)
+        (chat-request-invalid! "Chat request body must be an object."))
+      value)
+    (catch clojure.lang.ExceptionInfo e
+      (throw e))
+    (catch Exception _
+      (chat-request-invalid! "Chat request body is invalid."))))
+
+(defn same-chat-content? [entry text thread-id source]
+  (and (= (str/trimr (or (:body entry) ""))
+          (str/trimr (or text "")))
+       (= thread-id (:thread_id entry))
+       (= source (:source entry))))
+
+(declare json-ok-data)
+
 (defn post-chat [root body]
-  (let [{:keys [text]} (json/parse-string (or body "{}") true)
-        text (or text "")]
-    (when-not (str/blank? text)
-      (let [id (write-chat-request! root text)]
-        (when-not (single-agent-project? root)
-          (inject-master! root (chat-wake id text)))))
-    (json-ok)))
+  (let [request (parse-chat-request-body body)
+        text (or (:text request) "")
+        metadata? (some #(contains? request %)
+                        [:request_id :thread_id :source])
+        request-id (when (contains? request :request_id)
+                     (supplied-chat-id (:request_id request)
+                                       "Request id"
+                                       chat-request-id-re))
+        thread-id (when (contains? request :thread_id)
+                    (supplied-chat-id (:thread_id request)
+                                      "Thread id"
+                                      chat-thread-id-re))
+        source (when (contains? request :source)
+                 (supplied-chat-id (:source request)
+                                   "Request source"
+                                   chat-source-re))]
+    (when (and metadata? (str/blank? text))
+      (chat-request-invalid! "Chat text is required when request metadata is supplied."))
+    (if (str/blank? text)
+      (json-ok)
+      (let [result
+            (with-chat-request-lock
+              root
+              (fn []
+                (let [id (or request-id (fresh-chat-id root))
+                      existing (existing-chat-request root id)]
+                  (if existing
+                    (if (same-chat-content? (:entry existing) text thread-id source)
+                      {:id id}
+                      (throw (ex-info "Request id was reused with different content."
+                                      {:http-status 409})))
+                    (let [options {:request_id id
+                                   :thread_id thread-id
+                                   :source source}
+                          id (write-chat-request! root text options)]
+                      (try
+                        (when-not (single-agent-project? root)
+                          (if metadata?
+                            (inject-master-strict! root (chat-wake id text))
+                            (inject-master! root (chat-wake id text))))
+                        {:id id}
+                        (catch Exception error
+                          (fs/delete-if-exists
+                           (chat-request-file root "pending" id))
+                          (throw error))))))))]
+        (json-ok-data {:request_id (:id result)})))))
 
 (defn clar-pending-file [root id]
   (fs/path (clar-pending-dir root) (str id ".request")))
@@ -2128,11 +2260,13 @@
         (println (:body resp)))
       (System/exit 1))))
 
+(declare test-http!)
+
 (defn test-post-chat! [root text]
-  (handle-request (require-root! root)
-                  {:method "POST"
-                   :uri "/api/chat"
-                   :body (json/generate-string {:text (or text "")})}))
+  (test-http! (handle-request (require-root! root)
+                              {:method "POST"
+                               :uri "/api/chat"
+                               :body (json/generate-string {:text (or text "")})})))
 
 (defn test-inject-payload! [name text]
   (println (if (and name text)
@@ -2152,6 +2286,12 @@
     (binding [*out* *err*]
       (println (:body resp)))
     (System/exit 1)))
+
+(defn test-post-chat-json! [root body-json]
+  (test-http! (handle-request (require-root! root)
+                              {:method "POST"
+                               :uri "/api/chat"
+                               :body body-json})))
 
 (defn test-approval! [root id action]
   (when (str/blank? id)
