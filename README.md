@@ -312,8 +312,14 @@ the hook with `--no-verify`.
 Single agents commit the approved spec before implementation and then make
 coherent checkpoint commits as work lands. They do not wait for every gate or
 deploy before the first commit. The pre-commit hook checks only the approved
-spec; stage evidence is tied to the Git tree, so committing unchanged contents
-does not invalidate a gate that already passed. The upgrader installs this
+spec. Each stage records the full worktree tree diagnostically but derives its
+freshness from a content hash over the inputs resolved from that stage's
+`:stamp`. The spec stage is scoped to the exact approved proposal file bundle.
+An unrelated queued task note therefore does not invalidate source, test, clean,
+architecture, hardening, QA, documentation or deploy evidence. Changes to the
+active task note, feature, source, test, harness, build file or tool still
+invalidate the stages that declare them. Missing legacy input hashes are stale;
+unknown stamp inputs visibly widen to the whole tree. The upgrader installs this
 policy into existing projects' `AGENTS.md` and `STAGES.md`.
 
 When a routed card exists on the single-agent board, `stage propose spec`

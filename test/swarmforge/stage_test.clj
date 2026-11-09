@@ -97,6 +97,72 @@
 (defn fixture []
   (fixture-at (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage."})))
 
+(defn commit-change! [root message]
+  (let [add (sh/sh "git" "add" "-A" :dir (str root))
+        commit (sh/sh "git" "commit" "-q" "-m" message :dir (str root))]
+    (when-not (and (zero? (:exit add)) (zero? (:exit commit)))
+      (throw (ex-info "fixture commit failed"
+                      {:add add :commit commit})))))
+
+(defn scoped-stage-config []
+  {:task "fixture"
+   :stages
+   [{:name "spec"
+     :approval :operator
+     :spec ["spec.md" "features/extra.feature"]
+     :stamp ["spec.md" "features/extra.feature"]}
+    {:name "code"
+     :runs [["sh" "-c" "mkdir -p target && echo code > target/code.txt"]]
+     :evidence ["target/code.txt"]
+     :stamp [:sources]}
+    {:name "clean"
+     :runs [["sh" "-c" "echo clean > target/clean.txt"]]
+     :evidence ["target/clean.txt"]
+     :stamp ["core/src/main"]}
+    {:name "architect"
+     :runs [["sh" "-c" "echo architect > target/architect.txt"]]
+     :evidence ["target/architect.txt"]
+     :stamp ["scripts/harness.sh"]}
+    {:name "harden"
+     :runs [["sh" "-c" "echo harden > target/harden.txt"]]
+     :evidence ["target/harden.txt"]
+     :stamp ["build.edn"]}
+    {:name "qa"
+     :runs [["sh" "-c" "echo qa > target/qa.txt"]]
+     :evidence ["target/qa.txt"]
+     :stamp [:features]}
+    {:name "docs"
+     :runs [["sh" "-c" "echo docs > target/docs.txt"]]
+     :evidence ["target/docs.txt"]
+     :stamp ["README.md" "spec.md"]}
+    {:name "deploy"
+     :runs [["sh" "-c" "echo deploy > target/deploy.txt"]]
+     :evidence ["target/deploy.txt"]
+     :stamp ["core/pom.xml"]}]})
+
+(defn scoped-fixture []
+  (let [root (fixture)]
+    (write-file (fs/path root "scripts" "harness.sh") "#!/bin/sh\nexit 0\n")
+    (write-file (fs/path root "build.edn") "{:build :fixture}\n")
+    (write-file (fs/path root "README.md") "# Fixture\n")
+    (write-file (fs/path root "stages.edn") (pr-str (scoped-stage-config)))
+    (commit-change! root "scoped stage fixture")
+    root))
+
+(defn stage-statuses [root]
+  (let [status (-> (run-stage root "status" "--json")
+                   :out
+                   (json/parse-string true))]
+    (into {} (map (juxt :name :status)) (:stages status))))
+
+(defn run-scoped-stages! [root]
+  (run-stage root "propose" "spec" "spec.md" "features/extra.feature")
+  (run-stage root "approve" (latest-proposal-id root) "--words" "approve")
+  (doseq [stage ["code" "clean" "architect" "harden" "qa" "docs" "deploy"]]
+    (let [result (run-stage root "check" stage)]
+      (when-not (zero? (:exit result))
+        (throw (ex-info (str stage " stage failed") result))))))
+
 (defn seed-single-agent-card!
   ([root] (seed-single-agent-card! root "fixture-card"))
   ([root name]
@@ -147,6 +213,176 @@
           (is (every? #(= "done" (:status %))
                       (remove #(= "release" (:name %)) (:stages parsed))))
           (is (some? (:complete parsed)))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest queued-task-notes-do-not-stale-scoped-stage-evidence
+  (let [root (scoped-fixture)]
+    (try
+      (run-scoped-stages! root)
+      (let [all-done (zipmap ["spec" "code" "clean" "architect" "harden"
+                              "qa" "docs" "deploy"]
+                             (repeat "done"))
+            before-tree (:tree (json/parse-string
+                                (:out (run-stage root "status" "--json"))
+                                true))]
+        (is (= all-done (stage-statuses root)))
+        (write-file (fs/path root "tasks" "queued-next-card.md")
+                    "# queued-next-card\n\nWaiting behind the active card.\n")
+        (commit-change! root "queue unrelated card")
+        (let [status (-> (run-stage root "status" "--json")
+                         :out
+                         (json/parse-string true))]
+          (is (not= before-tree (:tree status)))
+          (is (= (:tree status) (:head-tree status)))
+          (is (= all-done (into {} (map (juxt :name :status)) (:stages status)))))
+        (let [complete (run-stage root "complete")]
+          (is (zero? (:exit complete)) (:err complete))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest stage-freshness-follows-exact-stamped-inputs-and-deletions
+  (let [root (scoped-fixture)
+        all-done (zipmap ["spec" "code" "clean" "architect" "harden"
+                          "qa" "docs" "deploy"]
+                         (repeat "done"))
+        assert-statuses! (fn [expected]
+                           (is (= expected (stage-statuses root))))
+        status-json (fn []
+                      (-> (run-stage root "status" "--json")
+                          :out
+                          (json/parse-string true)))]
+    (try
+      (run-scoped-stages! root)
+      (assert-statuses! all-done)
+
+      (testing "a dirty and then committed main-source edit stales code and clean"
+        (write-file (fs/path root "core" "src" "main" "Main.java")
+                    "class Main { int changed; }\n")
+        (is (false? (:clean (status-json))))
+        (assert-statuses! (assoc all-done "code" "stale" "clean" "stale"))
+        (commit-change! root "change main source")
+        (is (true? (:clean (status-json))))
+        (assert-statuses! (assoc all-done "code" "stale" "clean" "stale"))
+        (write-file (fs/path root "core" "src" "main" "Main.java")
+                    "class Main {}\n")
+        (commit-change! root "restore main source")
+        (assert-statuses! all-done))
+
+      (testing "a test-source edit stales only the source-consuming stages"
+        (write-file (fs/path root "core" "src" "test" "MainTest.java")
+                    "class MainTest { int changed; }\n")
+        (commit-change! root "change test source")
+        (assert-statuses! (assoc all-done "code" "stale"))
+        (write-file (fs/path root "core" "src" "test" "MainTest.java")
+                    "class MainTest {}\n")
+        (commit-change! root "restore test source"))
+
+      (testing "a pom edit stales source and deploy inputs"
+        (write-file (fs/path root "core" "pom.xml")
+                    "<project><name>changed</name></project>\n")
+        (commit-change! root "change module pom")
+        (assert-statuses! (assoc all-done "code" "stale" "deploy" "stale"))
+        (write-file (fs/path root "core" "pom.xml") "<project/>\n")
+        (commit-change! root "restore module pom"))
+
+      (testing "a harness edit stales only architect"
+        (write-file (fs/path root "scripts" "harness.sh")
+                    "#!/bin/sh\nexit 1\n")
+        (commit-change! root "change harness")
+        (assert-statuses! (assoc all-done "architect" "stale"))
+        (write-file (fs/path root "scripts" "harness.sh")
+                    "#!/bin/sh\nexit 0\n")
+        (commit-change! root "restore harness"))
+
+      (testing "deleting a stamped build input stales harden"
+        (fs/delete (fs/path root "build.edn"))
+        (commit-change! root "delete build input")
+        (assert-statuses! (assoc all-done "harden" "stale"))
+        (write-file (fs/path root "build.edn") "{:build :fixture}\n")
+        (commit-change! root "restore build input"))
+
+      (testing "a feature edit stales spec and the feature-consuming stage"
+        (write-file (fs/path root "features" "extra.feature")
+                    "Feature: extra\n\n  Scenario: changed\n    Given a change\n")
+        (commit-change! root "change feature")
+        (assert-statuses! (assoc all-done "spec" "stale" "qa" "stale"))
+        (write-file (fs/path root "features" "extra.feature")
+                    "Feature: extra\n\n  Scenario: extra\n    Given a fixture\n")
+        (commit-change! root "restore feature")
+        (assert-statuses! all-done))
+
+      (testing "a task-note edit stales spec and its note-consuming stage"
+        (write-file (fs/path root "spec.md")
+                    "# Fixture spec\n\nChanged contract.\n")
+        (commit-change! root "change task note")
+        (assert-statuses! (assoc all-done "spec" "stale" "docs" "stale"))
+        (let [complete (run-stage root "complete")]
+          (is (not (zero? (:exit complete))))
+          (is (str/includes? (:err complete) "spec"))
+          (is (str/includes? (:err complete) "docs"))))
+        (write-file (fs/path root "spec.md") "# Fixture spec\n\nA fixture.\n")
+        (commit-change! root "restore task note")
+        (assert-statuses! all-done)
+        (let [complete (run-stage root "complete")]
+          (is (zero? (:exit complete)) (:err complete)))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest unknown-stamp-inputs-widen-to-the-whole-tree-with-a-warning
+  (let [root (scoped-fixture)
+        config (update (scoped-stage-config) :stages
+                       (fn [stages]
+                         (mapv #(if (= "harden" (:name %))
+                                  (assoc % :stamp [:not-a-known-input])
+                                  %)
+                               stages)))]
+    (try
+      (write-file (fs/path root "stages.edn") (pr-str config))
+      (commit-change! root "widen harden stamp")
+      (run-scoped-stages! root)
+      (let [listing (run-stage root "list")]
+        (is (str/includes? (:err listing) "unknown stamp input"))
+        (is (str/includes? (:err listing) "widened to the whole tree")))
+      (is (= "done" (get (stage-statuses root) "harden")))
+      (write-file (fs/path root "tasks" "queued-next-card.md")
+                  "# Queued card\n")
+      (commit-change! root "queue card after widened harden")
+      (is (= "stale" (get (stage-statuses root) "harden")))
+      (let [complete (run-stage root "complete")]
+        (is (not (zero? (:exit complete))))
+        (is (str/includes? (:err complete) "harden")))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest legacy-stage-records-without-input-hashes-are-stale
+  (let [root (scoped-fixture)
+        state-file (fs/path root ".swarmforge" "stages" "fixture.edn")]
+    (try
+      (run-scoped-stages! root)
+      (let [legacy (update-in (state root) [:stages "harden"] dissoc :input_hash)]
+        (write-file state-file (pr-str legacy)))
+      (is (= "stale" (get (stage-statuses root) "harden")))
+      (let [complete (run-stage root "complete")]
+        (is (not (zero? (:exit complete))))
+        (is (str/includes? (:err complete) "Stages not current: harden")))
+      (is (nil? (get-in (state root) [:stages "harden" :input_hash])))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest approved-spec-is-scoped-to-the-active-card
+  (let [root (scoped-fixture)
+        state-file (fs/path root ".swarmforge" "stages" "fixture.edn")]
+    (try
+      (run-scoped-stages! root)
+      (let [next-state (assoc-in (state root) [:card :id] "next-card")]
+        (write-file state-file (pr-str next-state)))
+      (let [status (-> (run-stage root "status" "--json")
+                       :out
+                       (json/parse-string true))]
+        (is (false? (:spec_approved status)))
+        (is (= "stale" (get (into {} (map (juxt :name :status)) (:stages status))
+                             "spec"))))
       (finally
         (fs/delete-tree root)))))
 

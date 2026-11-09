@@ -1,6 +1,7 @@
 (ns swarmforge.agent-project-test
   (:require [babashka.fs :as fs]
             [forge :as forge]
+            [cheshire.core :as json]
             [clojure.edn :as edn]
             [clojure.java.shell :as sh]
             [clojure.string :as str]
@@ -1346,24 +1347,25 @@
                          "--text" (str name " card\n")))]
         (is (zero? (:exit (route "active" "task-active"))))
         (is (zero? (:exit (route "queued" "task-queued")))))
-      (doseq [name ["active" "queued"]]
-        (fs/delete-if-exists (fs/path project "tasks" (str name ".md"))))
-      (let [tree (git-out project "rev-parse" "HEAD^{tree}")
-            stages (edn/read-string
-                    (slurp (str (fs/path project "stages.edn"))))]
-        (write-file
-         (fs/path project ".swarmforge/stages/queue.edn")
-         (pr-str {:task (:task stages)
-                  :card {:name "active"
-                         :lane "spec"
-                         :created "2026-11-08T08:00:00Z"
-                         :updated "2026-11-08T08:00:00Z"
-                         :id "task-active"
-                         :audit "0"
-                         :display "active"}
-                  :proposals {}
-                  :stages (into {} (map (fn [stage] [(:name stage) {:tree tree}]))
-                                (:stages stages))})))
+      (let [proposal (run-stage project "propose" "spec" "tasks/*.md")]
+        (is (zero? (:exit proposal)) (str (:err proposal) (:out proposal))))
+      (is (zero? (:exit (git project "add" "tasks/active.md" "tasks/queued.md"))))
+      (is (zero? (:exit (git project "commit" "-q" "-m" "queue cards"))))
+      (let [status (-> (run-stage project "status" "--json")
+                       :out
+                       (json/parse-string true))
+            state-file (fs/path project ".swarmforge/stages/queue.edn")
+            current (edn/read-string (slurp (str state-file)))
+            stages (into {}
+                         (map (fn [stage]
+                                (let [name (:name stage)
+                                      previous (get-in current [:stages name])]
+                                  [name (assoc previous
+                                               :tree (:tree status)
+                                               :input_hash (:input_hash stage))])))
+                         (:stages status))]
+        (write-file state-file
+                    (pr-str (assoc current :stages stages))))
       (let [head-stage (git-out project "show" "HEAD:swarmforge/scripts/stage.bb")]
         (is (str/includes? head-stage "queue-aware managed runtime marker"))
         (is (str/includes? head-stage "complete-promote")))

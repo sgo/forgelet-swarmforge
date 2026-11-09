@@ -274,14 +274,12 @@
       (sh/sh "git" "config" "user.name" "Test" :dir (str root))
       (sh/sh "git" "add" "-A" :dir (str root))
       (sh/sh "git" "commit" "-q" "-m" "fixture" :dir (str root))
-      (let [tree (str/trim (:out (sh/sh "git" "rev-parse" "HEAD^{tree}" :dir (str root))))
-            active (first (filter #(= "active" (:name %)) (rows root)))]
-        (write-file (fs/path root ".swarmforge/stages/agent.edn")
-                    (pr-str {:task "agent"
-                             :card active
-                             :proposals {}
-                             :stages {"spec" {:tree tree}
-                                      "code" {:tree tree}}}))
+      (let [propose (sh/sh "bb" (str (fs/path scripts "stage.bb"))
+                           "propose" "spec" "tasks/*.md" "--root" (str root))
+            code (sh/sh "bb" (str (fs/path scripts "stage.bb"))
+                        "check" "code" "--root" (str root))]
+        (is (zero? (:exit propose)) (str (:err propose) (:out propose)))
+        (is (zero? (:exit code)) (str (:err code) (:out code)))
         (let [complete (sh/sh "bb" (str (fs/path scripts "stage.bb"))
                               "complete" "--root" (str root))]
           (is (zero? (:exit complete)) (str (:err complete) (:out complete)))
