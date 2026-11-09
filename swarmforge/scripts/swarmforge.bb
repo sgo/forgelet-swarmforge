@@ -296,7 +296,8 @@
    "swarm-terminal-adapter.sh" "swarmforge.sh" "swarmforge.bb"
    "pack_board.sh" "pack_board.bb"
    "pack_web.sh" "pack_web.bb"
-   "pack_dashboard_request.sh" "pack_dashboard_request.bb"])
+   "pack_dashboard_request.sh" "pack_dashboard_request.bb"
+   "completed_card_report.sh" "completed_card_report.bb"])
 
 (def terminal-helpers
   ["terminal-app.sh" "iterm2.sh" "ghostty.sh" "kitty.sh" "windows-terminal.sh" "none.sh"])

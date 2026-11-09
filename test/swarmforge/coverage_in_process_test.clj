@@ -2,6 +2,7 @@
   (:require [babashka.fs :as fs]
             [clojure.string :as str]
             [clojure.test :refer [deftest is]]
+            [completed-card-report]
             [commit-msg-hook]
             [handoff-lib]
             [handoffd]
@@ -275,6 +276,47 @@
   (is (= 3 (pack-board/parse-count "3")))
   (is (= 0 (pack-board/parse-count "x")))
   (is (re-find #"\tlane2\t" (pack-board/rewrite-lane "n\tlane1\tc\tu\tid\t0" "n" "lane2"))))
+
+(deftest completed-card-report-helpers
+  (is (= "req-report-abc" (completed-card-report/report-id! "req-report-abc")))
+  (is (= "verified" (completed-card-report/verification! :verified)))
+  (is (= "retained" (completed-card-report/verification! "RETAINED")))
+  (is (= "verified"
+         (completed-card-report/verification-result
+          [{:verification "verified"} {:verification "verified"}])))
+  (is (= "partial"
+         (completed-card-report/verification-result
+          [{:verification "verified"} {:verification "retained"}])))
+  (is (= "retained"
+         (completed-card-report/verification-result
+          [{:verification "retained"}])))
+  (is (= "[redacted-token]"
+         (completed-card-report/safe-text
+          "ghp_1234567890abcdefghijklmnopqrstuvwxyz")))
+  (let [root (tmp-dir)
+        valid (fs/path root "valid.edn")
+        malformed (fs/path root "malformed.edn")]
+    (try
+      (spit (str valid)
+            (pr-str {:version 1
+                     :report_id "req-report-valid"
+                     :reported_at "2026-01-01T00:00:00Z"
+                     :family "forgelet"
+                     :lieutenant "lieutenant"
+                     :verification_result "verified"
+                     :cards [{:project "app"
+                              :task_id "task-1"
+                              :card_name "Card"
+                              :started_at "2026-01-01T00:00:00Z"
+                              :completed_at "2026-01-01T00:10:00Z"
+                              :active_seconds 600
+                              :verification "verified"}]
+                     :retained_cards []}))
+      (spit (str malformed) "{:version 1")
+      (is (= "req-report-valid" (:report_id (completed-card-report/read-record valid))))
+      (is (nil? (completed-card-report/read-record malformed)))
+      (finally
+        (fs/delete-tree root)))))
 
 (deftest stop-daemon-with-no-pid
   (let [root (tmp-dir)]

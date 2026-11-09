@@ -132,6 +132,29 @@
                         (str task-id ".edn"))
               (pr-str {:task_id task-id :activated_at activated-at})))
 
+(defn completed-card-report
+  [forge ok? & args]
+  (apply run {:dir forge :ok? ok?}
+         (script "completed_card_report.sh")
+         args))
+
+(defn write-completed-card-report!
+  [forge report-id cards]
+  (let [file (fs/path forge "tmp" (str report-id ".edn"))]
+    (write-file file
+                (pr-str {:version 1
+                         :report_id report-id
+                         :reported_at "2026-01-03T12:00:00Z"
+                         :family "forgelet"
+                         :lieutenant "lieutenant"
+                         :cards cards}))
+    file))
+
+(defn done-count [state project]
+  (count (filter #(= "done" (:lane %))
+                 (:tasks (first (filter #(= project (:name %))
+                                        (:projects state)))))))
+
 (defn create-task
   ([root name lane] (create-task root name lane true))
   ([root name lane ok?]
@@ -3123,6 +3146,223 @@
               :mean_seconds 26250
               :min_seconds 600
               :max_seconds 100800}
+             (-> (web-state forge) :projects first :completion_stats))))))
+
+(deftest completed-card-report-preserves-completion-stats-after-cleanup
+  ;; Given a verified done card whose active duration is complete evidence
+  ;; When the report records it and removes its ignored board row
+  ;; Then cumulative completion statistics stay unchanged and progress clears
+  (let [forge (tmp-dir)]
+    (seed-mini-forge! forge)
+    (write-file (fs/path forge ".swarmforge/roles.tsv")
+                (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tgrok\ttask\n"
+                        forge))
+    (let [project (completion-project! forge "history-app")
+          task-note (fs/path project "tasks" "one-card.md")
+          board-copy (fs/path project ".swarmforge/board/one-card.txt")]
+      (write-completion-board!
+       project
+       [(completion-row "one-card" "done"
+                        "2026-01-01T00:00:00Z"
+                        "2026-01-01T00:22:00Z"
+                        "one-card")])
+      (write-file task-note "# one-card\n\nCommitted note.\n")
+      (write-file board-copy "Local board copy.\n")
+      (let [before (web-state forge)
+            stats-before (:completion_stats (first (:projects before)))
+            input (write-completed-card-report!
+                   forge
+                   "req-report-11111111111111111111111111111111"
+                   [{:project "history-app"
+                     :task_id "one-card"
+                     :verification "verified"}])
+            recorded (completed-card-report
+                      forge true "record" "--root" (str forge) (str input))]
+        (is (str/includes? (:out recorded) "RECORDED:"))
+        (let [record-file (fs/path forge "completed-card-reports"
+                                   "req-report-11111111111111111111111111111111.edn")
+              record (edn/read-string (slurp (str record-file)))
+              backlog (slurp (str (fs/path forge "backlog.md")))]
+          (is (= "verified" (:verification_result record)))
+          (is (= 1320 (-> record :cards first :active_seconds)))
+          (is (= "one-card" (-> record :cards first :card_name)))
+          (is (= [] (:retained_cards record)))
+          (is (str/includes? backlog "Completed-card report"))
+          (is (str/includes? backlog "| history-app | one-card |")))
+        (let [removed (completed-card-report
+                       forge true "remove" "--root" (str forge)
+                       "req-report-11111111111111111111111111111111")
+              after (web-state forge)]
+          (is (str/includes? (:out removed) "REMOVED:1:0"))
+          (is (= stats-before (:completion_stats (first (:projects after)))))
+          (is (= 0 (done-count after "history-app")))
+          (is (not (fs/exists? board-copy)))
+          (is (fs/regular-file? task-note)))))))
+
+(deftest completed-card-report-retains-partial-cards-and-reconstructs-stats
+  ;; Given verified, retained and not-yet-reported done cards
+  ;; When the report is recorded and cleaned
+  ;; Then only the verified row disappears, retained evidence stays explicit
+  ;; And another report can later verify the retained card without double counting
+  (let [forge (tmp-dir)]
+    (seed-mini-forge! forge)
+    (write-file (fs/path forge ".swarmforge/roles.tsv")
+                (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tgrok\ttask\n"
+                        forge))
+    (let [project (completion-project! forge "partial-app")
+          token "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+          secret-path (str (fs/path forge "private" "reason.txt"))]
+      (write-completion-board!
+       project
+       [(completion-row "verified-card" "done"
+                        "2026-01-01T00:00:00Z"
+                        "2026-01-01T00:10:00Z"
+                        "verified-card")
+        (completion-row "retained-card" "done"
+                        "2026-01-01T00:00:00Z"
+                        "2026-01-01T00:15:00Z"
+                        "retained-card")
+        (completion-row "unreported-card" "done"
+                        "2026-01-01T00:00:00Z"
+                        "2026-01-01T00:05:00Z"
+                        "unreported-card")])
+      (let [input (write-completed-card-report!
+                   forge
+                   "req-report-22222222222222222222222222222222"
+                   [{:project "partial-app"
+                     :task_id "verified-card"
+                     :verification "verified"}
+                    {:project "partial-app"
+                     :task_id "retained-card"
+                     :verification "retained"
+                     :retained_reason (str "Needs " secret-path " token " token)}])]
+        (completed-card-report forge true "record" "--root" (str forge) (str input))
+        (let [record-file (fs/path forge "completed-card-reports"
+                                   "req-report-22222222222222222222222222222222.edn")
+              record-text (slurp (str record-file))
+              record (edn/read-string record-text)]
+          (is (= "partial" (:verification_result record)))
+          (is (= ["retained-card"] (mapv :task_id (:retained_cards record))))
+          (is (str/includes? record-text "[redacted-path]"))
+          (is (str/includes? record-text "[redacted-token]"))
+          (is (not (str/includes? record-text secret-path)))
+          (is (not (str/includes? record-text token))))
+        (completed-card-report
+         forge true "remove" "--root" (str forge)
+         "req-report-22222222222222222222222222222222")
+        (let [after-first (web-state forge)
+              stats (-> after-first :projects first :completion_stats)]
+          (is (= 2 (done-count after-first "partial-app")))
+          (is (= 2 (:completed_cards stats)))
+          (is (= 450 (:mean_seconds stats))))
+        (let [input (write-completed-card-report!
+                     forge
+                     "req-report-33333333333333333333333333333333"
+                     [{:project "partial-app"
+                       :task_id "retained-card"
+                       :verification "verified"}])]
+          (completed-card-report forge true "record" "--root" (str forge) (str input))
+          (completed-card-report
+           forge true "remove" "--root" (str forge)
+           "req-report-33333333333333333333333333333333"))
+        (let [after-second (web-state forge)]
+          (is (= 1 (done-count after-second "partial-app")))
+          (is (= {:completed_cards 3
+                  :median_seconds 600
+                  :mean_seconds 600
+                  :min_seconds 300
+                  :max_seconds 900}
+                 (-> after-second :projects first :completion_stats))))))))
+
+(deftest completed-card-report-rejects-duplicates-without-changing-evidence
+  ;; Given a recorded report
+  ;; When the same report id is submitted with different verification
+  ;; Then it is rejected and both the machine record and backlog stay unchanged
+  (let [forge (tmp-dir)]
+    (seed-mini-forge! forge)
+    (write-file (fs/path forge ".swarmforge/roles.tsv")
+                (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tgrok\ttask\n"
+                        forge))
+    (let [project (completion-project! forge "duplicate-app")]
+      (write-completion-board!
+       project
+       [(completion-row "card" "done"
+                        "2026-01-01T00:00:00Z"
+                        "2026-01-01T00:10:00Z"
+                        "card")])
+      (let [id "req-report-44444444444444444444444444444444"
+            first-input (write-completed-card-report!
+                         forge id
+                         [{:project "duplicate-app"
+                           :task_id "card"
+                           :verification "verified"}])]
+        (completed-card-report forge true "record" "--root" (str forge)
+                               (str first-input))
+        (let [record-file (fs/path forge "completed-card-reports" (str id ".edn"))
+              backlog-file (fs/path forge "backlog.md")
+              record-before (slurp (str record-file))
+              backlog-before (slurp (str backlog-file))
+              retry-input (write-completed-card-report!
+                           forge id
+                           [{:project "duplicate-app"
+                             :task_id "card"
+                             :verification "retained"}])
+              duplicate (completed-card-report
+                         forge false "record" "--root" (str forge)
+                         (str retry-input))]
+          (is (= 1 (:exit duplicate)))
+          (is (str/includes? (:err duplicate) "Duplicate report id"))
+          (is (= record-before (slurp (str record-file))))
+          (is (= backlog-before (slurp (str backlog-file)))))))))
+
+(deftest completion-stats-ignore-malformed-history-and-merge-current-done
+  ;; Given a valid historical report, malformed history files and one unreported card
+  ;; When statistics are read
+  ;; Then malformed evidence is skipped and current plus historical durations merge
+  (let [forge (tmp-dir)]
+    (seed-mini-forge! forge)
+    (write-file (fs/path forge ".swarmforge/roles.tsv")
+                (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tgrok\ttask\n"
+                        forge))
+    (let [project (completion-project! forge "merge-app")]
+      (write-completion-board!
+       project
+       [(completion-row "historic" "done"
+                        "2026-01-01T00:00:00Z"
+                        "2026-01-01T00:10:00Z"
+                        "historic")
+        (completion-row "current" "done"
+                        "2026-01-01T00:00:00Z"
+                        "2026-01-01T00:05:00Z"
+                        "current")])
+      (let [input (write-completed-card-report!
+                   forge
+                   "req-report-55555555555555555555555555555555"
+                   [{:project "merge-app"
+                     :task_id "historic"
+                     :verification "verified"}])]
+        (completed-card-report forge true "record" "--root" (str forge) (str input)))
+      (write-file (fs/path forge "completed-card-reports" "broken.edn")
+                  "{:version 1")
+      (write-file (fs/path forge "completed-card-reports" "unsafe.edn")
+                  (pr-str {:version 1
+                           :report_id "unsafe"
+                           :reported_at "2026-01-01T00:00:00Z"
+                           :family "forgelet"
+                           :lieutenant "lieutenant"
+                           :verification_result "verified"
+                           :cards [{:project "merge-app"
+                                    :task_id "current"
+                                    :card_name (str (fs/path forge "secret"))
+                                    :completed_at "2026-01-01T00:05:00Z"
+                                    :active_seconds 300
+                                    :verification "verified"}]
+                           :retained_cards []}))
+      (is (= {:completed_cards 2
+              :median_seconds 450
+              :mean_seconds 450
+              :min_seconds 300
+              :max_seconds 600}
              (-> (web-state forge) :projects first :completion_stats))))))
 
 (deftest forge-pane-capture-uses-project-root

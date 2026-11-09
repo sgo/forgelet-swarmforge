@@ -202,6 +202,41 @@ Each forge `/api/state` project entry includes `completion_stats` with exactly
 desktop and phone clients consume the same values. With no valid completed
 durations, the count is zero and the four statistics are `null`.
 
+Verified completed-card reports have a tracked forge-level history:
+
+```text
+completed-card-reports/<report-id>.edn
+```
+
+Each record carries the report id and completion time, Family, reporting
+Lieutenant, every reported project/task id/card name/completion timestamp,
+the active duration snapshot, the verification result, and an explicit
+`retained_cards` list. The matching human-readable report is appended to the
+forge's `backlog.md`. The generated report text contains no host root, session
+token or other credential.
+
+Record a report and then clean only its verified rows:
+
+```sh
+completed_card_report.sh record --root <forge-root> ./tmp/report.edn
+completed_card_report.sh remove --root <forge-root> <report-id>
+```
+
+The report input names each card's `:project`, `:task_id`, and
+`:verification` (`"verified"` or `"retained"`). The command derives the card
+name, completion timestamp and active duration from the live board rather than
+trusting them from input. A retry with an existing report id is refused without
+changing the original record. `remove` only removes verified rows whose done
+snapshot still matches; retained or subsequently changed rows stay on the
+board.
+
+Completion statistics combine the verified durations from all valid historical
+records with current `done` rows that no report has covered yet. Historical
+cards are counted once and malformed history records are ignored. The
+progress-bar done count remains the number of current board `done` rows, so a
+verified batch visibly clears when its rows are removed while cumulative
+statistics remain available.
+
 Opening a project refreshes its runtime files and records that synchronization in
 one `Sync SwarmForge runtime` commit before the runtime starts. The managed
 allowlist is `swarmforge/scripts/**`, `swarmforge/roles/**`,

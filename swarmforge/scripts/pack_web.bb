@@ -10,6 +10,7 @@
 
 (def script-dir (fs/parent *file*))
 (load-file (str (fs/path script-dir "forge.bb")))
+(load-file (str (fs/path script-dir "completed_card_report.bb")))
 
 (def usage-text
   (str "Usage:\n"
@@ -940,7 +941,7 @@
         (:task (edn/read-string (slurp (str file))))
         (catch Exception _ nil)))))
 
-(defn completed-duration [root project-name line]
+(defn completed-card [root project-name line]
   (let [[name lane created updated task-id] (str/split line #"\t" -1)
         task-id (or (not-empty task-id) name)]
     (when (and (not (str/blank? name))
@@ -949,18 +950,26 @@
       (let [activation (activation-record root task-id)
             start (if (:present activation)
                     (:activated-at activation)
-                    created)]
-        (duration-seconds start updated)))))
+                    created)
+            duration (duration-seconds start updated)]
+        {:project project-name
+         :task_id task-id
+         :active_seconds duration}))))
 
-(defn completion-durations [root]
+(defn completion-cards [root]
   (let [file (fs/path root ".swarmforge" "board" "tasks.tsv")
         project-name (project-task-name root)]
     (if (fs/regular-file? file)
       (->> (str/split-lines (slurp (str file)))
            (remove str/blank?)
-           (keep #(completed-duration root project-name %))
+           (keep #(completed-card root project-name %))
            vec)
       [])))
+
+(defn completion-durations [root]
+  (->> (completion-cards root)
+       (keep :active_seconds)
+       vec))
 
 (defn rounded-mean [values]
   (Math/round (double (/ (reduce + 0 values) (count values)))))
@@ -975,10 +984,21 @@
                                (nth sorted middle))
                             2.0))))))
 
-(defn completion-stats [root]
-  (let [durations (try
-                    (completion-durations root)
-                    (catch Exception _ []))]
+(defn completion-stats
+  ([root] (completion-stats root nil))
+  ([root reports]
+   (let [project-name (project-task-name root)
+         reported-identities (completed-card-report/reported-identities reports)
+         current (->> (completion-cards root)
+                      (remove #(contains? reported-identities
+                                          [(:project %) (:task_id %)]))
+                      (keep :active_seconds))
+         historical (if (and (seq reports) project-name)
+                      (completed-card-report/verified-durations reports project-name)
+                      [])
+         durations (try
+                     (vec (concat historical current))
+                     (catch Exception _ []))]
     (if (seq durations)
       {:completed_cards (count durations)
        :median_seconds (long (median-seconds durations))
@@ -989,37 +1009,42 @@
        :median_seconds nil
        :mean_seconds nil
        :min_seconds nil
-       :max_seconds nil})))
+       :max_seconds nil}))))
 
-(defn project-slice [forge name]
-  (let [root (open-project-root forge name)
-        stats (completion-stats root)]
-    (try
-      {:name name
-       :open true
-       :single_agent (single-agent-project? root)
-       :active_card (active-single-agent-card root)
-       :idle (project-idle? root)
-       :dashboard_url (project-dashboard-url root)
-       :lanes (lanes root)
-       :tasks (tagged name (tasks root))
-       :work_in_flight (tagged name (work-in-flight root))
-       :completion_stats stats}
-      (catch Exception _
-        {:name name
-         :open true
-         :single_agent (single-agent-project? root)
-         :active_card nil
-         :idle (project-idle? root)
-         :dashboard_url (project-dashboard-url root)
-         :lanes []
-         :tasks []
-         :work_in_flight []
-         :completion_stats stats}))))
+(defn project-slice
+  ([forge name] (project-slice forge name nil))
+  ([forge name reports]
+   (let [root (open-project-root forge name)
+         stats (completion-stats root reports)]
+     (try
+       {:name name
+        :open true
+        :single_agent (single-agent-project? root)
+        :active_card (active-single-agent-card root)
+        :idle (project-idle? root)
+        :dashboard_url (project-dashboard-url root)
+        :lanes (lanes root)
+        :tasks (tagged name (tasks root))
+        :work_in_flight (tagged name (work-in-flight root))
+        :completion_stats stats}
+       (catch Exception _
+         {:name name
+          :open true
+          :single_agent (single-agent-project? root)
+          :active_card nil
+          :idle (project-idle? root)
+          :dashboard_url (project-dashboard-url root)
+          :lanes []
+          :tasks []
+          :work_in_flight []
+          :completion_stats stats})))))
 
 (defn forge-dashboard-state [root]
   (let [open (forge/read-open-projects root)
-        projects (mapv #(project-slice root %) open)]
+        reports (try
+                  (completed-card-report/history-records root)
+                  (catch Exception _ []))
+        projects (mapv #(project-slice root % reports) open)]
     {:forge true
      :master_role "lieutenant"
      :master_display "Lieutenant"
