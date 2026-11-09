@@ -814,13 +814,46 @@
 (defn dashboard-url-file [ctx]
   (fs/path (:state-dir ctx) "dashboard-url"))
 
+(defn dashboard-port-file [ctx]
+  (fs/path (:state-dir ctx) "dashboard-port"))
+
 (defn pack-web-pid-file [ctx]
   (fs/path (:state-dir ctx) "pack_web.pid"))
 
+(defn valid-dashboard-port [value]
+  (let [text (str/trim (str value))]
+    (when (re-matches #"[0-9]{1,5}" text)
+      (let [port (Long/parseLong text)]
+        (when (<= 1 port 65535)
+          (str port))))))
+
+(defn port-from-dashboard-url [url]
+  (second (re-matches #"http://127\.0\.0\.1:([0-9]{1,5})\s*" (str/trim (str url)))))
+
+(defn write-dashboard-port! [ctx port]
+  (let [file (dashboard-port-file ctx)
+        text (str (valid-dashboard-port port))]
+    (fs/create-dirs (fs/parent file))
+    (let [tmp (fs/create-temp-file {:dir (fs/parent file)
+                                    :prefix ".dashboard-port."})]
+      (spit (str tmp) (str text "\n"))
+      (fs/move tmp file {:replace-existing true :atomic-move true}))
+    text))
+
+(defn preferred-dashboard-port [ctx]
+  (let [port-file (dashboard-port-file ctx)
+        url-file (dashboard-url-file ctx)
+        stored (when (fs/regular-file? port-file)
+                 (valid-dashboard-port (slurp (str port-file))))
+        migrated (when (and (not stored) (fs/regular-file? url-file))
+                   (valid-dashboard-port
+                    (port-from-dashboard-url (slurp (str url-file)))))]
+    (when migrated
+      (write-dashboard-port! ctx migrated))
+    (or stored migrated)))
+
 (defn previous-dashboard-port [ctx]
-  (let [file (dashboard-url-file ctx)]
-    (when (fs/regular-file? file)
-      (second (re-matches #".*:(\d+)\s*$" (str/trim (slurp (str file))))))))
+  (preferred-dashboard-port ctx))
 
 (defn process-alive? [pid]
   (zero? (:exit (process/sh {:continue true} "kill" "-0" pid))))
@@ -864,8 +897,13 @@
 
 (defn test-dashboard-address! [root port]
   (let [ctx {:state-dir (fs/path root ".swarmforge")}]
-    (println (str "previous=" (or (previous-dashboard-port ctx) "none")
+    (println (str "previous=" (or (preferred-dashboard-port ctx) "none")
                   " available=" (port-available? port)))))
+
+(defn test-dashboard-port-usable! [port]
+  (println (str "available=" (port-available? port)
+                " usable=" (preferred-port-usable? port)
+                " listening=" (port-listening? port))))
 
 (def dashboard-session "swarmforge-dashboard")
 
@@ -943,9 +981,11 @@
         pid-file (pack-web-pid-file ctx)
         url (when (fs/regular-file? url-file)
               (not-empty (str/trim (slurp (str url-file)))))
+        port (preferred-dashboard-port ctx)
         pid (when (fs/regular-file? pid-file)
               (not-empty (str/trim (slurp (str pid-file)))))]
     {:url url
+     :port port
      :pid pid
      :supervised (dashboard-running? ctx)
      :process (boolean (and pid (dashboard-process? ctx pid)))
@@ -953,11 +993,12 @@
      :log (str (fs/path (:state-dir ctx) "dashboard.log"))}))
 
 (defn print-dashboard-status! [ctx]
-  (let [{:keys [url pid supervised process socket log]} (dashboard-status ctx)]
+  (let [{:keys [url port pid supervised process socket log]} (dashboard-status ctx)]
     (println (str "supervisor=" (if supervised "running" "stopped")))
     (println (str "process=" (if process "running" "stopped")))
     (println (str "pid=" (or pid "none")))
     (println (str "url=" (or url "none")))
+    (println (str "port=" (or port "none")))
     (println (str "socket=" socket))
     (println (str "log=" log))))
 
@@ -982,7 +1023,7 @@
   ;; served on last time whenever that port is free. A fresh port on every start
   ;; is a bookmark that dies on every restart. If the port is taken, by another
   ;; forge or another program, the dashboard falls back to a random one.
-  (let [previous (previous-dashboard-port ctx)]
+  (let [previous (preferred-dashboard-port ctx)]
     (stop-existing-pack-web! ctx)
     (fs/create-dirs (:state-dir ctx))
     (let [script (str (fs/path (:script-dir ctx) "pack_web.sh"))
@@ -1007,7 +1048,11 @@
         (fail-dashboard! ctx "Dashboard did not announce an address."))
       (when-not (dashboard-running? ctx)
         (fail-dashboard! ctx "Dashboard exited during startup."))
-      (let [url (str/trim (slurp (str (dashboard-url-file ctx))))]
+      (let [url (str/trim (slurp (str (dashboard-url-file ctx))))
+            serving-port (valid-dashboard-port
+                          (port-from-dashboard-url url))]
+        (when serving-port
+          (write-dashboard-port! ctx serving-port))
         (println (str green "Dashboard: " url reset))
         (maybe-open-browser! url)
         url))))
@@ -1530,6 +1575,7 @@
     "--dashboard-status" (test-dashboard-status! (second args))
     "--test-tmux-base-indexes" (test-tmux-base-indexes! (second args))
     "--test-dashboard-address" (test-dashboard-address! (second args) (nth args 2))
+    "--test-dashboard-port-usable" (test-dashboard-port-usable! (second args))
     "--test-create-role-session" (test-create-role-session! (second args) (nth args 2) (nth args 3 nil))
     "--test-enclosing-forge" (println (str (or (enclosing-forge-root (second args)) "none")))
     "--test-mark-project" (do

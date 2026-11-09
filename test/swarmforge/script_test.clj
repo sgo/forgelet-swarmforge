@@ -59,6 +59,9 @@
     (catch Exception _
       false)))
 
+(defn dashboard-url-port [url]
+  (Long/parseLong (second (re-matches #".*:(\d+)\s*$" (str/trim url)))))
+
 (defn kill-tmux-server! [socket]
   (run {:dir repo-root :ok? false} "tmux" "-S" socket "kill-server"))
 
@@ -620,12 +623,13 @@
         (fs/delete-tree root)))))
 
 (deftest start-pack-web-drops-stale-dashboard-url
-  ;; Given a leftover dashboard-url and pack_web.pid from a prior run
+  ;; Given a leftover dashboard-url, pack_web.pid and remembered port from a prior run
   ;; When SwarmForge prepares to start the dashboard
-  ;; Then those stale files are removed so the new port is recorded
+  ;; Then liveness files are removed while the stable port preference remains
   (let [root (tmp-dir)]
     (try
       (write-file (fs/path root ".swarmforge/dashboard-url") "http://127.0.0.1:64002\n")
+      (write-file (fs/path root ".swarmforge/dashboard-port") "64002\n")
       (write-file (fs/path root ".swarmforge/pack_web.pid") "99999999\n")
       (let [out (str/trim (:out (run {:dir root}
                                      (script "swarmforge.bb")
@@ -633,7 +637,8 @@
                                      (str root))))]
         (is (= "false false" out))
         (is (not (fs/exists? (fs/path root ".swarmforge/dashboard-url"))))
-        (is (not (fs/exists? (fs/path root ".swarmforge/pack_web.pid")))))
+        (is (not (fs/exists? (fs/path root ".swarmforge/pack_web.pid"))))
+        (is (= "64002\n" (slurp (str (fs/path root ".swarmforge/dashboard-port"))))))
       (finally
         (fs/delete-tree root)))))
 
@@ -646,17 +651,20 @@
         state (fs/path root ".swarmforge")
         socket (str (fs/path state "dashboard-tmux.sock"))
         url-file (fs/path state "dashboard-url")
+        port-file (fs/path state "dashboard-port")
         pid-file (fs/path state "pack_web.pid")]
     (try
       (let [started (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
                          (script "swarmforge.bb")
                          "--test-start-pack-web" (str root))
             url (str/trim (slurp (str url-file)))
+            port (second (re-matches #".*:(\d+)$" url))
             pid (str/trim (slurp (str pid-file)))
             status (run {:dir root} (script "swarmforge.bb")
                         "--dashboard-status" (str root))]
         (is (str/includes? (:out started) "Dashboard: "))
         (is (= ["swarmforge-dashboard"] (tmux-session-names socket)))
+        (is (= (str port "\n") (slurp (str port-file))))
         (is (zero? (:exit (run {:dir root :ok? false} "kill" "-0" pid))))
         (is (dashboard-http-reachable? url))
         (is (str/includes? (:out status) "supervisor=running"))
@@ -669,7 +677,8 @@
         (is (str/includes? (:out stopped) "process=stopped"))
         (is (= ["dashboard-probe"] (tmux-session-names socket)))
         (is (not (fs/exists? url-file)))
-        (is (not (fs/exists? pid-file))))
+        (is (not (fs/exists? pid-file)))
+        (is (re-matches #"\d+" (str/trim (slurp (str port-file))))))
       (finally
         (run {:dir root :ok? false} (script "swarmforge.bb")
              "--test-stop-pack-web" (str root))
@@ -683,7 +692,8 @@
   (let [root (tmp-dir)
         state (fs/path root ".swarmforge")
         socket (str (fs/path state "dashboard-tmux.sock"))
-        url-file (fs/path state "dashboard-url")]
+        url-file (fs/path state "dashboard-url")
+        port-file (fs/path state "dashboard-port")]
     (try
       (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
            (script "swarmforge.bb") "--test-start-pack-web" (str root))
@@ -691,6 +701,8 @@
         (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
              (script "swarmforge.bb") "--test-start-pack-web" (str root))
         (is (= first-url (str/trim (slurp (str url-file)))))
+        (is (= (second (re-matches #".*:(\d+)$" first-url))
+               (str/trim (slurp (str port-file)))))
         (is (= ["swarmforge-dashboard"] (tmux-session-names socket)))
         (is (dashboard-http-reachable? first-url))
 
@@ -700,12 +712,129 @@
         (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
              (script "swarmforge.bb") "--test-start-pack-web" (str root))
         (is (= first-url (str/trim (slurp (str url-file)))))
+        (is (= (second (re-matches #".*:(\d+)$" first-url))
+               (str/trim (slurp (str port-file)))))
         (is (= ["swarmforge-dashboard"] (tmux-session-names socket)))
         (is (dashboard-http-reachable? first-url)))
       (finally
         (run {:dir root :ok? false} (script "swarmforge.bb")
              "--test-stop-pack-web" (str root))
         (kill-tmux-server! socket)
+        (fs/delete-tree root)))))
+
+(deftest standalone-stop-and-start-reuse-the-dashboard-port
+  ;; Given a running dashboard stopped and started as separate commands
+  ;; Then the live URL disappears while the preferred port survives and returns
+  (let [root (tmp-dir)
+        state (fs/path root ".swarmforge")
+        socket (str (fs/path state "dashboard-tmux.sock"))
+        url-file (fs/path state "dashboard-url")
+        pid-file (fs/path state "pack_web.pid")
+        port-file (fs/path state "dashboard-port")]
+    (try
+      (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+           (script "swarmforge.bb") "--test-start-pack-web" (str root))
+      (let [first-url (str/trim (slurp (str url-file)))
+            first-port (dashboard-url-port first-url)]
+        (run {:dir root} (script "swarmforge.bb")
+             "--test-stop-pack-web" (str root))
+        (is (not (fs/exists? url-file)))
+        (is (not (fs/exists? pid-file)))
+        (is (= (str first-port "\n") (slurp (str port-file))))
+        (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+             (script "swarmforge.bb") "--test-start-pack-web" (str root))
+        (is (= first-url (str/trim (slurp (str url-file)))))
+        (is (= (str first-port "\n") (slurp (str port-file)))))
+      (finally
+        (run {:dir root :ok? false} (script "swarmforge.bb")
+             "--test-stop-pack-web" (str root))
+        (kill-tmux-server! socket)
+        (fs/delete-tree root)))))
+
+(deftest an-abrupt-dashboard-exit-reuses-the-preferred-port
+  ;; Given a dashboard process that died abruptly while its supervisor and URL remain
+  ;; When startup replaces it
+  ;; Then the remembered port is reused
+  (let [root (tmp-dir)
+        state (fs/path root ".swarmforge")
+        socket (str (fs/path state "dashboard-tmux.sock"))
+        url-file (fs/path state "dashboard-url")
+        pid-file (fs/path state "pack_web.pid")]
+    (try
+      (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+           (script "swarmforge.bb") "--test-start-pack-web" (str root))
+      (let [first-url (str/trim (slurp (str url-file)))
+            pid (str/trim (slurp (str pid-file)))]
+        (run {:dir root :ok? false} "kill" "-KILL" pid)
+        (Thread/sleep 200)
+        (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+             (script "swarmforge.bb") "--test-start-pack-web" (str root))
+        (is (= first-url (str/trim (slurp (str url-file)))))
+        (is (dashboard-http-reachable? first-url)))
+      (finally
+        (run {:dir root :ok? false} (script "swarmforge.bb")
+             "--test-stop-pack-web" (str root))
+        (kill-tmux-server! socket)
+        (fs/delete-tree root)))))
+
+(deftest an-occupied-preferred-port-chooses-and-records-a-new-one
+  ;; Given a preferred port held by another process
+  ;; When the dashboard starts
+  ;; Then it binds elsewhere and updates dashboard-port to the serving port
+  (let [root (tmp-dir)
+        state (fs/path root ".swarmforge")
+        socket (str (fs/path state "dashboard-tmux.sock"))
+        url-file (fs/path state "dashboard-url")
+        port-file (fs/path state "dashboard-port")
+        held (java.net.ServerSocket.)]
+    (try
+      (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+           (script "swarmforge.bb") "--test-start-pack-web" (str root))
+      (let [first-url (str/trim (slurp (str url-file)))
+            first-port (dashboard-url-port first-url)]
+        (run {:dir root} (script "swarmforge.bb")
+             "--test-stop-pack-web" (str root))
+        (.bind held (java.net.InetSocketAddress. "127.0.0.1" first-port))
+        (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+             (script "swarmforge.bb") "--test-start-pack-web" (str root))
+        (let [next-url (str/trim (slurp (str url-file)))
+              next-port (dashboard-url-port next-url)]
+          (is (not= first-port next-port))
+          (is (= (str next-port "\n") (slurp (str port-file))))
+          (is (dashboard-http-reachable? next-url))))
+      (finally
+        (.close held)
+        (run {:dir root :ok? false} (script "swarmforge.bb")
+             "--test-stop-pack-web" (str root))
+        (kill-tmux-server! socket)
+        (fs/delete-tree root)))))
+
+(deftest a-failed-supervisor-leaves-the-preferred-port-unchanged
+  ;; Given a saved port and an unusable dashboard supervisor socket
+  ;; When startup fails before a bind
+  ;; Then the preference remains available for the next start
+  (let [root (tmp-dir)
+        state (fs/path root ".swarmforge")
+        port-file (fs/path state "dashboard-port")
+        socket-file (fs/path state "dashboard-tmux.sock")
+        held (java.net.ServerSocket.)]
+    (try
+      (fs/create-dirs state)
+      (.bind held (java.net.InetSocketAddress. "127.0.0.1" 0))
+      (let [preferred (.getLocalPort held)]
+        (.close held)
+        (write-file port-file (str preferred "\n"))
+        (write-file socket-file "not a tmux socket\n")
+        (let [failed (run {:dir root :ok? false
+                           :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+                          (script "swarmforge.bb")
+                          "--test-start-pack-web" (str root))]
+          (is (not (zero? (:exit failed))))
+          (is (= (str preferred "\n") (slurp (str port-file))))
+          (is (not (fs/exists? (fs/path state "dashboard-url"))))
+          (is (not (fs/exists? (fs/path state "pack_web.pid"))))))
+      (finally
+        (.close held)
         (fs/delete-tree root)))))
 
 (deftest a-supervised-start-replaces-a-detached-dashboard
@@ -1613,6 +1742,75 @@
             (is (str/includes? (:out none) "previous=none")))
           (finally (.close held))))
       (finally (fs/delete-tree root)))))
+
+(deftest dashboard-port-migrates-and-rejects-malformed-state
+  ;; Given URL-only legacy state, both files, and malformed or unsafe values
+  ;; When the launcher reads its preferred port
+  ;; Then it migrates safely, trusts valid dashboard-port state, and ignores bad values
+  (let [root (tmp-dir)
+        state (fs/path root ".swarmforge")
+        url-file (fs/path state "dashboard-url")
+        port-file (fs/path state "dashboard-port")
+        probe (java.net.ServerSocket.)]
+    (try
+      (.bind probe (java.net.InetSocketAddress. "127.0.0.1" 0))
+      (let [free-port (.getLocalPort probe)
+            address! (fn []
+                       (:out (run {:dir root}
+                                  (script "swarmforge.bb")
+                                  "--test-dashboard-address"
+                                  (str root) (str free-port))))]
+        (.close probe)
+        (write-file url-file "http://127.0.0.1:49999\n")
+        (is (str/includes? (address!) "previous=49999"))
+        (is (= "49999\n" (slurp (str port-file))))
+
+        (write-file url-file "http://127.0.0.1:49999\n")
+        (write-file port-file "50011\n")
+        (is (str/includes? (address!) "previous=50011"))
+
+        (write-file port-file "$(touch /tmp/not-a-port)\n")
+        (is (str/includes? (address!) "previous=49999"))
+        (is (= "49999\n" (slurp (str port-file))))
+
+        (write-file url-file "http://127.0.0.1:70000\n")
+        (write-file port-file "../../unsafe\n")
+        (is (str/includes? (address!) "previous=none"))
+        (is (= "../../unsafe\n" (slurp (str port-file))))
+
+        (write-file url-file "http://127.0.0.1:50012\n")
+        (write-file port-file "not-a-port\n")
+        (is (str/includes? (address!) "previous=50012"))
+        (is (= "50012\n" (slurp (str port-file)))))
+      (finally
+        (.close probe)
+        (fs/delete-tree root)))))
+
+(deftest dashboard-prefers-a-time-wait-port-over-a-listener
+  ;; Given a recently closed listener whose connection remains in TIME_WAIT
+  ;; Then the strict bind and listener checks keep the port reusable
+  (let [server (java.net.ServerSocket.)
+        accepted (atom nil)
+        client (java.net.Socket.)]
+    (try
+      (.bind server (java.net.InetSocketAddress. "127.0.0.1" 0))
+      (let [port (.getLocalPort server)]
+        (.connect client (java.net.InetSocketAddress. "127.0.0.1" port))
+        (reset! accepted (.accept server))
+        (.close client)
+        (Thread/sleep 50)
+        (.close ^java.net.Socket @accepted)
+        (.close server)
+        (let [result (run {:dir repo-root}
+                          (script "swarmforge.bb")
+                          "--test-dashboard-port-usable" (str port))
+              out (:out result)]
+          (is (str/includes? out "usable=true"))
+          (is (str/includes? out "listening=false"))))
+      (finally
+        (when-let [socket @accepted] (.close ^java.net.Socket socket))
+        (.close client)
+        (.close server)))))
 
 (deftest pack-web-production-main-does-not-run-test-flags
   (let [result (run {:dir repo-root :ok? false}

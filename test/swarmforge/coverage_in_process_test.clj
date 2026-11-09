@@ -297,6 +297,24 @@
   (is (not (swarmforge/special-worktree? "coder")))
   (is (some? (swarmforge/sleep-inhibitor-prefix))))
 
+(deftest swarmforge-dashboard-port-helpers
+  (is (= "50684" (swarmforge/valid-dashboard-port " 50684 ")))
+  (is (nil? (swarmforge/valid-dashboard-port "0")))
+  (is (nil? (swarmforge/valid-dashboard-port "70000")))
+  (is (nil? (swarmforge/valid-dashboard-port "../../unsafe")))
+  (is (= "63811"
+         (swarmforge/port-from-dashboard-url "http://127.0.0.1:63811\n")))
+  (let [root (tmp-dir)
+        state (fs/path root ".swarmforge")]
+    (try
+      (fs/create-dirs state)
+      (spit (str (fs/path state "dashboard-url")) "http://127.0.0.1:49999\n")
+      (is (= "49999"
+             (swarmforge/preferred-dashboard-port {:state-dir state})))
+      (is (= "49999\n" (slurp (str (fs/path state "dashboard-port")))))
+      (finally
+        (fs/delete-tree root)))))
+
 (deftest pack-board-helpers
   (is (= "hello" (pack-board/slug "Hello!")))
   (is (= 3 (pack-board/parse-count "3")))

@@ -100,9 +100,13 @@ and keeps the previous address when it can still be bound. Check it with:
 swarmforge/scripts/swarmforge.sh --dashboard-status <forge-root>
 ```
 
-That prints the supervisor, dashboard process, PID, URL, socket and log. The
-`dashboard-url` and `pack_web.pid` files remain the bridge-facing and diagnostic
-state; stop removes both only after the supervised process has exited.
+That prints the supervisor, dashboard process, PID, URL, preferred port, socket
+and log. `dashboard-url` and `pack_web.pid` remain the live bridge-facing and
+diagnostic state; stop removes both only after the supervised process has
+exited. The separate `dashboard-port` file is the durable bind preference. A
+successful start records the serving port there, a later start tries it before
+stopping anything, and an occupied or unusable preference falls back to a new
+available port. For old state, the preference is seeded from `dashboard-url`.
 
 Set `SWARMFORGE_REPO_URL` to `https://github.com/unclebob/swarm-forge` and
 `SWARMFORGE_BASE_REF` to `main` to compose Uncle Bob's products instead, or point
