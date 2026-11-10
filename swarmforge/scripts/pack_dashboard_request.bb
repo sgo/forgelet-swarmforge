@@ -103,10 +103,38 @@
                         [k v]))]
     (assoc headers "body" (or (get headers "body") body ""))))
 
-(defn render-request [{:strs [id status body response created_at updated_at role]}]
+(def chat-thread-id-re #"[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}")
+(def chat-proposal-id-re #"proposal-[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}")
+(def chat-source-re #"[A-Za-z0-9][A-Za-z0-9._~:-]{0,127}")
+(def chat-token-re
+  #"\b(?:gh[pousr]_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|sk-[A-Za-z0-9_-]{10,}|xox[baprs]-[A-Za-z0-9-]{10,}|Bearer\s+[A-Za-z0-9._~+/=-]{10,})\b")
+
+(defn safe-thread-id [value]
+  (let [value (some-> value str/trim not-empty)]
+    (when (and value (re-matches chat-thread-id-re value))
+      value)))
+
+(defn safe-proposal-id [value]
+  (let [value (some-> value str/trim not-empty)]
+    (when (and value (re-matches chat-proposal-id-re value))
+      value)))
+
+(defn safe-source [value]
+  (let [value (some-> value str/trim not-empty)]
+    (when (and value
+               (re-matches chat-source-re value)
+               (not (re-find chat-token-re value)))
+      value)))
+
+(defn render-request
+  [{:strs [id status body response created_at updated_at role
+           thread_id source proposal_id]}]
   (str "id: " id "\n"
        "status: " status "\n"
        (when-not (str/blank? role) (str "role: " role "\n"))
+       (when-not (str/blank? thread_id) (str "thread_id: " thread_id "\n"))
+       (when-not (str/blank? source) (str "source: " source "\n"))
+       (when-not (str/blank? proposal_id) (str "proposal_id: " proposal_id "\n"))
        "created_at: " created_at "\n"
        (when updated_at (str "updated_at: " updated_at "\n"))
        (when-not (str/blank? response)
@@ -125,13 +153,21 @@
 
 (defn request-entry [path]
   (let [m (parse-kv (slurp (str path)))]
-    {:id (get m "id")
-     :status (get m "status")
-     :role (get m "role")
-     :body (or (get m "body") "")
-     :response (or (not-empty (str/replace (get m "response" "") #"\\n" "\n")) "")
-     :created_at (get m "created_at")
-     :updated_at (get m "updated_at")}))
+    (cond-> {:id (get m "id")
+             :status (get m "status")
+             :role (get m "role")
+             :body (or (get m "body") "")
+             :response (or (not-empty (str/replace (get m "response" "") #"\\n" "\n")) "")
+             :created_at (get m "created_at")
+             :updated_at (get m "updated_at")}
+      (safe-thread-id (get m "thread_id"))
+      (assoc :thread_id (safe-thread-id (get m "thread_id")))
+
+      (safe-source (get m "source"))
+      (assoc :source (safe-source (get m "source")))
+
+      (safe-proposal-id (get m "proposal_id"))
+      (assoc :proposal_id (safe-proposal-id (get m "proposal_id"))))))
 
 (defn clar-pending-dir [root]
   (fs/path root ".swarmforge" "dashboard" "clarifications" "pending"))
@@ -186,6 +222,11 @@
     (when (fs/regular-file? file)
       file)))
 
+(defn find-done-request [root id]
+  (let [file (request-file (done-dir root) id)]
+    (when (fs/regular-file? file)
+      file)))
+
 (defn find-done-clarification [root id]
   (let [file (clar-file (clar-done-dir root) id)]
     (when (fs/regular-file? file)
@@ -197,13 +238,21 @@
         dest (request-file (done-dir root) id)
         entry (request-entry src)]
     (fs/create-dirs (fs/parent dest))
-    (spit (str dest) (render-request {"id" (:id entry)
-                                      "status" "done"
-                                      "body" (:body entry)
-                                      "response" text
-                                      "created_at" (:created_at entry)
-                                      "updated_at" now}))
-    (fs/delete-if-exists src)
+    (let [tmp (fs/create-temp-file {:dir (fs/parent dest)
+                                    :prefix ".answered-request."})
+          headers {"id" (:id entry)
+                   "status" "done"
+                   "role" (:role entry)
+                   "body" (:body entry)
+                   "response" text
+                   "created_at" (:created_at entry)
+                   "updated_at" now
+                   "thread_id" (:thread_id entry)
+                   "source" (:source entry)
+                   "proposal_id" (:proposal_id entry)}]
+      (spit (str tmp) (render-request headers))
+      (fs/move tmp dest {:replace-existing true :atomic-move true})
+      (fs/delete-if-exists src))
     (println "ANSWERED:" id)))
 
 (defn answer-request! [root id answer-file]
@@ -213,9 +262,15 @@
     (exit! 1 (str "Answer file not found: " answer-file)))
   (if-let [src (find-pending root id)]
     (complete-pending-request! root id src answer-file)
-    (if (find-done-clarification root id)
-      (println "ANSWERED:" id)
-      (exit! 1 (str "Unknown pending request: " id)))))
+    (if-let [done (find-done-request root id)]
+      (let [entry (request-entry done)
+            text (str/trim (slurp (str answer-file)))]
+        (if (= text (:response entry))
+          (println "ANSWERED:" id)
+          (exit! 1 (str "Request already answered with a different response: " id))))
+      (if (find-done-clarification root id)
+        (println "ANSWERED:" id)
+        (exit! 1 (str "Unknown pending request: " id))))))
 
 (defn -main [& args]
   (case (first args)

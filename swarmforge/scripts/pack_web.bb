@@ -797,6 +797,7 @@
     []))
 
 (def chat-thread-id-re #"[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}")
+(def chat-proposal-id-re #"proposal-[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}")
 (def chat-request-id-re #"[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}")
 (def chat-source-re #"[A-Za-z0-9][A-Za-z0-9._~:-]{0,127}")
 (def chat-token-re
@@ -814,6 +815,11 @@
                (not (re-find chat-token-re value)))
       value)))
 
+(defn chat-proposal-id [headers]
+  (let [value (some-> (get headers "proposal_id") str/trim not-empty)]
+    (when (and value (re-matches chat-proposal-id-re value))
+      value)))
+
 (defn parse-chat [path]
   (let [raw (slurp (str path))
         [header body] (str/split raw #"\n\n" 2)
@@ -822,7 +828,7 @@
                             :let [[k v] (str/split line #": " 2)]
                             :when (and k v)]
                         [k v]))
-        proposal-id (not-empty (get headers "proposal_id"))
+        proposal-id (chat-proposal-id headers)
         thread-id (chat-thread-id headers)
         source (chat-source headers)]
     (cond-> {:id (get headers "id")
@@ -948,7 +954,7 @@
 (defn write-chat-request!
   ([root text]
    (write-chat-request! root text {}))
-  ([root text {:keys [request_id thread_id source]}]
+  ([root text {:keys [request_id thread_id source proposal_id]}]
    (let [id (or request_id (fresh-chat-id root))
          text (str/trimr (or text ""))
          file (fs/path (chat-pending-dir root) (str id ".request"))]
@@ -962,6 +968,7 @@
                                           (java.time.Instant/now)) "\n"
                   (when thread_id (str "thread_id: " thread_id "\n"))
                   (when source (str "source: " source "\n"))
+                  (when proposal_id (str "proposal_id: " proposal_id "\n"))
                   "\n"
                   text "\n"))
        (fs/move tmp file {:replace-existing true :atomic-move true}))
@@ -1382,11 +1389,12 @@
     (catch Exception _
       (chat-request-invalid! "Chat request body is invalid."))))
 
-(defn same-chat-content? [entry text thread-id source]
+(defn same-chat-content? [entry text thread-id source proposal-id]
   (and (= (str/trimr (or (:body entry) ""))
           (str/trimr (or text "")))
        (= thread-id (:thread_id entry))
-       (= source (:source entry))))
+       (= source (:source entry))
+       (= proposal-id (:proposal_id entry))))
 
 (declare json-ok-data)
 
@@ -1394,7 +1402,7 @@
   (let [request (parse-chat-request-body body)
         text (or (:text request) "")
         metadata? (some #(contains? request %)
-                        [:request_id :thread_id :source])
+                        [:request_id :thread_id :source :proposal_id])
         request-id (when (contains? request :request_id)
                      (supplied-chat-id (:request_id request)
                                        "Request id"
@@ -1406,7 +1414,11 @@
         source (when (contains? request :source)
                  (supplied-chat-id (:source request)
                                    "Request source"
-                                   chat-source-re))]
+                                   chat-source-re))
+        proposal-id (when (contains? request :proposal_id)
+                      (supplied-chat-id (:proposal_id request)
+                                        "Proposal id"
+                                        chat-proposal-id-re))]
     (when (and metadata? (str/blank? text))
       (chat-request-invalid! "Chat text is required when request metadata is supplied."))
     (if (str/blank? text)
@@ -1418,13 +1430,15 @@
                 (let [id (or request-id (fresh-chat-id root))
                       existing (existing-chat-request root id)]
                   (if existing
-                    (if (same-chat-content? (:entry existing) text thread-id source)
+                    (if (same-chat-content? (:entry existing) text thread-id source
+                                            proposal-id)
                       {:id id}
                       (throw (ex-info "Request id was reused with different content."
                                       {:http-status 409})))
                     (let [options {:request_id id
                                    :thread_id thread-id
-                                   :source source}
+                                   :source source
+                                   :proposal_id proposal-id}
                           id (write-chat-request! root text options)]
                       (try
                         (when-not (single-agent-project? root)

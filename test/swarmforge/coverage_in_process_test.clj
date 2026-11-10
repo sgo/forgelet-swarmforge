@@ -267,12 +267,14 @@
         :source "app.completed-card-report"}
        "request"
        "thread-a"
-       "app.completed-card-report"))
+       "app.completed-card-report"
+       nil))
   (is (not (pack-web/same-chat-content?
             {:body "request"
              :thread_id "thread-a"}
             "different"
             "thread-a"
+            nil
             nil)))
   (is (try
         (pack-web/supplied-chat-id "../escape" "Request id"

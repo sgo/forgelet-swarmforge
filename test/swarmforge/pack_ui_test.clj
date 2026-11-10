@@ -1754,6 +1754,136 @@
         (is (str/includes? stored "response: the spec is ready\\nwith two documents\n"))
         (is (= "done" (:status row)))))))
 
+(deftest answering-a-chat-request-preserves-safe-conversation-metadata
+  ;; Given a public chat request carrying request, thread, source and proposal metadata
+  ;; When it is answered and re-answered idempotently
+  ;; Then the done record and state projection retain every safe field and escaped body
+  (let [root (tmp-dir)
+        argv-file (str (fs/path root "tmux.argv"))
+        sock (str (fs/path root "tmux.sock"))
+        id "req-conversation-metadata"
+        thread-id "conversation-0c9bf287692a6a6a82c3b3d251bbbd5c"
+        source "app.lieutenant-chat"
+        proposal-id "proposal-20261110T100110Z"
+        body "First body line\nSecond body line"
+        answer-text "First answer line\nSecond answer line"
+        answer (fs/path root "tmp" "answer.txt")
+        done-file (fs/path root ".swarmforge/dashboard/requests/done"
+                            (str id ".request"))]
+    (setup-pack! root)
+    (write-file (fs/path root ".swarmforge/tmux-socket") (str sock "\n"))
+    (write-file answer answer-text)
+    (pack-web-env root {"SWARMFORGE_TMUX_STUB" argv-file}
+                  "--test-post-chat-json" (str root)
+                  (json/generate-string
+                   {:text body
+                    :request_id id
+                    :thread_id thread-id
+                    :source source
+                    :proposal_id proposal-id}))
+    (let [first-answer (run {:dir root} (script "pack_dashboard_request.sh")
+                            "answer" id (str answer))
+          stored (slurp (str done-file))
+          row (get (into {} (map (juxt :id identity) (:chat (web-state root)))) id)
+          stored-after-first stored
+          second-answer (run {:dir root} (script "pack_dashboard_request.sh")
+                             "answer" id (str answer))]
+      (is (zero? (:exit first-answer)))
+      (is (str/includes? stored (str "thread_id: " thread-id "\n")))
+      (is (str/includes? stored (str "source: " source "\n")))
+      (is (str/includes? stored (str "proposal_id: " proposal-id "\n")))
+      (is (str/includes? stored
+                         "response: First answer line\\nSecond answer line\n"))
+      (is (= thread-id (:thread_id row)))
+      (is (= source (:source row)))
+      (is (= proposal-id (:proposal_id row)))
+      (is (= body (str/trim (:body row))))
+      (is (= answer-text (:response row)))
+      (is (zero? (:exit second-answer)))
+      (is (= stored-after-first (slurp (str done-file))))
+      (let [different (fs/path root "tmp" "different-answer.txt")
+            _ (write-file different "A different answer")
+            refused (run {:dir root :ok? false}
+                         (script "pack_dashboard_request.sh")
+                         "answer" id (str different))]
+        (is (not (zero? (:exit refused))))
+        (is (str/includes? (str (:err refused) (:out refused))
+                           "already answered with a different response"))
+        (is (= stored-after-first (slurp (str done-file))))))))
+
+(deftest answering-drops-malformed-or-unsafe-chat-metadata
+  ;; Given legacy pending chat metadata that the dashboard reader would omit
+  ;; When it is answered
+  ;; Then neither the done record nor state exposes the unsafe values
+  (let [root (tmp-dir)
+        pending (fs/path root ".swarmforge/dashboard/requests/pending")
+        answer (fs/path root "tmp" "answer.txt")
+        unsafe-source (str (fs/path root "private" "source"))
+        token "ghp_1234567890abcdefghijklmnopqrstuvwxyz"]
+    (setup-pack! root)
+    (write-file
+     (fs/path pending "req-unsafe-metadata.request")
+     (str "id: req-unsafe-metadata\n"
+          "status: pending\n"
+          "thread_id: ../not-a-thread\n"
+          "source: " unsafe-source "\n"
+          "proposal_id: " token "\n"
+          "created_at: 2026-11-10T10:00:00Z\n\n"
+          "Unsafe metadata body\n"))
+    (write-file answer "Safe answer\n")
+    (let [answered (run {:dir root} (script "pack_dashboard_request.sh")
+                        "answer" "req-unsafe-metadata" (str answer))
+          stored (slurp (str (fs/path root ".swarmforge/dashboard/requests/done"
+                                      "req-unsafe-metadata.request")))
+          row (get (into {} (map (juxt :id identity) (:chat (web-state root))))
+                   "req-unsafe-metadata")]
+      (is (zero? (:exit answered)))
+      (is (not (str/includes? stored "thread_id:")))
+      (is (not (str/includes? stored "source:")))
+      (is (not (str/includes? stored "proposal_id:")))
+      (is (not (str/includes? stored unsafe-source)))
+      (is (not (str/includes? stored token)))
+      (is (not (contains? row :thread_id)))
+      (is (not (contains? row :source)))
+      (is (not (contains? row :proposal_id)))
+      (is (= "Unsafe metadata body" (str/trim (:body row))))
+      (is (= "Safe answer" (:response row))))))
+
+(deftest answered-report-and-proposal-requests-keep-their-projection
+  ;; Given a completed-card report thread and a proposal discussion
+  ;; When both are answered
+  ;; Then state still projects the report thread and proposal linkage
+  (let [root (tmp-dir)
+        argv-file (str (fs/path root "tmux.argv"))
+        sock (str (fs/path root "tmux.sock"))
+        answer (fs/path root "tmp" "answer.txt")]
+    (setup-pack! root)
+    (write-file (fs/path root ".swarmforge/tmux-socket") (str sock "\n"))
+    (write-file answer "Verified\n")
+    (doseq [{:keys [request_id] :as request}
+            [{:request_id "req-report-projection"
+              :thread_id "thread-fb9f3f9a9affc19f5c192e2d17352894"
+              :source "app.completed-card-report"
+              :text "Verify the completed cards."}
+             {:request_id "req-proposal-projection"
+              :source "app.lieutenant-chat"
+              :proposal_id "proposal-20261110T100110Z"
+              :text "Continue the proposal discussion."}]]
+      (pack-web-env root {"SWARMFORGE_TMUX_STUB" (str argv-file)}
+                    "--test-post-chat-json" (str root)
+                    (json/generate-string request))
+      (run {:dir root} (script "pack_dashboard_request.sh")
+           "answer" request_id (str answer)))
+    (let [chat (into {} (map (juxt :id identity) (:chat (web-state root))))
+          report (get chat "req-report-projection")
+          proposal (get chat "req-proposal-projection")]
+      (is (= "thread-fb9f3f9a9affc19f5c192e2d17352894" (:thread_id report)))
+      (is (= "app.completed-card-report" (:source report)))
+      (is (= "proposal-20261110T100110Z" (:proposal_id proposal)))
+      (is (= "app.lieutenant-chat" (:source proposal)))
+      (is (= "done" (:status report)))
+      (is (= "done" (:status proposal))))))
+
 (deftest pack-web-chat-preserves-an-optional-proposal-id
   (let [root (tmp-dir)]
     (setup-pack! root)

@@ -519,10 +519,11 @@ and sources are opaque safe identifiers; malformed values are omitted without
 dropping the chat turn. Ordinary chat requests omit all three fields, and chat
 ordering, answering and approval behavior are unchanged.
 
-`POST /api/chat` accepts the optional `request_id`, `thread_id` and `source`
-fields alongside `text`, and returns the resulting request id. Supplying any of
-those fields publishes the pending request atomically, wakes the master role as
-part of the same call, and removes the new request if the wake fails. An
+`POST /api/chat` accepts the optional `request_id`, `thread_id`, `source` and
+`proposal_id` fields alongside `text`, and returns the resulting request id.
+Supplying any of those fields publishes the pending request atomically, wakes
+the master role as part of the same call, and removes the new request if the
+wake fails. An
 unchanged retry with the same request id returns the existing request without
 writing or waking again; reusing that id with different text or metadata is
 refused. Calling the endpoint with only `text` retains the original
@@ -530,7 +531,10 @@ best-effort-wake behavior. The wake buffer is loaded through
 `tmux load-buffer -` with the full request on stdin, then pasted once and
 submitted with one Enter. Request bodies, credentials and dashboard paths never
 appear in tmux process arguments, so completed-card reports are not limited by
-the OS command-line argument size.
+the OS command-line argument size. Answering a request preserves its safe
+conversation metadata in the done record, so thread, source and proposal
+projection survive the pending-to-done move. Identical re-answers are
+idempotent; a different answer cannot overwrite the completed request.
 
 Getting the kit into a forge is the bridge's own step, `install-kit` and
 `install-rules` on the adapter. Its paths default to a bridge that lives *inside
