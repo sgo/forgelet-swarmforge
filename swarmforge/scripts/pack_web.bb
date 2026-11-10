@@ -66,6 +66,8 @@
 (def pane-heat (atom {}))
 (def pane-status (atom {}))
 (def pane-status-lines (atom {}))
+(def lieutenant-activity-history (atom {}))
+(def ^:dynamic *lieutenant-activity-context* nil)
 
 (declare session-name pane-target live-pane-text role-row pane-sample backend-name
          in-process-for-row in-process-task-names approvals
@@ -730,6 +732,117 @@
     (record-heat! (pane-cache-key root role) text backend)
     0))
 
+(def master-shells
+  #{"zsh" "bash" "sh" "dash" "ksh" "fish" "tcsh" "csh" "login" "-zsh" "-bash"})
+
+(def activity-working-pattern
+  #"(?im)(?:esc\s+to\s+interrupt|waiting\s+for\s+response(?:\s+\d+(?:\.\d+)?s)?|^\s*[•*]?\s*working(?:\s*\([^)\r\n]*\))?\s*$)")
+
+(def activity-idle-pattern
+  #"(?im)^\s*(?:\? for shortcuts|enter:send\s+esc:cancel|ready(?: for (?:the )?next (?:task|card))?[.!]?|idle[.!]?|(?:done|completed|finished)(?: successfully)?[.!]?)\s*$")
+
+(def activity-token-pattern
+  #"(?i)\b(?:gh[pousr]_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|sk-[A-Za-z0-9_-]{10,}|xox[baprs]-[A-Za-z0-9-]{10,}|Bearer\s+[A-Za-z0-9._~+/=-]{10,})\b")
+
+(def activity-path-pattern
+  #"(?:(?:~|/)[^\s]+|[A-Za-z]:\\[^\s]+)")
+
+(def activity-socket-pattern
+  #"\bswarmforge-[A-Za-z0-9._-]+\b")
+
+(def activity-status-max-chars 120)
+(def activity-tail-lines 8)
+
+(defn fallback-shell? [command]
+  (let [normalized (some-> command
+                           str/trim
+                           str/lower-case
+                           (str/replace #"^.*[\\/]" ""))]
+    (contains? master-shells normalized)))
+
+(defn activity-output-state [text]
+  (let [tail (str/join "\n" (last-n-lines (pane-sample text nil)
+                                          activity-tail-lines))]
+    (cond
+      (re-find activity-working-pattern tail) "working"
+      (re-find activity-idle-pattern tail) "idle"
+      :else "unknown")))
+
+(defn safe-activity-line [line]
+  (some-> line
+          (str/replace #"[\p{Cc}\p{Cf}]" " ")
+          (str/replace #"\s+" " ")
+          str/trim
+          not-empty
+          (str/replace activity-token-pattern "[redacted]")
+          (str/replace activity-path-pattern "[path]")
+          (str/replace activity-socket-pattern "[socket]")
+          (as-> text
+                (if (> (count text) activity-status-max-chars)
+                  (str (subs text 0 (dec activity-status-max-chars)) "…")
+                  text))
+          str/trim
+          not-empty))
+
+(defn activity-status-line [text]
+  (let [tail (str/join "\n" (last-n-lines (pane-sample text nil) 20))
+        recognized (->> (pane-sentences tail)
+                        (filter status-sentence?)
+                        last)]
+    (safe-activity-line (strip-bullet recognized))))
+
+(defn pane-current-command [socket target]
+  (try
+    (let [result (sh "tmux" "-S" socket "display-message" "-p" "-t" target
+                     "#{pane_current_command}")]
+      (when (zero? (:exit result))
+        (not-empty (str/trim (:out result)))))
+    (catch Exception _ nil)))
+
+(defn lieutenant-runtime-facts [root]
+  (if *lieutenant-activity-context*
+    *lieutenant-activity-context*
+    (if-let [row (master-row root)]
+      (let [socket (tmux-socket root)
+            session (session-name row)
+            alive? (try
+                     (session-alive? socket session)
+                     (catch Exception _ false))]
+        {:alive? alive?
+         :command (when alive?
+                    (pane-current-command socket (pane-target row)))})
+      {:alive? false})))
+
+(defn activity-fingerprint [activity]
+  (select-keys activity [:alive :state :status_line]))
+
+(defn lieutenant-activity-snapshot [root]
+  (let [{:keys [alive? command]} (lieutenant-runtime-facts root)
+        available? (and alive? (not (fallback-shell? command)))
+        row (master-row root)
+        backend (when row (backend-name row))
+        text (when available? (live-pane-text root "lieutenant"))
+        state (if available? (activity-output-state text) "unavailable")
+        heat (if available?
+               (role-heat root "lieutenant" true text backend)
+               0)
+        activity {:alive (boolean alive?)
+                  :state state
+                  :heat heat
+                  :status_line (when available? (activity-status-line text))}
+        fingerprint (activity-fingerprint activity)
+        now (.format java.time.format.DateTimeFormatter/ISO_INSTANT
+                     (java.time.Instant/now))
+        history (swap! lieutenant-activity-history
+                        update root
+                        (fn [previous]
+                          (if (= fingerprint (:fingerprint previous))
+                            previous
+                            {:fingerprint fingerprint
+                             :last_changed_at now})))]
+    (assoc activity :last_changed_at
+           (get-in history [root :last_changed_at]))))
+
 (defn cards-in-lane [all-tasks lane]
   (filterv #(= lane (:lane %)) all-tasks))
 
@@ -1284,6 +1397,7 @@
                                   open))
      :chat (list-chat root)
      :lieutenant_status (pane-status-lines-for root "lieutenant")
+     :lieutenant_activity (lieutenant-activity-snapshot root)
      :lanes []
      :tasks []
      :work_in_flight (vec (mapcat :work_in_flight projects))}))
@@ -2745,6 +2859,49 @@
                                                      (:body (handle-request root {:method "GET" :uri "/api/state"}))
                                                      true))))]
           (println (json/generate-string {:first first-status :second second-status})))))))
+
+(defn activity-for-test [root context text]
+  (binding [*lieutenant-activity-context* context
+            *pane-text* (or text "")]
+    (:lieutenant_activity (forge-dashboard-state root))))
+
+(defn test-lieutenant-activity! [root alive command text]
+  (require-root! root)
+  (reset! pane-heat {})
+  (reset! lieutenant-activity-history {})
+  (let [context {:alive? (= "alive" alive)
+                 :command (or command "")}
+        activity (activity-for-test root context text)]
+    (println (json/generate-string
+              {:activity activity
+               :fingerprint (activity-fingerprint activity)}))))
+
+(defn test-lieutenant-activity-timeline! [root]
+  (require-root! root)
+  (reset! pane-heat {})
+  (reset! lieutenant-activity-history {})
+  (let [first (activity-for-test
+               root
+               {:alive? true :command "claude"}
+               "I'm reviewing the board.\nesc to interrupt · 2s\n")
+        same (activity-for-test
+              root
+              {:alive? true :command "claude"}
+              "I'm reviewing the board.\nesc to interrupt · 2s\n")
+        changed (activity-for-test
+                 root
+                 {:alive? true :command "claude"}
+                 "I'm reviewing two cards.\nesc to interrupt · 3s\n")
+        idle (activity-for-test
+              root
+              {:alive? true :command "claude"}
+              "I'm ready for your next instruction.\n? for shortcuts\n")
+        stale (do
+                (swap! pane-status-lines
+                       assoc [(str root) "lieutenant"] ["I'm reviewing old work."])
+                (activity-for-test root {:alive? false} ""))]
+    (println (json/generate-string
+              {:first first :same same :changed changed :idle idle :stale stale}))))
 
 (defn test-answer-clarification! [root id text]
   (when (str/blank? id)

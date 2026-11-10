@@ -40,6 +40,10 @@
     "--test-heat-collapse" (test-heat-collapse! (second args))
     "--test-status-pane" (test-status-pane! (second args) (nth args 2 nil))
     "--test-status-persist" (test-status-persist! (second args) (nth args 2 nil) (nth args 3 nil))
+    "--test-lieutenant-activity" (test-lieutenant-activity!
+                                  (second args) (nth args 2 nil)
+                                  (nth args 3 nil) (nth args 4 nil))
+    "--test-lieutenant-activity-timeline" (test-lieutenant-activity-timeline! (second args))
     "--test-answer-clarification" (test-answer-clarification! (second args) (nth args 2 nil) (nth args 3 nil))
     "--test-task" (test-task! (second args) (nth args 2 nil))
     "--test-doc" (test-doc! (second args) (nth args 2 nil))

@@ -4230,6 +4230,140 @@
       (is (= ["I'm listing the open projects." "I'll summarize HTW next."]
              (:lieutenant_status state))))))
 
+(defn lieutenant-activity-state [root alive command text]
+  (json/parse-string
+   (:out (pack-web-env root {}
+                       "--test-lieutenant-activity"
+                       (str root) alive command text))
+   true))
+
+(deftest forge-lieutenant-runtime-activity-classifies-current-evidence
+  ;; Given a configured forge Lieutenant
+  ;; When its live pane is working, idle, unknown, gone or at a fallback shell
+  ;; Then dashboard activity reports only evidence from the current live pane
+  (let [root (tmp-dir)]
+    (seed-mini-forge! root)
+    (write-file (fs/path root ".swarmforge/roles.tsv")
+                (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tclaude\ttask\tforward-only\n"
+                        root))
+    (let [working (:activity
+                   (lieutenant-activity-state
+                    root "alive" "claude"
+                    "I'm reviewing the completed cards.\nesc to interrupt · 2s\n"))
+          idle (:activity
+                (lieutenant-activity-state
+                 root "alive" "claude"
+                 "(? for shortcuts unavailable)\n? for shortcuts\n"))
+          unknown (:activity
+                   (lieutenant-activity-state
+                    root "alive" "claude"
+                    "An unrelated chunk of the transcript.\n"))
+          missing (:activity
+                   (lieutenant-activity-state root "missing" "" ""))
+          fallback (:activity
+                    (lieutenant-activity-state
+                     root "alive" "/bin/zsh"
+                     "I'm reviewing old work.\nesc to interrupt · 9s\n"))]
+      (is (= {:alive true :state "working"}
+             (select-keys working [:alive :state])))
+      (is (= {:alive true :state "idle"}
+             (select-keys idle [:alive :state])))
+      (is (= {:alive true :state "unknown"}
+             (select-keys unknown [:alive :state])))
+      (is (= {:alive false :state "unavailable" :heat 0}
+             (select-keys missing [:alive :state :heat])))
+      (is (= {:alive true :state "unavailable" :heat 0}
+             (select-keys fallback [:alive :state :heat])))
+      (is (nil? (:status_line missing)))
+      (is (nil? (:status_line fallback)))
+      (is (re-matches #"\d{4}-\d\d-\d\dT.+Z" (:last_changed_at working))))))
+
+(deftest forge-lieutenant-runtime-activity-bounds-and-redacts-status
+  ;; Given recognized status text carrying controls, paths, tokens and an unsafe length
+  ;; When it is projected into the dashboard activity fact
+  ;; Then only one short safe line remains
+  (let [root (tmp-dir)
+        unsafe (str "I'm checking /Users/operator/private/project and "
+                    "ghp_abcdefghijklmnopqrstuvwxyz0123 for "
+                    "swarmforge-private-socket "
+                    (apply str (repeat 300 "x"))
+                    ".\u0007\nesc to interrupt · 1s\n")]
+    (seed-mini-forge! root)
+    (write-file (fs/path root ".swarmforge/roles.tsv")
+                (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tclaude\ttask\tforward-only\n"
+                        root))
+    (let [activity (:activity
+                    (lieutenant-activity-state root "alive" "claude" unsafe))
+          line (:status_line activity)
+          serialized (json/generate-string activity)]
+      (is (= "working" (:state activity)))
+      (is (string? line))
+      (is (<= (count line) 120))
+      (is (not (str/includes? line "\n")))
+      (is (str/includes? line "[path]"))
+      (is (str/includes? line "[redacted]"))
+      (is (str/includes? line "[socket]"))
+      (is (not (str/includes? serialized "/Users/operator")))
+      (is (not (str/includes? serialized "ghp_abcdefghijklmnopqrstuvwxyz0123")))
+      (is (not (str/includes? serialized "swarmforge-private-socket")))
+      (is (not (str/includes? serialized "\u0007"))))))
+
+(deftest forge-lieutenant-runtime-activity-tracks-heat-and-structured-changes
+  ;; Given a working Lieutenant sampled repeatedly
+  ;; When output and classification change, then remain unchanged
+  ;; Then measured heat and last_changed_at change only with their respective evidence
+  (let [root (tmp-dir)]
+    (seed-mini-forge! root)
+    (write-file (fs/path root ".swarmforge/roles.tsv")
+                (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tclaude\ttask\tforward-only\n"
+                        root))
+    (let [timeline (json/parse-string
+                    (:out (pack-web-env
+                           root {}
+                           "--test-lieutenant-activity-timeline" (str root)))
+                    true)]
+      (is (= "working" (get-in timeline [:first :state])))
+      (is (= 0 (get-in timeline [:same :heat])))
+      (is (pos? (get-in timeline [:changed :heat])))
+      (is (= (get-in timeline [:first :last_changed_at])
+             (get-in timeline [:same :last_changed_at])))
+      (is (not= (get-in timeline [:same :last_changed_at])
+                (get-in timeline [:changed :last_changed_at])))
+      (is (= "idle" (get-in timeline [:idle :state])))
+      (is (= {:alive false :state "unavailable"}
+             (select-keys (:stale timeline) [:alive :state])))
+      (is (not= (get-in timeline [:first :state])
+                (get-in timeline [:idle :state]))))))
+
+(deftest forge-lieutenant-runtime-activity-strengthens-dashboard-fingerprint
+  ;; Given otherwise identical dashboard observations with different Lieutenant evidence
+  ;; When each activity is serialized
+  ;; Then the activity fingerprint differs and the existing facts remain present
+  (let [root (tmp-dir)]
+    (seed-mini-forge! root)
+    (write-file (fs/path root ".swarmforge/roles.tsv")
+                (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tclaude\ttask\tforward-only\n"
+                        root))
+    (let [working (lieutenant-activity-state
+                   root "alive" "claude"
+                   "I'm reviewing the cards.\nesc to interrupt · 2s\n")
+          idle (lieutenant-activity-state
+                root "alive" "claude"
+                "I'm waiting for the next request.\n? for shortcuts\n")
+          missing (lieutenant-activity-state root "missing" "" "")
+          dashboard (json/parse-string
+                     (:out (pack-web-env root {} "--test-state" (str root)))
+                     true)]
+      (is (not= (:fingerprint working) (:fingerprint idle)))
+      (is (not= (:fingerprint idle) (:fingerprint missing)))
+      (is (not= (json/generate-string (:activity working))
+                (json/generate-string (:activity idle))))
+      (is (contains? dashboard :lieutenant_status))
+      (is (contains? dashboard :work_in_flight))
+      (is (= {:alive false :state "unavailable" :heat 0}
+             (select-keys (:lieutenant_activity dashboard)
+                          [:alive :state :heat]))))))
+
 (defn -main [& _]
   (let [{:keys [fail error]} (run-tests 'swarmforge.pack-ui-test)]
     (System/exit (+ fail error))))
