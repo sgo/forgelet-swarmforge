@@ -204,6 +204,19 @@
 (defn sq [value]
   (str "'" (str/replace (str value) "'" "'\"'\"'") "'"))
 
+(def terminal-value-re #"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
+
+(defn usable-terminal? [value]
+  (and (string? value)
+       (re-matches terminal-value-re value)
+       (not= "dumb" (str/lower-case value))))
+
+(defn normalized-terminal []
+  (or (some #(when (usable-terminal? %) %)
+            [(System/getenv "SWARMFORGE_TMUX_TERM")
+             (System/getenv "TERM")])
+      "tmux-256color"))
+
 (defn agent-socket [root]
   (fs/path root ".swarmforge" "agent-tmux.sock"))
 
@@ -307,6 +320,7 @@
           _ (when-not (zero? (:exit validation))
               (exit! 1 "Project runtime environment failed:"
                       (str/trim (str (:err validation) (:out validation)))))
+          terminal (normalized-terminal)
           result (tmux root "new-session" "-d" "-s" session-name
                        "-c" (str root)
                        (str "export PATH=" (sq (str (fs/path root ".swarmforge" "bin")
@@ -314,6 +328,9 @@
                                                     (fs/path root "swarmforge" "scripts")
                                                     ":"
                                                     (or (System/getenv "PATH") "")))
+                            "; export TERM=" (sq terminal)
+                            "; export SWARMFORGE_TMUX_TERM=" (sq terminal)
+                            "; unset NO_COLOR"
                             "; exec bash " (sq (str env-loader)) " "
                             (sq command)))]
       (when-not (zero? (:exit result))

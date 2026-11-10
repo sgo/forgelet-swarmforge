@@ -133,6 +133,9 @@
 (defn skip-config-line? [line]
   (or (str/blank? line) (str/starts-with? line "#")))
 
+(defn lieutenant-config-line? [line]
+  (= "lieutenant" (str/lower-case (first (str/split (str/trim line) #"\s+")))))
+
 (defn special-worktree? [worktree]
   (#{"none" "master"} worktree))
 
@@ -241,7 +244,7 @@
     (if-let [[line-index raw-line] (first lines)]
       (let [line-no (inc line-index)
             line (str/trim raw-line)]
-        (if (skip-config-line? line)
+        (if (or (skip-config-line? line) (lieutenant-config-line? line))
           (recur (next lines) rows roles worktrees)
           (let [row (parse-window-line ctx line-no line roles worktrees)
                 worktree (:worktree-name row)]
@@ -250,9 +253,14 @@
                    (conj roles (:role row))
                    (cond-> worktrees (not (special-worktree? worktree)) (conj worktree))))))
       (do
-        (reject-if (empty? rows)
-                   (str "No windows defined in " (:config-file ctx)))
-        (require-master-worktree! rows)
+        (let [lieutenant?
+              (and (fs/directory? (fs/path (:working-dir ctx) "packs"))
+                   (some lieutenant-config-line?
+                         (str/split-lines (slurp (str (:config-file ctx))))))]
+          (when-not (and lieutenant? (empty? rows))
+            (reject-if (empty? rows)
+                       (str "No windows defined in " (:config-file ctx)))
+            (require-master-worktree! rows)))
         (assoc ctx :roles rows)))))
 
 (defn write-sessions-file! [ctx]
@@ -541,6 +549,49 @@
   ;; ran a whole session unaware of its own prompt. Ask the agent, not the role.
   (or (not= role "lieutenant") (not (reads-own-prompt-file? agent))))
 
+(def terminal-value-re #"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
+(def lang-value-re #"[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}")
+
+(defn usable-terminal? [value]
+  (and (string? value)
+       (re-matches terminal-value-re value)
+       (not= "dumb" (str/lower-case value))))
+
+(defn caller-env [name]
+  (let [value (not-empty (System/getenv name))]
+    (when (and value (not (re-find #"[\p{Cntrl}\s]" value)))
+      value)))
+
+(defn tmux-client-terminal [ctx session]
+  (let [result (process/sh {:continue true}
+                           "tmux" "-S" (:tmux-socket ctx)
+                           "display-message" "-p" "-t" session
+                           "#{client_termname}")
+        terminal (not-empty (str/trim (:out result)))]
+    (when (and (zero? (:exit result)) (usable-terminal? terminal))
+      terminal)))
+
+(defn role-terminal [ctx session]
+  (or (when-let [terminal (caller-env "TERM")]
+        (when (usable-terminal? terminal) terminal))
+      (tmux-client-terminal ctx session)
+      "tmux-256color"))
+
+(defn role-environment-prefix [ctx session]
+  (let [terminal (role-terminal ctx session)
+        colorterm (caller-env "COLORTERM")
+        lang (caller-env "LANG")]
+    (str "unset NO_COLOR; "
+         "if [ -z \"${TERM:-}\" ] || [ \"${TERM:-}\" = dumb ]; then "
+         "export TERM=" (sq terminal) "; fi; "
+         (when (and colorterm (re-matches terminal-value-re colorterm))
+           (str "if [ -z \"${COLORTERM:-}\" ]; then export COLORTERM="
+                (sq colorterm) "; fi; "))
+         (when (and lang (re-matches lang-value-re lang))
+           (str "if [ -z \"${LANG:-}\" ] || [ \"${LANG:-}\" = C ] || "
+                "[ \"${LANG:-}\" = POSIX ]; then export LANG="
+                (sq lang) "; fi; ")))))
+
 (defn launch-command [ctx index row]
   (let [role (:role row)
         agent (:agent row)
@@ -565,11 +616,12 @@
                                "file it refers to recursively, and follow all of those instructions.\"")
         initial-prompt (if (= role "lieutenant") lieutenant-prompt prompt)
         initial-prompt? (gets-initial-prompt? role agent)
+        environment-prefix (role-environment-prefix ctx (:session row))
         base (str "export SWARMFORGE_ROLE=" (sq role)
                   " && export PATH=" (sq (str local-scripts)) ":" (sq (str tool-bin)) ":"
                   (sq (str role-script-dir)) ":$PATH"
                   " && cd " (sq (str role-worktree))
-                  " && ")]
+                  " && " environment-prefix)]
     (write-agent-instruction-file! ctx role prompt-file (last-pack-role? ctx role))
     (cond-> (str base
                 (case agent
@@ -636,6 +688,19 @@
     (ensure-codex-trust! (:worktree-path row)))
   (let [session (:session row)
         display (:display-name row)
+        terminal (role-terminal ctx session)
+        colorterm (caller-env "COLORTERM")
+        lang (caller-env "LANG")
+        _ (sh "tmux" "-S" (:tmux-socket ctx)
+              "set-environment" "-t" session "TERM" terminal)
+        _ (sh "tmux" "-S" (:tmux-socket ctx)
+              "set-environment" "-t" session "-u" "NO_COLOR")
+        _ (when (and colorterm (re-matches terminal-value-re colorterm))
+            (sh "tmux" "-S" (:tmux-socket ctx)
+                "set-environment" "-t" session "COLORTERM" colorterm))
+        _ (when (and lang (re-matches lang-value-re lang))
+            (sh "tmux" "-S" (:tmux-socket ctx)
+                "set-environment" "-t" session "LANG" lang))
         command (launch-command ctx index row)]
     (sh "tmux" "-S" (:tmux-socket ctx) "send-keys" "-t"
         (tmux-agent-target display (:tmux-pane-base-index ctx) session)
@@ -1173,6 +1238,8 @@
                         " running " running " - not a shell, so not a dead agent"))
           false))))
 
+(declare lieutenant-row)
+
 (defn restart-roles!
   "Restart the dead agents among a project's roles - all of them, or the ones
   named. Prints what it found and what it did, and returns how many it started."
@@ -1181,12 +1248,24 @@
   (let [ctx (-> (context root)
                 detect-tmux-base-indexes
                 parse-config)
-        roles (vec (:roles ctx))
+        configured-lieutenant?
+        (some lieutenant-config-line?
+              (str/split-lines (slurp (str (:config-file ctx)))))
+        roles (cond-> (vec (:roles ctx))
+                (and (fs/directory? (fs/path root "packs"))
+                     configured-lieutenant?)
+                (conj (lieutenant-row ctx)))
         named (set wanted)
         chosen (if (seq named)
                  (filterv (fn [[_ row]] (contains? named (:role row)))
                           (map-indexed vector roles))
                  (mapv vector (range) roles))]
+    (when (and (some (fn [[_ row]] (= "lieutenant" (:role row))) chosen)
+               (not (fs/regular-file?
+                     (fs/path (:roles-dir ctx) "lieutenant.prompt"))))
+      (fail! (str red "Error:" reset
+                  " Missing Lieutenant prompt at "
+                  (fs/path (:roles-dir ctx) "lieutenant.prompt"))))
     (when (and (seq named) (empty? chosen))
       (fail! (str red "Error:" reset " no such role in " root ": " (str/join ", " named)
                   ". Known roles: " (str/join ", " (map :role roles)))))

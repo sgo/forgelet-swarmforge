@@ -178,10 +178,20 @@ when present. Values already present in the launcher environment win, so a
 caller can override the file. A missing file is harmless; unreadable or
 malformed content fails the launch visibly.
 
-The agent-session launch boundary always removes inherited `NO_COLOR`, including
-a value supplied by the runtime environment file. `TERM`, `COLORTERM` and other
-runtime defaults are left intact. Existing tmux sessions keep their old
-environment until the session is replaced.
+Every persistent project or forge-role launch boundary removes inherited
+`NO_COLOR`, including a value supplied by the runtime environment file. A valid
+caller-provided `TERM`, `COLORTERM` and `LANG` is preserved. If a pane inherits
+`TERM=dumb`, the role starts with the attached tmux client's usable terminal or
+`tmux-256color` when no client is attached; other runtime defaults remain
+intact. The launch writes this environment to the role's existing tmux pane, so
+repairing a host-started Lieutenant does not recreate its session or touch any
+project tmux server.
+
+`--restart-role` and `--restart-dead-roles` accept the legacy host form
+`Lieutenant <agent>` as well as window-based project configuration. Restarting
+a Lieutenant uses the same configured prompt, permission arguments and forge
+worktree. Missing prompts and unsupported agents fail before any role session
+is changed.
 
 Single-agent cards use one active lane at a time. The first approved card enters
 `spec`; later cards wait in `queued` in creation-time/task-id order with no

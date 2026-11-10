@@ -56,5 +56,8 @@ if [[ -n "$env_file" && -e "$env_file" ]]; then
   trap - EXIT
 fi
 
+if [[ -z "${TERM:-}" || "${TERM}" == "dumb" ]]; then
+  export TERM="${SWARMFORGE_TMUX_TERM:-tmux-256color}"
+fi
 unset NO_COLOR
 exec bash -c "$1"

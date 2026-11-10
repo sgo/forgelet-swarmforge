@@ -946,6 +946,182 @@
       (finally
         (fs/delete-tree root)))))
 
+(defn lieutenant-host-fixture []
+  (let [root (tmp-dir)]
+    (write-file (fs/path root "packs" "keep") "")
+    (write-file (fs/path root "swarmforge/constitution.prompt") "Read articles.\n")
+    (write-file (fs/path root "swarmforge/roles/lieutenant.prompt") "Lieutenant prompt.\n")
+    (write-file (fs/path root "swarmforge/swarmforge.conf")
+                "Lieutenant claude --yolo\n")
+    root))
+
+(defn fake-claude! [root log]
+  (let [file (fs/path root ".swarmforge/bin/claude")]
+    (write-file file
+                (str "#!/bin/sh\n"
+                     "printf '%s|%s|%s|%s|%s|%s|%s\\n' "
+                     "\"${NO_COLOR-unset}\" \"$TERM\" \"${COLORTERM:-}\" "
+                     "\"${LANG:-}\" \"${SWARMFORGE_ROLE:-}\" \"$PWD\" \"$*\" "
+                     "> \"$SWARMFORGE_TEST_AGENT_ENV_LOG\"\n"))
+    (fs/set-posix-file-permissions file "rwxr-xr-x")
+    log))
+
+(defn wait-for-file [file timeout-ms]
+  (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
+    (loop []
+      (cond
+        (fs/regular-file? file) true
+        (> (System/currentTimeMillis) deadline) false
+        :else (do (Thread/sleep 50) (recur))))))
+
+(deftest forge-lieutenant-launch-normalizes-a-stale-terminal
+  ;; Given a forge launched from TERM=dumb and NO_COLOR=1
+  ;; When the Lieutenant command runs
+  ;; Then it gets a usable terminal, no NO_COLOR, and preserved colour locale values
+  (let [root (lieutenant-host-fixture)
+        log (fs/path root "lieutenant.env")]
+    (try
+      (fake-claude! root log)
+      (doseq [[terminal expected-term]
+              [["dumb" "tmux-256color"]
+               ["xterm-kitty" "xterm-kitty"]
+               ["tmux-256color" "tmux-256color"]]]
+        (fs/delete-if-exists log)
+        (let [env {"TERM" terminal
+                   "NO_COLOR" "1"
+                   "COLORTERM" "truecolor"
+                   "LANG" "en_US.UTF-8"
+                   "SWARMFORGE_TEST_AGENT_ENV_LOG" (str log)}
+              command (str/trim
+                       (:out (run {:dir root :env env}
+                                  (script "swarmforge.bb")
+                                  "--test-lieutenant-launch-command"
+                                  (str root))))
+              result (run {:dir root :env env} "sh" "-c" command)]
+          (is (zero? (:exit result)) (:err result))
+          (is (str/includes? command "unset NO_COLOR"))
+          (is (fs/regular-file? log))
+          (let [[no-color term colorterm lang role pwd args]
+                (str/split (str/trim (slurp (str log))) #"\|" 7)]
+            (is (= "unset" no-color))
+            (is (= expected-term term))
+            (is (= "truecolor" colorterm))
+            (is (= "en_US.UTF-8" lang))
+            (is (= "lieutenant" role))
+            (is (= (str root) pwd))
+            (is (str/includes? args "--append-system-prompt-file"))
+            (is (str/includes? args "--permission-mode bypassPermissions")))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest legacy-lieutenant-config-restarts-through-the-public-command
+  ;; Given a host-started Lieutenant using the legacy configuration form
+  ;; When --restart-role repairs the shell-left pane
+  ;; Then it starts the configured prompt and permissions without touching a project session
+  (let [root (lieutenant-host-fixture)
+        log (fs/path root "restart.env")
+        project-sock (str (fs/path root "project.sock"))]
+    (try
+      (fake-claude! root log)
+      (run {:dir root} (script "swarmforge.bb") "--test-parse" (str root))
+      (let [socket (str/trim (slurp (str (fs/path root ".swarmforge/tmux-socket"))))
+            env {"TERM" "dumb"
+                 "NO_COLOR" "1"
+                 "COLORTERM" "truecolor"
+                 "LANG" "en_US.UTF-8"
+                 "SWARMFORGE_TEST_AGENT_ENV_LOG" (str log)}]
+        (run {:dir root :env env} "tmux" "-S" socket
+             "new-session" "-d" "-s" "swarmforge-lieutenant"
+             "-n" "Lieutenant")
+        (run {:dir root :env env} "tmux" "-S" project-sock
+             "new-session" "-d" "-s" "project-runtime" "sleep" "120")
+        (let [restarted (run {:dir root :env env}
+                             (script "swarmforge.bb")
+                             "--restart-role" (str root) "lieutenant")]
+          (is (zero? (:exit restarted)) (str (:err restarted) (:out restarted)))
+          (is (str/includes? (:out restarted) "started again"))
+          (is (wait-for-file log 5000))
+          (let [[no-color term colorterm lang role pwd args]
+                (str/split (str/trim (slurp (str log))) #"\|" 7)]
+            (is (= "unset" no-color))
+            (is (= "tmux-256color" term))
+            (is (= "truecolor" colorterm))
+            (is (= "en_US.UTF-8" lang))
+            (is (= "lieutenant" role))
+            (is (= (str root) pwd))
+            (is (str/includes? args "--append-system-prompt-file"))
+            (is (str/includes? args "--yolo")))
+          (is (= "Lieutenant claude --yolo\n"
+                 (slurp (str (fs/path root "swarmforge/swarmforge.conf")))))
+          (is (str/includes?
+               (:out (run {:dir root} "tmux" "-S" project-sock
+                          "list-sessions" "-F" "#{session_name}"))
+               "project-runtime")))
+        (let [dead (run {:dir root :env env}
+                        (script "swarmforge.bb")
+                        "--restart-dead-roles" (str root))]
+          (is (zero? (:exit dead)) (str (:err dead) (:out dead)))
+          (is (str/includes? (:out dead) "no session"))
+          (is (str/includes? (:out dead) "0 agents started again")))
+        (run {:dir root :ok? false} "tmux" "-S" socket "kill-server")
+        (run {:dir root :ok? false} "tmux" "-S" project-sock "kill-server"))
+      (finally
+        (let [socket-file (fs/path root ".swarmforge/tmux-socket")]
+          (when (fs/regular-file? socket-file)
+            (run {:dir root :ok? false} "tmux" "-S"
+                 (str/trim (slurp (str socket-file))) "kill-server")))
+        (run {:dir root :ok? false} "tmux" "-S" project-sock "kill-server")
+        (fs/delete-tree root)))))
+
+(deftest lieutenant-restart-refuses-bad-configuration-without-touching-sessions
+  ;; Given missing Lieutenant prompt and unsupported agent configurations
+  ;; When restart is requested
+  ;; Then it fails before touching the forge or an unrelated project session
+  (let [root (lieutenant-host-fixture)
+        project-sock (str (fs/path root "project.sock"))
+        prompt (fs/path root "swarmforge/roles/lieutenant.prompt")]
+    (try
+      (run {:dir root} (script "swarmforge.bb") "--test-parse" (str root))
+      (let [socket (str/trim (slurp (str (fs/path root ".swarmforge/tmux-socket"))))]
+        (run {:dir root} "tmux" "-S" socket
+             "new-session" "-d" "-s" "swarmforge-lieutenant"
+             "-n" "Lieutenant")
+        (run {:dir root} "tmux" "-S" project-sock
+             "new-session" "-d" "-s" "project-runtime" "sleep" "120")
+        (fs/delete-if-exists prompt)
+        (let [missing (run {:dir root :ok? false}
+                           (script "swarmforge.bb")
+                           "--restart-role" (str root) "lieutenant")]
+          (is (not (zero? (:exit missing))))
+          (is (str/includes? (str (:err missing) (:out missing))
+                             "Missing Lieutenant prompt")))
+        (write-file prompt "Lieutenant prompt.\n")
+        (write-file (fs/path root "swarmforge/swarmforge.conf")
+                    "Lieutenant unsupported-agent\n")
+        (let [unsupported (run {:dir root :ok? false}
+                               (script "swarmforge.bb")
+                               "--restart-role" (str root) "lieutenant")]
+          (is (not (zero? (:exit unsupported))))
+          (is (str/includes? (str (:err unsupported) (:out unsupported))
+                             "Unsupported agent")))
+        (is (str/includes?
+             (:out (run {:dir root} "tmux" "-S" socket
+                        "list-sessions" "-F" "#{session_name}"))
+             "swarmforge-lieutenant"))
+        (is (str/includes?
+             (:out (run {:dir root} "tmux" "-S" project-sock
+                        "list-sessions" "-F" "#{session_name}"))
+             "project-runtime"))
+        (run {:dir root :ok? false} "tmux" "-S" socket "kill-server")
+        (run {:dir root :ok? false} "tmux" "-S" project-sock "kill-server"))
+      (finally
+        (let [socket-file (fs/path root ".swarmforge/tmux-socket")]
+          (when (fs/regular-file? socket-file)
+            (run {:dir root :ok? false} "tmux" "-S"
+                 (str/trim (slurp (str socket-file))) "kill-server")))
+        (run {:dir root :ok? false} "tmux" "-S" project-sock "kill-server")
+        (fs/delete-tree root)))))
+
 (deftest grok-launch-command-uses-minimal-for-scrollback
   ;; Given a grok pack role
   ;; When SwarmForge builds the launch command

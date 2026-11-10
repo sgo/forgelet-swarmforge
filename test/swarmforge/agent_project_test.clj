@@ -309,7 +309,7 @@
                                  command "--name SwarmForge Agent --yolo")
                       "grok" (str/includes?
                               command "--permission-mode bypassPermissions --minimal"))))
-              (is (= "unset|tmux-256color|truecolor\n"
+              (is (= "unset|xterm-kitty|truecolor\n"
                      (slurp (str env-log))))
             (stop-agent-session! project)))))
       (let [project (fs/path forge "projects" "agent-missing")]
@@ -394,7 +394,7 @@
         (let [started (run-probe runtime-env true {})]
           (is (zero? (:exit started)) (:err started))
           (is (re-find
-               #"file-snapshots::default::file:///tmp/file-snapshots\|from-file\|\|.*\.swarmforge/bin:.*swarmforge/scripts:.*\|tmux-[^|]+\|truecolor"
+               #"file-snapshots::default::file:///tmp/file-snapshots\|from-file\|\|.*\.swarmforge/bin:.*swarmforge/scripts:.*\|xterm-kitty\|truecolor"
                (slurp (str log)))))
         (stop-agent-session! project)
 
@@ -411,8 +411,15 @@
 
         (let [started (run-probe missing-env true {})]
           (is (zero? (:exit started)) (:err started))
-          (is (re-find #"^\|\|\|.*\|tmux-[^|]+\|truecolor$"
+          (is (re-find #"^\|\|\|.*\|xterm-kitty\|truecolor$"
                        (slurp (str log)))))
+        (stop-agent-session! project)
+
+        (let [started (run-probe runtime-env true
+                                 {"TERM" "dumb"
+                                  "SWARMFORGE_TMUX_TERM" "xterm-kitty"})]
+          (is (zero? (:exit started)) (:err started))
+          (is (re-find #"\|xterm-kitty\|truecolor$" (slurp (str log)))))
         (stop-agent-session! project)
 
         (doseq [[label body expected]
