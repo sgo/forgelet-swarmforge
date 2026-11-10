@@ -546,6 +546,24 @@ consumed or superseded is reported with `available: false` rather than offered
 for approval again. The answer tool records metadata only; it never approves or
 executes the action.
 
+General Lieutenant history can be read as a bounded cursor page:
+
+```text
+GET /api/state?chat_thread_id=<conversation>&chat_limit=40&chat_cursor=<opaque>
+```
+
+`chat_limit` is optional, defaults to 40 and is bounded to 1-100. The first
+request has no cursor and returns the newest page in chronological order.
+`chat_page.next_cursor` is opaque and stable against newer insertions; sending
+it back returns the preceding turns. `has_more` is explicit, so old records are
+never skipped by age. The response also carries compact
+`chat_conversations` summaries, the requested conversation's latest state and
+any pending turns outside the current page. Paging covers only general records
+with source `app.lieutenant-chat`; report threads, proposal discussions and
+other chat remain available through their existing paths and the legacy
+no-pagination `/api/state` response. Malformed, unsupported, tampered or foreign
+pagination values return bounded HTTP errors.
+
 Getting the kit into a forge is the bridge's own step, `install-kit` and
 `install-rules` on the adapter. Its paths default to a bridge that lives *inside
 the forge it serves*, so there are two shapes:

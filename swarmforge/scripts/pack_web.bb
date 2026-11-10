@@ -18,6 +18,7 @@
   (str "Usage:\n"
        "  pack_web.sh --serve <root> [port]\n"
        "  pack_web.sh --test-state <root>\n"
+       "  pack_web.sh --test-state-query <root> <query>\n"
        "  pack_web.sh --test-html\n"
        "  pack_web.sh --test-post-task <root> <name> <text>\n"
        "  pack_web.sh --test-post-chat <root> <text>\n"
@@ -1292,6 +1293,173 @@
     (forge-dashboard-state root)
     (dashboard-state root)))
 
+(def chat-page-default-limit 40)
+(def chat-page-max-limit 100)
+(def chat-page-source "app.lieutenant-chat")
+
+(defn chat-page-error! [message]
+  (throw (ex-info message {:http-status 400})))
+
+(defn query-parameters [uri]
+  (try
+    (let [query (second (str/split (or uri "") #"\?" 2))
+          pairs (if (str/blank? query)
+                  []
+                  (map (fn [pair]
+                         (let [[key value] (str/split pair #"=" 2)]
+                           [(java.net.URLDecoder/decode (or key "") "UTF-8")
+                            (java.net.URLDecoder/decode (or value "") "UTF-8")]))
+                       (str/split query #"&")))]
+      (when (some #(str/blank? (first %)) pairs)
+        (chat-page-error! "Chat pagination query is malformed."))
+      (when-not (= (count pairs) (count (distinct (map first pairs))))
+        (chat-page-error! "Chat pagination query repeats a parameter."))
+      (into {} pairs))
+    (catch clojure.lang.ExceptionInfo e
+      (throw e))
+    (catch Exception _
+      (chat-page-error! "Chat pagination query is malformed."))))
+
+(defn chat-page-parameters [uri]
+  (let [params (query-parameters uri)
+        pagination-keys (filter #(str/starts-with? % "chat_") (keys params))
+        supported #{"chat_thread_id" "chat_limit" "chat_cursor"}
+        unsupported (remove supported pagination-keys)]
+    (when (seq unsupported)
+      (chat-page-error! "Unsupported chat pagination parameter."))
+    (when (seq pagination-keys)
+      (let [thread-id (some-> (get params "chat_thread_id") str/trim not-empty)
+            limit-text (get params "chat_limit")
+            limit (if (str/blank? limit-text)
+                    chat-page-default-limit
+                    (if (re-matches #"[0-9]{1,3}" limit-text)
+                      (Long/parseLong limit-text)
+                      -1))
+            cursor (some-> (get params "chat_cursor") str/trim not-empty)]
+        (when-not (and thread-id (re-matches chat-thread-id-re thread-id))
+          (chat-page-error! "Chat conversation id is invalid."))
+        (when-not (<= 1 limit chat-page-max-limit)
+          (chat-page-error! "Chat page limit must be between 1 and 100."))
+        {:thread_id thread-id :limit limit :cursor cursor}))))
+
+(defn sha256-hex [value]
+  (let [digest (java.security.MessageDigest/getInstance "SHA-256")]
+    (apply str
+           (map #(format "%02x" %)
+                (.digest digest (.getBytes (str value) "UTF-8"))))))
+
+(defn chat-cursor-payload [thread-id turn]
+  {:version 1
+   :thread_id thread-id
+   :created_at (:created_at turn)
+   :id (:id turn)})
+
+(defn encode-chat-cursor [thread-id turn]
+  (let [payload (chat-cursor-payload thread-id turn)
+        checked (assoc payload :checksum (sha256-hex (pr-str payload)))]
+    (-> (java.util.Base64/getUrlEncoder)
+        (.withoutPadding)
+        (.encodeToString (.getBytes (pr-str checked) "UTF-8")))))
+
+(defn decode-chat-cursor [thread-id value]
+  (try
+    (let [decoded (String. (.decode (java.util.Base64/getUrlDecoder)
+                                    (str value))
+                           "UTF-8")
+          cursor (edn/read-string decoded)
+          payload (dissoc cursor :checksum)]
+      (when-not (and (map? cursor)
+                     (= #{:version :thread_id :created_at :id :checksum}
+                        (set (keys cursor)))
+                     (= 1 (:version cursor))
+                     (= thread-id (:thread_id cursor))
+                     (= (:checksum cursor)
+                        (sha256-hex (pr-str payload)))
+                     (string? (:created_at cursor))
+                     (not (str/blank? (:created_at cursor)))
+                     (string? (:id cursor))
+                     (re-matches chat-request-id-re (:id cursor)))
+        (chat-page-error! "Chat page cursor is invalid."))
+      {:created_at (:created_at cursor) :id (:id cursor)})
+    (catch clojure.lang.ExceptionInfo e
+      (throw e))
+    (catch Exception _
+      (chat-page-error! "Chat page cursor is malformed."))))
+
+(defn general-chat-turn? [turn]
+  (and (= chat-page-source (:source turn))
+       (nil? (:proposal_id turn))
+       (some? (:thread_id turn))))
+
+(defn chat-order [turn]
+  [(str (:created_at turn)) (str (:id turn))])
+
+(defn ordered-general-chat [root]
+  (let [turns (filter general-chat-turn? (list-chat root))
+        invalid (some #(when (or (str/blank? (str (:id %)))
+                                 (str/blank? (str (:created_at %))))
+                         %)
+                      turns)]
+    (when invalid
+      (throw (ex-info "Chat history contains a malformed general turn."
+                      {:http-status 502})))
+    (sort-by chat-order turns)))
+
+(defn chat-conversation-summary [thread-id turns]
+  (let [ordered (sort-by chat-order turns)
+        latest (last ordered)]
+    {:thread_id thread-id
+     :turn_count (count ordered)
+     :pending_count (count (filter #(= "pending" (:status %)) ordered))
+     :latest (when latest
+               (select-keys latest [:id :status :created_at :updated_at]))}))
+
+(defn chat-conversation-summaries [turns]
+  (->> (group-by :thread_id turns)
+       (map (fn [[thread-id thread-turns]]
+              (chat-conversation-summary thread-id thread-turns)))
+       (sort-by :thread_id)
+       vec))
+
+(defn paged-chat-state [root pagination]
+  (let [thread-id (:thread_id pagination)
+        limit (:limit pagination)
+        boundary (when-let [cursor (:cursor pagination)]
+                   (decode-chat-cursor thread-id cursor))
+        all-general (vec (ordered-general-chat root))
+        thread-turns (filter #(= thread-id (:thread_id %)) all-general)
+        eligible (if boundary
+                   (filter #(neg? (compare (chat-order %)
+                                           (chat-order boundary)))
+                           thread-turns)
+                   thread-turns)
+        page (vec (take-last limit eligible))
+        has-more (> (count eligible) limit)
+        next-cursor (when has-more
+                      (encode-chat-cursor thread-id (first page)))
+        page-ids (set (map :id page))
+        pending (->> thread-turns
+                     (filter #(= "pending" (:status %)))
+                     (remove #(contains? page-ids (:id %)))
+                     (sort-by chat-order)
+                     vec)
+        summary (chat-conversation-summary thread-id thread-turns)
+        base (api-state root)]
+    (assoc base
+           :chat page
+           :chat_conversations (chat-conversation-summaries all-general)
+           :chat_page {:thread_id thread-id
+                       :limit limit
+                       :has_more has-more
+                       :next_cursor next-cursor
+                       :conversation summary
+                       :pending_turns pending})))
+
+(defn api-state-with-chat-page [root uri]
+  (if-let [pagination (chat-page-parameters uri)]
+    (paged-chat-state root pagination)
+    (api-state root)))
+
 (defn require-root! [root]
   (when (str/blank? root)
     (exit! 1 "Missing project root"))
@@ -2163,10 +2331,10 @@
      :headers {"Content-Type" "text/html; charset=utf-8"}
      :body (dashboard-page)}
 
-    (= "/api/state" uri)
+    (= "/api/state" (first (str/split (or uri "") #"\?")))
     {:status 200
      :headers {"Content-Type" "application/json"}
-     :body (json/generate-string (api-state root))}
+     :body (json/generate-string (api-state-with-chat-page root uri))}
 
     (agent-pane-role uri)
     (get-agent-pane (request-project-root root uri) uri)
@@ -2353,6 +2521,14 @@
 
 (defn test-state! [root]
   (println (:body (handle-request (require-root! root) {:method "GET" :uri "/api/state"}))))
+
+(declare test-http!)
+
+(defn test-state-query! [root query]
+  (test-http! (handle-request
+               (require-root! root)
+               {:method "GET"
+                :uri (str "/api/state?" (or query ""))})))
 
 (defn test-html! []
   (print (:body (handle-request nil {:method "GET" :uri "/"})))

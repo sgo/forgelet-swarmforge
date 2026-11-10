@@ -17,6 +17,7 @@
 (defn test-cli! [& args]
   (case (first args)
     "--test-state" (test-state! (second args))
+    "--test-state-query" (test-state-query! (second args) (nth args 2 nil))
     "--test-html" (test-html!)
     "--test-post-task" (test-post-task! (second args) (nth args 2 nil) (nth args 3 nil))
     "--test-post-chat" (test-post-chat! (second args) (nth args 2 nil))

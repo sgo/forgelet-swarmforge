@@ -3,6 +3,7 @@
             [cheshire.core :as json]
             [clojure.edn :as edn]
             [clojure.java.shell :as sh]
+            [clojure.set :as set]
             [clojure.string :as str]
             [clojure.test :refer [deftest is run-tests use-fixtures]]))
 
@@ -248,6 +249,34 @@
 
 (defn web-state [root]
   (json/parse-string (:out (pack-web root true "--test-state" (str root))) true))
+
+(defn paged-web-state [root query]
+  (json/parse-string
+   (:out (pack-web root true "--test-state-query" (str root) query))
+   true))
+
+(defn chat-timestamp [n]
+  (.format java.time.format.DateTimeFormatter/ISO_INSTANT
+           (.plusSeconds (java.time.Instant/parse "2026-11-10T00:00:00Z")
+                         (long n))))
+
+(defn write-chat-turn!
+  [root {:keys [id status created-at thread-id source proposal-id body]}]
+  (let [state (if (= status "pending") "pending" "done")
+        file (fs/path root ".swarmforge/dashboard/requests" state
+                      (str id ".request"))]
+    (write-file
+     file
+     (str "id: " id "\n"
+          "status: " status "\n"
+          (when thread-id (str "thread_id: " thread-id "\n"))
+          (when source (str "source: " source "\n"))
+          (when proposal-id (str "proposal_id: " proposal-id "\n"))
+          "created_at: " created-at "\n"
+          (when (= status "done") "response: answer\\nline\n")
+          "\n"
+          (or body (str "body " id))
+          "\n"))))
 
 (defn task-card [root name]
   (some #(when (= name (:name %)) %) (:tasks (web-state root))))
@@ -2093,6 +2122,220 @@
       (is (= "Second answer" (get-in chat ["req-thread-b" :response])))
       (is (= "2026-11-08T14:23:00Z"
              (get-in chat ["req-malformed" :created_at]))))))
+
+(deftest dashboard-state-pages-general-chat-with-a-stable-cursor
+  ;; Given more general Lieutenant turns than one page
+  ;; When the newest and consecutive older pages are requested
+  ;; Then ordering is chronological within pages and insertion/deletion do not shift older history
+  (let [root (tmp-dir)
+        thread-id "conversation-paged"
+        pending-id "req-page-pending"
+        pending-file (fs/path root ".swarmforge/dashboard/requests/pending"
+                               (str pending-id ".request"))]
+    (setup-pack! root)
+    (doseq [n (range 12)]
+      (write-chat-turn! root {:id (format "req-page-%02d" n)
+                              :status "done"
+                              :created-at (chat-timestamp n)
+                              :thread-id thread-id
+                              :source "app.lieutenant-chat"
+                              :body (str "body " n "\nsecond line")}))
+    (write-chat-turn! root {:id pending-id
+                            :status "pending"
+                            :created-at (chat-timestamp 12)
+                            :thread-id thread-id
+                            :source "app.lieutenant-chat"
+                            :body "pending body"})
+    (let [first-page (paged-web-state
+                      root
+                      (str "chat_thread_id=" thread-id "&chat_limit=5"))
+          first-ids (mapv :id (:chat first-page))
+          cursor (get-in first-page [:chat_page :next_cursor])]
+      (is (= ["req-page-08" "req-page-09" "req-page-10" "req-page-11"
+              pending-id]
+             first-ids))
+      (is (true? (get-in first-page [:chat_page :has_more])))
+      (is (string? cursor))
+      (is (= 1 (get-in first-page [:chat_page :conversation :pending_count])))
+      (is (= [] (get-in first-page [:chat_page :pending_turns])))
+
+      ;; Newer insertion and deletion of one later turn do not shift the older cursor.
+      (write-chat-turn! root {:id "req-page-newer"
+                              :status "done"
+                              :created-at (chat-timestamp 13)
+                              :thread-id thread-id
+                              :source "app.lieutenant-chat"
+                              :body "newer"})
+      (fs/delete-if-exists
+       (fs/path root ".swarmforge/dashboard/requests/done"
+                "req-page-09.request"))
+      (let [second-page (paged-web-state
+                         root
+                         (str "chat_thread_id=" thread-id "&chat_limit=5"
+                              "&chat_cursor=" cursor))
+            second-ids (mapv :id (:chat second-page))
+            second-cursor (get-in second-page [:chat_page :next_cursor])]
+        (is (= ["req-page-03" "req-page-04" "req-page-05" "req-page-06"
+                "req-page-07"]
+               second-ids))
+        (is (true? (get-in second-page [:chat_page :has_more])))
+        (is (empty? (set/intersection (set first-ids) (set second-ids))))
+        (let [third-page (paged-web-state
+                          root
+                          (str "chat_thread_id=" thread-id "&chat_limit=5"
+                               "&chat_cursor=" second-cursor))
+              third-ids (mapv :id (:chat third-page))]
+          (is (= ["req-page-00" "req-page-01" "req-page-02"] third-ids))
+          (is (false? (get-in third-page [:chat_page :has_more])))
+          (is (nil? (get-in third-page [:chat_page :next_cursor])))
+          (is (= (conj (set (map #(format "req-page-%02d" %) (range 12)))
+                       pending-id)
+                 (set (concat first-ids second-ids third-ids)))))))))
+
+(deftest dashboard-chat-pages-expose-summaries-pending-and-isolate-other-chat
+  ;; Given empty, exact-boundary, suspended pending and non-general histories
+  ;; When a page is requested
+  ;; Then summaries and pending stay discoverable while report/proposal/other chat stay out
+  (let [root (tmp-dir)
+        thread-id "conversation-boundary"
+        empty-thread "conversation-empty"]
+    (setup-pack! root)
+    (doseq [n (range 5)]
+      (write-chat-turn! root {:id (format "req-boundary-%d" n)
+                              :status "done"
+                              :created-at (chat-timestamp n)
+                              :thread-id thread-id
+                              :source "app.lieutenant-chat"}))
+    (write-chat-turn! root {:id "req-boundary-pending"
+                            :status "pending"
+                            :created-at (chat-timestamp 1)
+                            :thread-id "conversation-old-pending"
+                            :source "app.lieutenant-chat"
+                            :body "old pending"})
+    (doseq [n (range 2 7)]
+      (write-chat-turn! root {:id (format "req-old-new-%d" n)
+                              :status "done"
+                              :created-at (chat-timestamp n)
+                              :thread-id "conversation-old-pending"
+                              :source "app.lieutenant-chat"}))
+    (write-chat-turn! root {:id "req-report-only"
+                            :status "done"
+                            :created-at (chat-timestamp 20)
+                            :thread-id "thread-report"
+                            :source "app.completed-card-report"})
+    (write-chat-turn! root {:id "req-proposal-only"
+                            :status "done"
+                            :created-at (chat-timestamp 21)
+                            :thread-id thread-id
+                            :source "app.lieutenant-chat"
+                            :proposal-id "proposal-20261110T110000Z"})
+    (write-chat-turn! root {:id "req-unrelated-source"
+                            :status "done"
+                            :created-at (chat-timestamp 22)
+                            :thread-id "conversation-unrelated"
+                            :source "bridge.other"})
+    (let [boundary (paged-web-state
+                    root
+                    (str "chat_thread_id=" thread-id "&chat_limit=5"))
+          old-pending (paged-web-state
+                       root
+                       "chat_thread_id=conversation-old-pending&chat_limit=2")
+          empty (paged-web-state
+                 root
+                 (str "chat_thread_id=" empty-thread "&chat_limit=5"))
+          summaries (into {} (map (juxt :thread_id identity))
+                          (:chat_conversations boundary))]
+      (is (= 5 (count (:chat boundary))))
+      (is (false? (get-in boundary [:chat_page :has_more])))
+      (is (nil? (get-in boundary [:chat_page :next_cursor])))
+      (is (= 1 (get-in old-pending [:chat_page :conversation :pending_count])))
+      (is (= ["req-boundary-pending"]
+             (mapv :id (get-in old-pending [:chat_page :pending_turns]))))
+      (is (empty? (:chat empty)))
+      (is (false? (get-in empty [:chat_page :has_more])))
+      (is (nil? (get-in empty [:chat_page :conversation :latest])))
+      (is (= #{thread-id "conversation-old-pending"}
+             (set (keys summaries))))
+      (is (not (contains? summaries "thread-report")))
+      (is (not (contains? summaries "conversation-unrelated")))
+      (is (= 14 (count (:chat (web-state root)))))
+      (is (not (contains? (web-state root) :chat_page))))))
+
+(deftest dashboard-chat-pagination-rejects-invalid-parameters-and-history
+  ;; Given malformed limits, cursors, unsupported parameters and corrupt history
+  ;; When a paged state is requested
+  ;; Then it returns bounded errors and foreign cursors cannot cross conversations
+  (let [root (tmp-dir)]
+    (setup-pack! root)
+    (doseq [n (range 6)]
+      (write-chat-turn! root {:id (format "req-error-a-%d" n)
+                              :status "done"
+                              :created-at (chat-timestamp n)
+                              :thread-id "conversation-a"
+                              :source "app.lieutenant-chat"}))
+    (write-chat-turn! root {:id "req-error-b-0"
+                            :status "done"
+                            :created-at (chat-timestamp 10)
+                            :thread-id "conversation-b"
+                            :source "app.lieutenant-chat"})
+    (let [cursor (get-in (paged-web-state root "chat_thread_id=conversation-a&chat_limit=2")
+                         [:chat_page :next_cursor])
+          error! (fn [query]
+                   (let [result (pack-web root false "--test-state-query"
+                                          (str root) query)]
+                     (is (= 1 (:exit result)))
+                     (str (:out result) (:err result))))]
+      (is (str/includes? (error! "chat_thread_id=bad/path&chat_limit=2")
+                         "conversation id is invalid"))
+      (is (str/includes? (error! "chat_thread_id=conversation-a&chat_limit=0")
+                         "between 1 and 100"))
+      (is (str/includes? (error! "chat_thread_id=conversation-a&chat_limit=101")
+                         "between 1 and 100"))
+      (is (str/includes? (error! "chat_limit=2") "conversation id is invalid"))
+      (is (str/includes? (error! "chat_thread_id=conversation-a&chat_before=x")
+                         "Unsupported chat pagination parameter"))
+      (is (str/includes? (error! "chat_thread_id=conversation-a&chat_cursor=not-base64")
+                         "cursor is malformed"))
+      (is (str/includes?
+           (error! (str "chat_thread_id=conversation-b&chat_limit=2&chat_cursor="
+                        cursor))
+           "cursor is invalid"))
+      (write-chat-turn! root {:id "req-corrupt"
+                              :status "done"
+                              :created-at ""
+                              :thread-id "conversation-a"
+                              :source "app.lieutenant-chat"})
+      (is (str/includes? (error! "chat_thread_id=conversation-a&chat_limit=2")
+                         "malformed general turn")))))
+
+(deftest dashboard-chat-pagination-bounds-a-large-history
+  ;; Given a large general conversation
+  ;; When the newest page is requested
+  ;; Then response size stays bounded and processing remains practical
+  (let [root (tmp-dir)
+        thread-id "conversation-large"
+        body (apply str (repeat 200 "x"))]
+    (setup-pack! root)
+    (fs/create-dirs (fs/path root ".swarmforge/dashboard/requests/done"))
+    (doseq [n (range 1000)]
+      (write-chat-turn! root {:id (format "req-large-%04d" n)
+                              :status "done"
+                              :created-at (chat-timestamp n)
+                              :thread-id thread-id
+                              :source "app.lieutenant-chat"
+                              :body body}))
+    (let [started (System/nanoTime)
+          paged-result (pack-web root true "--test-state-query" (str root)
+                                 (str "chat_thread_id=" thread-id
+                                      "&chat_limit=40"))
+          elapsed-ms (/ (- (System/nanoTime) started) 1000000.0)
+          paged (json/parse-string (:out paged-result) true)
+          legacy (pack-web root true "--test-state" (str root))]
+      (is (= 40 (count (:chat paged))))
+      (is (true? (get-in paged [:chat_page :has_more])))
+      (is (< (count (:out paged-result)) 100000))
+      (is (< (count (:out paged-result)) (count (:out legacy))))
+      (is (< elapsed-ms 15000.0)))))
 
 
 
