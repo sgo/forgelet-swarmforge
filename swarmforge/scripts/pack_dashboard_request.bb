@@ -4,15 +4,24 @@
   (:require [babashka.fs :as fs]
             [clojure.edn :as edn]
             [clojure.java.shell :refer [sh]]
-            [clojure.string :as str]))
+            [clojure.string :as str])
+  (:import [java.nio.channels FileChannel]
+           [java.nio.file OpenOption StandardOpenOption]))
 
 (def usage-text
   (str "Usage:\n"
        "  pack_dashboard_request.sh answer <id> <answer-file>\n"
-       "                                  [--approve-route-card <proposal-id>]\n"
+       "                                  [--approve-route-card <proposal-id>\n"
+       "                                   | --without-route-card-action]\n"
        "  pack_dashboard_request.sh clarify <question-file>\n"
        "  pack_dashboard_request.sh create --root <dir> --body <text>\n"
-       "  pack_dashboard_request.sh list --root <dir>\n"))
+       "  pack_dashboard_request.sh list --root <dir>\n"
+       "\n"
+       "An answer that names a pending local route-card proposal must choose\n"
+       "exactly one structured action with --approve-route-card. Use\n"
+       "--without-route-card-action only when the response merely discusses the\n"
+       "proposal and must not offer approval. Prose never selects or attaches an\n"
+       "action automatically.\n"))
 
 (defn usage []
   (binding [*out* *err*]
@@ -76,6 +85,9 @@
 (defn parse-flag [args key]
   (let [tail (drop-while #(not= key %) args)]
     (second tail)))
+
+(defn flag? [args key]
+  (boolean (some #{key} args)))
 
 (defn timestamp []
   (.format java.time.format.DateTimeFormatter/ISO_INSTANT
@@ -146,7 +158,14 @@
       (subs text 0 (min maximum (count text))))))
 
 (defn proposal-status [proposal]
-  (let [status (some-> (:status proposal) name str/lower-case)]
+  (let [raw (:status proposal)
+        status (cond
+                 (nil? raw) nil
+                 (keyword? raw) (name raw)
+                 (string? raw) raw
+                 (symbol? raw) (name raw)
+                 :else "invalid")
+        status (some-> status str/lower-case)]
     (cond
       (or (not (str/blank? (str (or (:consumed-at proposal) ""))))
           (= status "consumed"))
@@ -174,6 +193,39 @@
                      (fs/directory? (fs/path forge ".swarmforge" "route-proposals")))
             forge)))))
 
+(def standalone-route-proposal-id-re
+  #"(?<![A-Za-z0-9._~:/-])proposal-[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}(?![A-Za-z0-9._~:/-])")
+
+(def max-route-candidates 20)
+
+(defn response-route-proposal-ids [text]
+  (vec (distinct (re-seq standalone-route-proposal-id-re (or text "")))))
+
+(defn route-proposal-descriptor [forge proposal-id proposal]
+  (try
+    (let [project (fs/canonicalize
+                   (fs/path (str (or (:project proposal) ""))))
+          expected-parent (fs/canonicalize (fs/path forge "projects"))
+          family (action-text (fs/file-name forge) 128)
+          project-name (action-text (fs/file-name project) 128)
+          task-name (action-text (:name proposal) 256)
+          label (action-text (str "Approve " (or task-name "")) 80)]
+      (when (and (= expected-parent (fs/parent project))
+                 (fs/directory? project)
+                 family
+                 (re-matches family-name-re family)
+                 project-name
+                 (re-matches project-name-re project-name)
+                 task-name)
+        {:type route-card-action-type
+         :proposal_id proposal-id
+         :family family
+         :project project-name
+         :task_name task-name
+         :label label
+         :status "pending"}))
+    (catch Exception _ nil)))
+
 (defn safe-route-proposal! [root proposal-id]
   (let [proposal-id (str (or proposal-id ""))]
     (when-not (re-matches route-proposal-id-re proposal-id)
@@ -195,34 +247,29 @@
                      (str "Route-card proposal is " (proposal-status proposal)
                           " and cannot be offered for approval.")
                      "Route-card proposal is malformed.")))
-        (let [project (try
-                        (fs/canonicalize
-                         (fs/path (str (or (:project proposal) ""))))
-                        (catch Exception _
-                          (exit! 1 "Route-card proposal ownership is invalid.")))
-              expected-parent (try
-                                (fs/canonicalize (fs/path forge "projects"))
-                                (catch Exception _ nil))
-              family (action-text (fs/file-name forge) 128)
-              project-name (action-text (fs/file-name project) 128)
-              task-name (action-text (:name proposal) 256)
-              label (action-text (str "Approve " (or task-name "")) 80)]
-          (when-not (and expected-parent
-                         (= expected-parent (fs/parent project))
-                         (fs/directory? project)
-                         family
-                         (re-matches family-name-re family)
-                         project-name
-                         (re-matches project-name-re project-name)
-                         task-name)
-            (exit! 1 "Route-card proposal ownership is invalid."))
-          {:type route-card-action-type
-           :proposal_id proposal-id
-           :family family
-           :project project-name
-           :task_name task-name
-           :label label
-           :status "pending"})))))
+        (or (route-proposal-descriptor forge proposal-id proposal)
+            (exit! 1 "Route-card proposal ownership is invalid."))))))
+
+(defn pending-route-proposal-candidates [root text]
+  (if-let [forge (containing-route-root root)]
+    (->> (response-route-proposal-ids text)
+         (keep (fn [proposal-id]
+                 (let [file (fs/path forge ".swarmforge" "route-proposals"
+                                     (str proposal-id ".edn"))]
+                   (when (fs/regular-file? file)
+                     (let [proposal (try
+                                      (edn/read-string (slurp (str file)))
+                                      (catch Exception _ nil))]
+                       (when (and (map? proposal)
+                                  (= proposal-id (:id proposal))
+                                  (= "pending" (proposal-status proposal)))
+                         (when-let [action
+                                    (route-proposal-descriptor
+                                     forge proposal-id proposal)]
+                           {:proposal_id proposal-id
+                            :task_name (action-text (:task_name action) 120)})))))))
+         vec)
+    []))
 
 (defn render-request
   [{:strs [id status body response created_at updated_at role
@@ -370,6 +417,66 @@
     (when (fs/regular-file? file)
       file)))
 
+(defn with-request-lock [root f]
+  (let [path (fs/path root ".swarmforge" "dashboard" "requests" "requests.lock")
+        options (into-array OpenOption [StandardOpenOption/CREATE
+                                        StandardOpenOption/WRITE])]
+    (fs/create-dirs (fs/parent path))
+    (with-open [channel (FileChannel/open path options)]
+      (.lock channel)
+      (f))))
+
+(defn response-proposal-action!
+  [text proposal-id]
+  (when-not (some #{proposal-id} (response-route-proposal-ids text))
+    (exit! 1 (str "Route-card action " proposal-id
+                  " does not appear in the exact response.")))
+  true)
+
+(defn route-action-challenge!
+  [id candidates]
+  (let [shown (take max-route-candidates candidates)
+        choices (str/join
+                 "\n"
+                 (map (fn [{:keys [proposal_id task_name]}]
+                        (str "  pack_dashboard_request.sh answer " id
+                             " <answer-file> --approve-route-card "
+                             proposal_id "  ; " task_name))
+                      shown))
+        omitted (- (count candidates) (count shown))]
+    (exit!
+     1
+     (str "Route-card action required before answering " id ".\n"
+          "The response names pending local route-card proposal(s):\n"
+          choices
+          (when (pos? omitted)
+            (str "\n  ... and " omitted " more; reduce the response to the "
+                 "proposal you mean to offer."))
+          "\nChoose exactly one proposal with --approve-route-card.\n"
+          "If the response only discusses a proposal and must not offer "
+          "approval, rerun with:\n"
+          "  pack_dashboard_request.sh answer " id
+          " <answer-file> --without-route-card-action"))))
+
+(defn request-headers [entry text updated-at action]
+  {"id" (:id entry)
+   "status" "done"
+   "role" (:role entry)
+   "body" (:body entry)
+   "response" text
+   "created_at" (:created_at entry)
+   "updated_at" updated-at
+   "thread_id" (:thread_id entry)
+   "source" (:source entry)
+   "proposal_id" (:proposal_id entry)
+   "action_type" (:type action)
+   "action_proposal_id" (:proposal_id action)
+   "action_family" (:family action)
+   "action_project" (:project action)
+   "action_task_name" (:task_name action)
+   "action_label" (:label action)
+   "action_status" (:status action)})
+
 (defn complete-pending-request! [root id src answer-file action]
   (let [text (str/trim (slurp (str answer-file)))
         now (timestamp)
@@ -378,55 +485,95 @@
     (fs/create-dirs (fs/parent dest))
     (let [tmp (fs/create-temp-file {:dir (fs/parent dest)
                                     :prefix ".answered-request."})
-          headers {"id" (:id entry)
-                   "status" "done"
-                   "role" (:role entry)
-                   "body" (:body entry)
-                   "response" text
-                   "created_at" (:created_at entry)
-                   "updated_at" now
-                   "thread_id" (:thread_id entry)
-                   "source" (:source entry)
-                   "proposal_id" (:proposal_id entry)
-                   "action_type" (:type action)
-                   "action_proposal_id" (:proposal_id action)
-                   "action_family" (:family action)
-                   "action_project" (:project action)
-                   "action_task_name" (:task_name action)
-                   "action_label" (:label action)
-                   "action_status" (:status action)}]
+          headers (request-headers entry text now action)]
       (spit (str tmp) (render-request headers))
       (fs/move tmp dest {:replace-existing true :atomic-move true})
       (fs/delete-if-exists src))
     (println "ANSWERED:" id)))
 
-(defn answer-request! [root id answer-file approve-route-card]
+(defn backfill-route-action! [done entry text action]
+  (let [tmp (fs/create-temp-file {:dir (fs/parent done)
+                                  :prefix ".action-backfill."})
+        headers (request-headers entry text (:updated_at entry) action)]
+    (spit (str tmp) (render-request headers))
+    (fs/move tmp done {:replace-existing true :atomic-move true})
+    (println "ANSWERED:" (:id entry))))
+
+(defn answer-pending! [root id answer-file approve-route-card without-route-card-action]
+  (let [src (find-pending root id)
+        text (str/trim (slurp (str answer-file)))
+        action (when-not (str/blank? approve-route-card)
+                 (safe-route-proposal! root approve-route-card))
+        _ (when action
+            (response-proposal-action! text (:proposal_id action)))
+        candidates (when (and (nil? action)
+                              (not without-route-card-action))
+                     (pending-route-proposal-candidates root text))]
+    (when (seq candidates)
+      (route-action-challenge! id candidates))
+    (complete-pending-request! root id src answer-file action)))
+
+(defn answer-done! [root id done answer-file approve-route-card
+                    without-route-card-action]
+  (let [entry (request-entry done)
+        stored-response (:response entry)
+        text (str/trim (slurp (str answer-file)))
+        stored-action (first (:actions entry))]
+    (when-not (= text stored-response)
+      (exit! 1 (str "Request already answered with a different response: " id)))
+    (cond
+      (and (not (str/blank? approve-route-card)) stored-action)
+      (if (= approve-route-card (:proposal_id stored-action))
+        (println "ANSWERED:" id)
+        (exit! 1 (str "Request already answered with a different action: " id)))
+
+      (not (str/blank? approve-route-card))
+      (let [action (safe-route-proposal! root approve-route-card)]
+        (response-proposal-action! stored-response (:proposal_id action))
+        (backfill-route-action! done entry stored-response action))
+
+      (and without-route-card-action stored-action)
+      (exit! 1 (str "Request already answered with a route-card action: " id))
+
+      :else
+      (println "ANSWERED:" id))))
+
+(defn answer-request!
+  [root id answer-file approve-route-card without-route-card-action]
   (when (str/blank? id)
     (exit! 1 "Missing request id"))
   (when-not (fs/regular-file? answer-file)
     (exit! 1 (str "Answer file not found: " answer-file)))
-  (if-let [src (find-pending root id)]
-    (let [action (when-not (str/blank? approve-route-card)
-                   (safe-route-proposal! root approve-route-card))]
-      (complete-pending-request! root id src answer-file action))
-    (if-let [done (find-done-request root id)]
-      (let [entry (request-entry done)
-            text (str/trim (slurp (str answer-file)))
-            stored-action (first (:actions entry))]
-        (when-not (= text (:response entry))
-          (exit! 1 (str "Request already answered with a different response: " id)))
-        (when (and (not (str/blank? approve-route-card))
-                   (not= approve-route-card (:proposal_id stored-action)))
-          (exit! 1 (str "Request already answered with a different action: " id)))
-        (println "ANSWERED:" id))
-      (if (find-done-clarification root id)
+  (when (and (not (str/blank? approve-route-card))
+             without-route-card-action)
+    (exit! 1 "Choose either --approve-route-card or --without-route-card-action."))
+  (with-request-lock
+    root
+    (fn []
+      (cond
+        (find-pending root id)
+        (answer-pending! root id answer-file approve-route-card
+                         without-route-card-action)
+
+        (find-done-request root id)
+        (answer-done! root id (find-done-request root id) answer-file
+                      approve-route-card without-route-card-action)
+
+        (find-done-clarification root id)
         (println "ANSWERED:" id)
+
+        :else
         (exit! 1 (str "Unknown pending request: " id))))))
 
 (defn -main [& args]
   (case (first args)
-    "answer" (answer-request! (project-root) (second args) (nth args 2 nil)
-                              (parse-flag args "--approve-route-card"))
+    "answer" (let [approve-flag? (flag? args "--approve-route-card")
+                   approve-id (parse-flag args "--approve-route-card")]
+               (when (and approve-flag? (str/blank? (or approve-id "")))
+                 (exit! 1 "Missing route-card proposal id."))
+               (answer-request! (project-root) (second args) (nth args 2 nil)
+                                approve-id
+                                (flag? args "--without-route-card-action")))
     "clarify" (clarify! (second args))
     "create" (let [root (or (parse-flag args "--root") (project-root))
                    body (or (parse-flag args "--body") "")]

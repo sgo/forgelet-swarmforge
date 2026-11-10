@@ -546,15 +546,30 @@ conversation metadata in the done record, so thread, source and proposal
 projection survive the pending-to-done move. Identical re-answers are
 idempotent; a different answer cannot overwrite the completed request.
 
-An answer may also attach a route-card approval control with
-`pack_dashboard_request.sh answer <id> <file> --approve-route-card <proposal-id>`.
+### Route-card answers and actions
+
+Before `pack_dashboard_request.sh answer <id> <file>` moves a pending request
+to done, it scans the exact response for standalone proposal ids. If the
+response names one or more pending route-card proposals owned by this forge, the
+answer is refused until the caller chooses a structured action with
+`--approve-route-card <proposal-id>`. The selected id must be one of those exact
+response tokens. When several pending proposals appear, the action selects
+exactly one; the tool does not choose from prose or attach an action silently.
+
+For a response that only discusses a proposal and must not offer approval,
+`--without-route-card-action` records that text-only intent explicitly. Unknown,
+malformed, consumed, superseded and other-Family proposal ids do not trigger the
+guard. A refused answer leaves its pending request unchanged.
+
 The proposal must be pending and owned by the current Family/project. The done
 record stores only a bounded descriptor containing the proposal id, Family,
 project, task name, label and status. `/api/state` exposes it as an `actions`
 array and re-reads the proposal on every state response, so a proposal later
 consumed or superseded is reported with `available: false` rather than offered
-for approval again. The answer tool records metadata only; it never approves or
-executes the action.
+for approval again. A legacy completed text-only response may gain its action
+once by rerunning the identical answer with `--approve-route-card`; that
+backfill preserves its response, timestamps and conversation metadata. The
+answer tool records metadata only; it never approves or executes the action.
 
 General Lieutenant history can be read as a bounded cursor page:
 

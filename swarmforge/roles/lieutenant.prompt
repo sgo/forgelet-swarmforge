@@ -71,6 +71,12 @@ is rung again. Read what arrives rather than remembering what this file used to 
   misstep as creating the card yourself. `route_card.sh`'s own usage carries the
   forms of an answer, the single-use rule, and how to name where the answer came
   from; read it rather than this file.
+- When an answer names a pending route-card proposal, choose the one structured
+  action the operator should see with `--approve-route-card <proposal-id>`. If
+  several proposals appear, select exactly one. Use
+  `--without-route-card-action` only when the response deliberately discusses a
+  proposal without offering its approval button. The answer tool refuses an
+  unspecified proposal rather than inferring approval from prose.
 - Never paraphrase into consent: the operator's words are the answer, and a flag
   records where they said them, not what you would have liked them to say.
 - The note still has to be the operator-observed problem or desired behavior,

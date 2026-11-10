@@ -1929,6 +1929,266 @@
       (is (zero? (:exit result)) (:err result))
       (second (re-find #"PROPOSED: (\S+)" (:out result))))))
 
+(defn write-pending-chat!
+  [root {:keys [id body thread-id source proposal-id created-at]}]
+  (let [file (fs/path root ".swarmforge/dashboard/requests/pending"
+                      (str id ".request"))]
+    (write-file file
+                (str "id: " id "\n"
+                     "status: pending\n"
+                     "role: lieutenant\n"
+                     (when thread-id (str "thread_id: " thread-id "\n"))
+                     (when source (str "source: " source "\n"))
+                     (when proposal-id (str "proposal_id: " proposal-id "\n"))
+                     "created_at: " (or created-at "2026-11-10T20:30:00Z") "\n\n"
+                     (or body "Operator request body.\n")))
+    file))
+
+(deftest answering-challenges-an-unspecified-pending-route-proposal
+  ;; Given a response that names one pending local route-card proposal
+  ;; When it omits the structured action
+  ;; Then the answer is challenged without moving or echoing sensitive request data
+  (let [forge (tmp-dir)
+        answer (fs/path forge "tmp" "answer.txt")
+        request-id "req-route-guard"
+        thread-id "conversation-route-guard"
+        source "app.lieutenant-chat"
+        secret-path "/Users/operator/private/project"
+        token "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+        raw-body "UNRELATED_DASHBOARD_BODY"
+        raw-note "PRIVATE_PROPOSAL_NOTE"]
+    (setup-pack! forge ["specifier"])
+    (fs/create-dirs (fs/path forge "projects" "alpha-app"))
+    (let [proposal-id (route-proposal! forge "alpha-app" "next-card")
+          proposal-file (fs/path forge ".swarmforge" "route-proposals"
+                                 (str proposal-id ".edn"))
+          proposal (edn/read-string (slurp (str proposal-file)))
+          _ (write-file proposal-file (pr-str (assoc proposal :note raw-note)))
+          pending (write-pending-chat!
+                   forge
+                   {:id request-id
+                    :body (str raw-body "\n")
+                    :thread-id thread-id
+                    :source source})
+          before (slurp (str pending))
+          _ (write-file
+             answer
+             (str "Proposed `" proposal-id "` for next-card.\n"
+                  "Reply **approve**.\n"
+                  "Debug " secret-path " " token "\n"))
+          challenged (run {:dir forge :ok? false}
+                          (script "pack_dashboard_request.sh")
+                          "answer" request-id (str answer))
+          diagnostic (str (:err challenged) (:out challenged))
+          done (fs/path forge ".swarmforge/dashboard/requests/done"
+                         (str request-id ".request"))]
+      (is (not (zero? (:exit challenged))))
+      (is (str/includes? diagnostic proposal-id))
+      (is (str/includes? diagnostic "next-card"))
+      (is (str/includes? diagnostic
+                         (str "--approve-route-card " proposal-id)))
+      (is (str/includes? diagnostic "--without-route-card-action"))
+      (is (< (count diagnostic) 2000))
+      (is (not (str/includes? diagnostic (str forge))))
+      (is (not (str/includes? diagnostic secret-path)))
+      (is (not (str/includes? diagnostic token)))
+      (is (not (str/includes? diagnostic raw-body)))
+      (is (not (str/includes? diagnostic raw-note)))
+      (is (= before (slurp (str pending))))
+      (is (not (fs/exists? done)))
+      (let [allowed (run {:dir forge}
+                         (script "pack_dashboard_request.sh")
+                         "answer" request-id (str answer)
+                         "--without-route-card-action")
+            stored (slurp (str done))
+            row (get (into {} (map (juxt :id identity)
+                                   (:chat (web-state forge))))
+                     request-id)]
+        (is (zero? (:exit allowed)) (:err allowed))
+        (is (not (str/includes? stored "action: approve-route-card")))
+        (is (= thread-id (:thread_id row)))
+        (is (= source (:source row)))
+        (is (= raw-body (str/trim (:body row))))
+        (is (not (contains? row :actions)))))))
+
+(deftest answering-multiple-route-proposals-requires-one-explicit-choice
+  ;; Given a response naming two pending local proposals
+  ;; When no action or one of them is selected
+  ;; Then only the explicit choice can complete the answer
+  (let [forge (tmp-dir)
+        answer (fs/path forge "tmp" "answer.txt")]
+    (setup-pack! forge ["specifier"])
+    (fs/create-dirs (fs/path forge "projects" "alpha-app"))
+    (let [first-id (route-proposal! forge "alpha-app" "first-card")
+          second-id (route-proposal! forge "alpha-app" "second-card")
+          text (str "Choose between `" first-id "` and `" second-id "`.\n")
+          _ (write-file answer text)]
+      (write-pending-chat! forge {:id "req-multiple-route-proposals"})
+      (let [challenged
+            (run {:dir forge :ok? false}
+                 (script "pack_dashboard_request.sh")
+                 "answer" "req-multiple-route-proposals" (str answer))
+            diagnostic (str (:err challenged) (:out challenged))]
+        (is (not (zero? (:exit challenged))))
+        (is (str/includes? diagnostic first-id))
+        (is (str/includes? diagnostic second-id))
+        (is (fs/regular-file?
+             (fs/path forge ".swarmforge/dashboard/requests/pending"
+                      "req-multiple-route-proposals.request"))))
+      (write-pending-chat! forge {:id "req-selected-route-proposal"})
+      (let [answered
+            (run {:dir forge}
+                 (script "pack_dashboard_request.sh")
+                 "answer" "req-selected-route-proposal" (str answer)
+                 "--approve-route-card" first-id)
+            row (get (into {} (map (juxt :id identity)
+                                   (:chat (web-state forge))))
+                     "req-selected-route-proposal")]
+        (is (zero? (:exit answered)) (:err answered))
+        (is (= first-id (get-in row [:actions 0 :proposal_id])))))))
+
+(deftest answering-ignores-non-pending-malformed-and-foreign-proposal-tokens
+  ;; Given tokens for consumed, superseded, malformed, unknown and other-Family proposals
+  ;; When none is a pending local route-card proposal
+  ;; Then the response answers normally without attaching an action
+  (let [forge (tmp-dir)
+        other-forge (tmp-dir)
+        answer (fs/path forge "tmp" "answer.txt")
+        malformed-id "proposal-20261110T203500Z"]
+    (setup-pack! forge ["specifier"])
+    (setup-pack! other-forge ["specifier"])
+    (doseq [root [forge other-forge]]
+      (fs/create-dirs (fs/path root "projects" "alpha-app")))
+    (let [consumed-id (route-proposal! forge "alpha-app" "consumed-card")
+          superseded-id (route-proposal! forge "alpha-app" "superseded-card")
+          foreign-id (route-proposal! other-forge "alpha-app" "foreign-card")
+          consumed-file (fs/path forge ".swarmforge/route-proposals"
+                                 (str consumed-id ".edn"))
+          superseded-file (fs/path forge ".swarmforge/route-proposals"
+                                   (str superseded-id ".edn"))
+          consumed (edn/read-string (slurp (str consumed-file)))
+          superseded (edn/read-string (slurp (str superseded-file)))]
+      (write-file consumed-file
+                  (pr-str (assoc consumed :status :consumed
+                                 :consumed-at "2026-11-10T20:35:01Z")))
+      (write-file superseded-file
+                  (pr-str (assoc superseded :status :superseded
+                                 :superseded-at "2026-11-10T20:35:02Z")))
+      (write-file (fs/path forge ".swarmforge/route-proposals"
+                            (str malformed-id ".edn"))
+                  "not an edn map\n")
+      (write-file
+       answer
+       (str "Earlier " consumed-id ", " superseded-id ", " foreign-id
+            ", " malformed-id ", and proposal-20261110T203599Z.\n"
+            "Malformed proposal-../escape is only prose.\n"))
+      (write-pending-chat! forge {:id "req-ignore-route-tokens"})
+      (let [answered
+            (run {:dir forge}
+                 (script "pack_dashboard_request.sh")
+                 "answer" "req-ignore-route-tokens" (str answer))
+            row (get (into {} (map (juxt :id identity)
+                                   (:chat (web-state forge))))
+                     "req-ignore-route-tokens")]
+        (is (zero? (:exit answered)) (:err answered))
+        (is (= "done" (:status row)))
+        (is (not (contains? row :actions)))))))
+
+(deftest answering-refuses-an-action-absent-from-the-response
+  ;; Given a valid pending proposal that the response does not name
+  ;; When the caller supplies its action
+  ;; Then the answer remains pending and no action metadata is written
+  (let [forge (tmp-dir)
+        answer (fs/path forge "tmp" "answer.txt")]
+    (setup-pack! forge ["specifier"])
+    (fs/create-dirs (fs/path forge "projects" "alpha-app"))
+    (let [proposal-id (route-proposal! forge "alpha-app" "next-card")
+          pending (write-pending-chat! forge {:id "req-action-not-in-response"})]
+      (write-file answer "A response that discusses no proposal id.\n")
+      (let [refused
+            (run {:dir forge :ok? false}
+                 (script "pack_dashboard_request.sh")
+                 "answer" "req-action-not-in-response" (str answer)
+                 "--approve-route-card" proposal-id)
+            diagnostic (str (:err refused) (:out refused))]
+        (is (not (zero? (:exit refused))))
+        (is (str/includes? diagnostic "does not appear in the exact response"))
+        (is (fs/regular-file? pending))
+        (is (not (fs/exists?
+                  (fs/path forge ".swarmforge/dashboard/requests/done"
+                           "req-action-not-in-response.request"))))
+        (let [missing-value
+              (run {:dir forge :ok? false}
+                   (script "pack_dashboard_request.sh")
+                   "answer" "req-action-not-in-response" (str answer)
+                   "--approve-route-card")]
+          (is (not (zero? (:exit missing-value))))
+          (is (str/includes? (str (:err missing-value) (:out missing-value))
+                             "Missing route-card proposal id"))
+          (is (fs/regular-file? pending)))))))
+
+(deftest completed-text-only-answer-can-backfill-one-route-action
+  ;; Given a completed response with no action and pending local proposal
+  ;; When the action is backfilled and retried
+  ;; Then only the action is added, original content stays fixed, and the retry is idempotent
+  (let [forge (tmp-dir)
+        answer (fs/path forge "tmp" "answer.txt")]
+    (setup-pack! forge ["specifier"])
+    (fs/create-dirs (fs/path forge "projects" "alpha-app"))
+    (let [proposal-id (route-proposal! forge "alpha-app" "next-card")
+          text (str "Proposed `" proposal-id "`; reply approve.\n")
+          _ (write-file answer text)
+          request-id "req-legacy-text-only"]
+      (write-pending-chat!
+       forge
+       {:id request-id
+        :thread-id "conversation-legacy-action"
+        :source "app.lieutenant-chat"
+        :proposal-id "proposal-20261110T202000Z"
+        :body "Original body\nSecond line\n"})
+      (let [completed (run {:dir forge}
+                           (script "pack_dashboard_request.sh")
+                           "answer" request-id (str answer)
+                           "--without-route-card-action")
+            done (fs/path forge ".swarmforge/dashboard/requests/done"
+                           (str request-id ".request"))
+            before (slurp (str done))
+            header (fn [name]
+                     (second (re-find (re-pattern (str "(?m)^" name ": (.+)$"))
+                                      before)))
+            original-timestamps (select-keys
+                                 {"created_at" (header "created_at")
+                                  "updated_at" (header "updated_at")}
+                                 ["created_at" "updated_at"])
+            backfilled (run {:dir forge}
+                            (script "pack_dashboard_request.sh")
+                            "answer" request-id (str answer)
+                            "--approve-route-card" proposal-id)
+            after (slurp (str done))
+            row (get (into {} (map (juxt :id identity)
+                                   (:chat (web-state forge))))
+                     request-id)]
+        (is (zero? (:exit completed)) (:err completed))
+        (is (not (str/includes? before "action: approve-route-card")))
+        (is (zero? (:exit backfilled)) (:err backfilled))
+        (is (str/includes? after (str "action: approve-route-card\n"
+                                      "action_proposal_id: " proposal-id "\n")))
+        (is (= (header "created_at") (:created_at row)))
+        (is (str/includes? after (str "updated_at: " (header "updated_at") "\n")))
+        (is (= original-timestamps
+               {"created_at" (second (re-find #"(?m)^created_at: (.+)$" after))
+                "updated_at" (second (re-find #"(?m)^updated_at: (.+)$" after))}))
+        (is (= "conversation-legacy-action" (:thread_id row)))
+        (is (= "app.lieutenant-chat" (:source row)))
+        (is (= "proposal-20261110T202000Z" (:proposal_id row)))
+        (is (= (str/trim text) (:response row)))
+        (let [retry (run {:dir forge}
+                         (script "pack_dashboard_request.sh")
+                         "answer" request-id (str answer)
+                         "--approve-route-card" proposal-id)]
+          (is (zero? (:exit retry)) (:err retry))
+          (is (= after (slurp (str done)))))))))
+
 (deftest answered-chat-projects-a-route-card-approval-action
   ;; Given a pending route-card proposal and a metadata-bearing chat request
   ;; When the answer attaches its approval action
@@ -1943,8 +2203,9 @@
     (fs/create-dirs (fs/path forge "projects" "alpha-app"))
     (write-file (fs/path forge ".swarmforge/tmux-socket")
                 (str (fs/path forge "tmux.sock") "\n"))
-    (write-file answer "I proposed the next card.\n")
     (let [proposal-id (route-proposal! forge "alpha-app" "next-card")
+          _ (write-file answer (str "I proposed `" proposal-id
+                                    "` for the next card.\n"))
           _ (pack-web-env forge {"SWARMFORGE_TMUX_STUB" argv-file}
                           "--test-post-chat-json" (str forge)
                           (json/generate-string
