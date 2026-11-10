@@ -820,7 +820,121 @@
     (when (and value (re-matches chat-proposal-id-re value))
       value)))
 
-(defn parse-chat [path]
+(def route-card-action-type "approve-route-card")
+(def route-action-family-re #"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+(def route-absolute-path-re
+  #"(?<![A-Za-z0-9+.-])/(?:Users|home|private|var|tmp|opt|Volumes|srv)/[^\s)\]},>]+")
+
+(defn route-action-text [value maximum]
+  (let [text (-> (str (or value ""))
+                 (str/replace #"[\p{Cntrl}]" " ")
+                 (str/replace #"\s+" " ")
+                 (str/replace route-absolute-path-re "[redacted-path]")
+                 (str/replace chat-token-re "[redacted-token]")
+                 str/trim)]
+    (when-not (str/blank? text)
+      (subs text 0 (min maximum (count text))))))
+
+(defn route-proposal-status [proposal]
+  (let [status (some-> (:status proposal) name str/lower-case)]
+    (cond
+      (or (not (str/blank? (str (or (:consumed-at proposal) ""))))
+          (= status "consumed"))
+      "consumed"
+
+      (or (not (str/blank? (str (or (:superseded-at proposal) ""))))
+          (not (str/blank? (str (or (:superseded-by proposal) ""))))
+          (= status "superseded"))
+      "superseded"
+
+      (or (nil? status) (= status "pending"))
+      "pending"
+
+      :else "malformed")))
+
+(defn chat-route-root [root]
+  (when root
+    (let [root (try
+                 (fs/canonicalize (fs/path root))
+                 (catch Exception _ nil))]
+      (when root
+        (or (when (fs/directory? (fs/path root ".swarmforge" "route-proposals"))
+              root)
+            (let [projects (fs/parent root)
+                  forge (when projects (fs/parent projects))]
+              (when (and projects
+                         forge
+                         (= "projects" (str (fs/file-name projects)))
+                         (fs/directory? (fs/path forge ".swarmforge"
+                                                "route-proposals")))
+                forge)))))))
+
+(defn resolve-chat-action [root action]
+  (let [forge (chat-route-root root)
+        proposal-id (:proposal_id action)
+        file (when (and forge proposal-id)
+               (fs/path forge ".swarmforge" "route-proposals"
+                        (str proposal-id ".edn")))
+        proposal (when (and file (fs/regular-file? file))
+                   (try
+                     (edn/read-string (slurp (str file)))
+                     (catch Exception _ nil)))
+        project (when (and forge proposal (string? (:project proposal)))
+                  (try
+                    (fs/canonicalize (fs/path (:project proposal)))
+                    (catch Exception _ nil)))
+        expected-parent (when forge
+                          (try
+                            (fs/canonicalize (fs/path forge "projects"))
+                            (catch Exception _ nil)))
+        family (when forge (route-action-text (fs/file-name forge) 128))
+        project-name (when project (route-action-text (fs/file-name project) 128))
+        status (when (and (map? proposal)
+                          (= proposal-id (:id proposal))
+                          expected-parent
+                          (= expected-parent (fs/parent project))
+                          (= family (:family action))
+                          (= project-name (:project action)))
+                 (route-proposal-status proposal))
+        available? (= "pending" status)]
+    (cond-> action
+      (and available? (route-action-text (:name proposal) 256))
+      (assoc :task_name (route-action-text (:name proposal) 256)
+             :label (route-action-text (str "Approve " (:name proposal)) 80))
+
+      true
+      (assoc :status (or status "unavailable")
+             :available available?))))
+
+(defn chat-action [root headers]
+  (let [stored-status (some-> (get headers "action_status")
+                              str/trim str/lower-case)
+        stored-status (when (contains? #{"pending" "consumed" "superseded"
+                                          "unavailable"}
+                                       stored-status)
+                        stored-status)
+        proposal-id (chat-proposal-id {"proposal_id" (get headers "action_proposal_id")})
+        family (let [value (some-> (get headers "action_family") str/trim not-empty)]
+                 (when (and value (re-matches route-action-family-re value)) value))
+        project (let [value (some-> (get headers "action_project") str/trim not-empty)]
+                  (when (and value (re-matches route-action-family-re value)) value))
+        task-name (route-action-text (get headers "action_task_name") 256)
+        label (route-action-text (get headers "action_label") 80)
+        action (when (and (= route-card-action-type (get headers "action"))
+                          stored-status proposal-id family project task-name label)
+                 {:type route-card-action-type
+                  :proposal_id proposal-id
+                  :family family
+                  :project project
+                  :task_name task-name
+                  :label label
+                  :status stored-status})]
+    (when action
+      (resolve-chat-action root action))))
+
+(defn parse-chat
+  ([path] (parse-chat nil path))
+  ([root path]
   (let [raw (slurp (str path))
         [header body] (str/split raw #"\n\n" 2)
         headers (into {}
@@ -830,7 +944,8 @@
                         [k v]))
         proposal-id (chat-proposal-id headers)
         thread-id (chat-thread-id headers)
-        source (chat-source headers)]
+        source (chat-source headers)
+        action (chat-action root headers)]
     (cond-> {:id (get headers "id")
              :status (get headers "status")
              :body (or body "")
@@ -838,11 +953,12 @@
              :created_at (get headers "created_at")}
       proposal-id (assoc :proposal_id proposal-id)
       thread-id (assoc :thread_id thread-id)
-      source (assoc :source source))))
+      source (assoc :source source)
+      action (assoc :actions [action])))))
 
 (defn list-chat [root]
-  (vec (concat (map parse-chat (chat-files (chat-pending-dir root)))
-               (map parse-chat (chat-files (chat-done-dir root))))))
+  (vec (concat (map #(parse-chat root %) (chat-files (chat-pending-dir root)))
+               (map #(parse-chat root %) (chat-files (chat-done-dir root))))))
 
 (defn clar-pending-dir [root]
   (fs/path root ".swarmforge" "dashboard" "clarifications" "pending"))

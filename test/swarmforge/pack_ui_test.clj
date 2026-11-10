@@ -1882,7 +1882,145 @@
       (is (= "proposal-20261110T100110Z" (:proposal_id proposal)))
       (is (= "app.lieutenant-chat" (:source proposal)))
       (is (= "done" (:status report)))
-      (is (= "done" (:status proposal))))))
+      (is (= "done" (:status proposal)))
+      (is (not (contains? report :actions)))
+      (is (not (contains? proposal :actions))))))
+
+(defn route-proposal!
+  [forge project name]
+  (let [project-root (fs/path forge "projects" project)
+        note (fs/path forge "tmp" (str name ".md"))]
+    (write-file (fs/path project-root ".swarmforge" "single-agent") "agent\n")
+    (write-file note (str "# " name "\n\n" name " card.\n"))
+    (let [result (run {:dir forge}
+                      (script "route_card.sh")
+                      "propose" (str project-root) name (str note)
+                      "--forge-root" (str forge)
+                      "--operator-said" "yes")]
+      (is (zero? (:exit result)) (:err result))
+      (second (re-find #"PROPOSED: (\S+)" (:out result))))))
+
+(deftest answered-chat-projects-a-route-card-approval-action
+  ;; Given a pending route-card proposal and a metadata-bearing chat request
+  ;; When the answer attaches its approval action
+  ;; Then state exposes one safe descriptor and later reflects consumed status
+  (let [forge (tmp-dir)
+        argv-file (str (fs/path forge "tmux.argv"))
+        answer (fs/path forge "tmp" "answer.txt")
+        request-id "req-route-action"
+        thread-id "conversation-route-action"
+        source "app.lieutenant-chat"]
+    (setup-pack! forge ["specifier"])
+    (fs/create-dirs (fs/path forge "projects" "alpha-app"))
+    (write-file (fs/path forge ".swarmforge/tmux-socket")
+                (str (fs/path forge "tmux.sock") "\n"))
+    (write-file answer "I proposed the next card.\n")
+    (let [proposal-id (route-proposal! forge "alpha-app" "next-card")
+          _ (pack-web-env forge {"SWARMFORGE_TMUX_STUB" argv-file}
+                          "--test-post-chat-json" (str forge)
+                          (json/generate-string
+                           {:text "What should we do next?"
+                            :request_id request-id
+                            :thread_id thread-id
+                            :source source
+                            :proposal_id proposal-id}))
+          answered (run {:dir forge} (script "pack_dashboard_request.sh")
+                        "answer" request-id (str answer)
+                        "--approve-route-card" proposal-id)
+          row (get (into {} (map (juxt :id identity)
+                                 (:chat (web-state forge))))
+                   request-id)
+          action (first (:actions row))
+          proposal-file (fs/path forge ".swarmforge/route-proposals"
+                                  (str proposal-id ".edn"))]
+      (is (zero? (:exit answered)) (:err answered))
+      (is (= thread-id (:thread_id row)))
+      (is (= source (:source row)))
+      (is (= proposal-id (:proposal_id row)))
+      (is (= {:type "approve-route-card"
+              :proposal_id proposal-id
+              :family (str (fs/file-name forge))
+              :project "alpha-app"
+              :task_name "next-card"
+              :label "Approve next-card"
+              :status "pending"
+              :available true}
+             action))
+      (is (= action
+             (first (:actions
+                     (get (into {} (map (juxt :id identity)
+                                        (:chat (web-state forge))))
+                          request-id)))))
+      (let [proposal (edn/read-string (slurp (str proposal-file)))]
+        (write-file proposal-file
+                    (pr-str (assoc proposal
+                                   :status :consumed
+                                   :consumed-at "2026-11-10T10:30:00Z"))))
+      (let [consumed (first
+                      (:actions
+                       (get (into {} (map (juxt :id identity)
+                                          (:chat (web-state forge))))
+                            request-id)))]
+        (is (= "consumed" (:status consumed)))
+        (is (false? (:available consumed))))
+      (let [retry (run {:dir forge} (script "pack_dashboard_request.sh")
+                        "answer" request-id (str answer)
+                        "--approve-route-card" proposal-id)]
+        (is (zero? (:exit retry)) (:err retry))))))
+
+(deftest answering-rejects-invalid-route-card-approval-actions
+  ;; Given missing, malformed, consumed and cross-Family proposals
+  ;; When an action is attached
+  ;; Then every refusal leaves the pending chat request untouched
+  (let [forge (tmp-dir)
+        other-forge (tmp-dir)
+        argv-file (str (fs/path forge "tmux.argv"))
+        answer (fs/path forge "tmp" "answer.txt")]
+    (setup-pack! forge ["specifier"])
+    (setup-pack! other-forge ["specifier"])
+    (doseq [root [forge other-forge]]
+      (fs/create-dirs (fs/path root "projects" "alpha-app"))
+      (write-file (fs/path root ".swarmforge/tmux-socket")
+                  (str (fs/path root "tmux.sock") "\n")))
+    (write-file answer "Answer.\n")
+    (let [pending (fs/path forge ".swarmforge/dashboard/requests/pending")
+          id "req-route-action-reject"
+          _ (write-file
+             (fs/path pending (str id ".request"))
+             (str "id: " id "\n"
+                  "status: pending\n"
+                  "proposal_id: proposal-20261110T103000Z\n"
+                  "created_at: 2026-11-10T10:30:00Z\n\n"
+                  "Approve the next card?\n"))
+          cross-id (route-proposal! other-forge "alpha-app" "cross-family")
+          consumed-id (route-proposal! forge "alpha-app" "consumed-card")
+          consumed-file (fs/path forge ".swarmforge/route-proposals"
+                                 (str consumed-id ".edn"))
+          consumed (edn/read-string (slurp (str consumed-file)))
+          malformed-id "proposal-20261110T103001Z"
+          malformed-file (fs/path forge ".swarmforge/route-proposals"
+                                  (str malformed-id ".edn"))
+          answer! (fn [proposal-id]
+                    (run {:dir forge :ok? false}
+                         (script "pack_dashboard_request.sh")
+                         "answer" id (str answer)
+                         "--approve-route-card" proposal-id))]
+      (write-file consumed-file
+                  (pr-str (assoc consumed :consumed-at "2026-11-10T10:31:00Z")))
+      (write-file malformed-file "not an edn map\n")
+      (doseq [[proposal-id expected]
+              [["proposal-20261110T103999Z" "not found"]
+               ["../not-a-proposal" "invalid"]
+               [cross-id "not found"]
+               [consumed-id "consumed"]
+               [malformed-id "malformed"]]]
+        (let [result (answer! proposal-id)]
+          (is (not (zero? (:exit result))))
+          (is (str/includes? (str (:err result) (:out result)) expected))
+          (is (fs/regular-file? (fs/path pending (str id ".request"))))
+          (is (not (fs/exists?
+                    (fs/path forge ".swarmforge/dashboard/requests/done"
+                             (str id ".request"))))))))))
 
 (deftest pack-web-chat-preserves-an-optional-proposal-id
   (let [root (tmp-dir)]

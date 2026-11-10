@@ -536,6 +536,16 @@ conversation metadata in the done record, so thread, source and proposal
 projection survive the pending-to-done move. Identical re-answers are
 idempotent; a different answer cannot overwrite the completed request.
 
+An answer may also attach a route-card approval control with
+`pack_dashboard_request.sh answer <id> <file> --approve-route-card <proposal-id>`.
+The proposal must be pending and owned by the current Family/project. The done
+record stores only a bounded descriptor containing the proposal id, Family,
+project, task name, label and status. `/api/state` exposes it as an `actions`
+array and re-reads the proposal on every state response, so a proposal later
+consumed or superseded is reported with `available: false` rather than offered
+for approval again. The answer tool records metadata only; it never approves or
+executes the action.
+
 Getting the kit into a forge is the bridge's own step, `install-kit` and
 `install-rules` on the adapter. Its paths default to a bridge that lives *inside
 the forge it serves*, so there are two shapes:
