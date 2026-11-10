@@ -156,6 +156,61 @@
                  (:tasks (first (filter #(= project (:name %))
                                         (:projects state)))))))
 
+(defn seed-dashboard-scale-fixture! [forge]
+  (setup-pack! forge ["lieutenant"])
+  (fs/create-dirs (fs/path forge "projects"))
+  (let [projects (mapv #(format "project-%02d" %) (range 13))
+        rows-per-project (mapv #(if (< % 4) 33 32) (range 13))
+        _ (write-file (fs/path forge ".swarmforge" "open-projects")
+                      (apply str (map #(str % "\n") projects)))]
+    (doseq [[project task-count] (map vector projects rows-per-project)]
+      (let [root (fs/path forge "projects" project)
+            board (fs/path root ".swarmforge" "board" "tasks.tsv")
+            rows (mapv (fn [index]
+                         (let [lane (cond
+                                      (zero? index) "spec"
+                                      (= 1 index) "code"
+                                      (= 2 index) "queued"
+                                      :else "done")]
+                           (str/join
+                            "\t"
+                            [(str "card-" project "-" index)
+                             lane
+                             "2026-01-01T00:00:00Z"
+                             (str "2026-01-01T00:"
+                                  (format "%02d" (mod index 60))
+                                  ":00Z")
+                             (str "task-" project "-" index)
+                             "0"])))
+                       (range task-count))]
+        (write-file (fs/path root ".swarmforge" "single-agent") "agent\n")
+        (write-file (fs/path root ".swarmforge" "roles.tsv")
+                    (format "agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n"
+                            root))
+        (write-file (fs/path root "stages.edn")
+                    (pr-str {:task project
+                             :stages [{:name "spec"}
+                                      {:name "code"}]}))
+        (write-file board (str (str/join "\n" rows) "\n"))))
+    (doseq [index (range 450)]
+      (let [status (if (zero? (mod index 3)) "pending" "done")
+            id (format "req-scale-%03d" index)]
+        (write-file
+         (fs/path forge ".swarmforge" "dashboard" "requests" status
+                  (str id ".request"))
+         (str "id: " id "\n"
+              "status: " status "\n"
+              "created_at: 2026-01-01T00:00:00Z\n"
+              "source: app.lieutenant-chat\n"
+              "thread_id: conversation-" index "\n"
+              (when (= status "done")
+                "response: completed response\\n\n")
+              "\n"
+              "Scale fixture chat record " index ": "
+              (apply str (repeat 1700 "x"))
+              "\n"))))
+    forge))
+
 (defn create-task
   ([root name lane] (create-task root name lane true))
   ([root name lane ok?]
@@ -618,6 +673,112 @@
       (is (= "" (:status card))))
     (is (= [] (:approvals state)))
     (is (= six-pack-roles (mapv :role (:work_in_flight state))))))
+
+(deftest dashboard-health-is-constant-small-and-scan-free
+  ;; Given zero, one and many projects
+  ;; When the liveness route runs
+  ;; Then it returns the same tiny shape without scanning dashboard state
+  (let [empty-forge (tmp-dir)
+        one-project (doto (tmp-dir) setup-pack!)
+        many-projects (doto (tmp-dir) seed-dashboard-scale-fixture!)
+        results (mapv
+                 (fn [root]
+                   (let [result (pack-web root true "--test-health-metrics")
+                         body (json/parse-string (:out result) true)]
+                     (is (zero? (:exit result)))
+                     (is (< (:milliseconds body) 200))
+                     body))
+                 [empty-forge one-project many-projects])]
+    (is (= 1 (count (set (map #(json/generate-string %) (map :body results))))))
+    (is (every? #(= {} (:metrics %)) results))
+    (is (every? #(= 23 (:bytes %)) results))
+    (is (= {:ok true :live true} (:body (first results))))))
+
+(deftest dashboard-health-remains-available-during-slow-state
+  ;; Given a deliberately slow authoritative state scan
+  ;; When health runs while that scan is pending
+  ;; Then health still returns independently without state work
+  (let [root (doto (tmp-dir) setup-pack!)
+        result (pack-web root true "--test-health-during-slow-state" (str root))
+        body (json/parse-string (:out result) true)]
+    (is (zero? (:exit result)))
+    (is (< (:health_ms body) 200))
+    (is (true? (:state_pending_at_health body)))
+    (is (= {:ok true :live true} (:health_body body)))
+    (is (= {:slow_state true} (:state_body body)))
+    (is (= {} (:metrics body)))))
+
+(deftest dashboard-state-reuses-one-task-view-per-project
+  ;; Given a measured forge snapshot
+  ;; When its state is assembled
+  ;; Then each project board and task view is built once
+  (let [root (doto (tmp-dir) setup-pack!)
+        _ (create-task root "first-card" "specifier")
+        result (pack-web root true "--test-dashboard-benchmark" (str root) "1")
+        body (json/parse-string (:out result) true)
+        metrics (:metrics body)]
+    (is (zero? (:exit result)))
+    (is (= 1 (:board-task-reads metrics)))
+    (is (= 1 (:task-view-builds metrics)))
+    (is (= 1 (:work-view-builds metrics)))
+    (is (zero? (long (or (:board-subprocesses metrics) 0))))
+    (is (pos? (first (:state_bytes body))))
+    (is (< (:health_p95_ms body) 200))))
+
+(deftest dashboard-state-meets-saibill-scale-budget
+  ;; Given 13 projects, 420 tasks and 450 chat records
+  ;; When health and full state are measured repeatedly
+  ;; Then health stays probe-safe and full state stays near the one-second budget
+  (let [forge (doto (tmp-dir) seed-dashboard-scale-fixture!)
+        result (pack-web forge true "--test-dashboard-benchmark" (str forge) "7")
+        body (json/parse-string (:out result) true)
+        state (web-state forge)
+        projects (:projects state)]
+    (is (zero? (:exit result)))
+    (is (= 7 (:iterations body)))
+    (is (< (:health_p95_ms body) 200))
+    (is (< (:state_p95_ms body) 1000)
+        (str "state latencies: " (:state_ms body)))
+    (is (every? pos? (:state_bytes body)))
+    (is (<= 900000 (apply min (:state_bytes body))))
+    (is (= 13 (get-in body [:metrics :task-view-builds])))
+    (is (= 13 (get-in body [:metrics :board-task-reads])))
+    (is (= 450 (get-in body [:metrics :chat-file-reads])))
+    (is (zero? (long (or (get-in body [:metrics :board-subprocesses]) 0))))
+    (is (= 13 (count projects)))
+    (is (= 420 (reduce + (map (comp count :tasks) projects))))
+    (is (= 450 (count (:chat state))))
+    (is (= (mapv #(format "project-%02d" %) (range 13))
+           (mapv :name projects)))))
+
+(deftest dashboard-state-fails-whole-instead-of-returning-partial-projects
+  ;; Given one malformed open project among otherwise valid projects
+  ;; When the authoritative state is requested
+  ;; Then it returns a bounded error rather than a partial snapshot
+  (let [forge (tmp-dir)]
+    (setup-pack! forge ["lieutenant"])
+    (fs/create-dirs (fs/path forge "projects"))
+    (doseq [name ["alpha" "broken"]]
+      (let [root (fs/path forge "projects" name)]
+        (write-file (fs/path root ".swarmforge" "single-agent") "agent\n")
+        (write-file (fs/path root ".swarmforge" "roles.tsv")
+                    (format "agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n"
+                            root))
+        (write-file (fs/path root "stages.edn")
+                    (if (= name "broken")
+                      "{:task :broken :stages ["
+                      (pr-str {:task name
+                               :stages [{:name "spec"} {:name "code"}]})))
+        (write-file (fs/path root ".swarmforge" "board" "tasks.tsv") "")))
+    (write-file (fs/path forge ".swarmforge" "open-projects")
+                "alpha\nbroken\n")
+    (let [result (run {:dir forge :ok? false}
+                      (script "pack_web.sh")
+                      "--test-state-query" (str forge) "")
+          output (str (:err result) (:out result))]
+      (is (not (zero? (:exit result))))
+      (is (< (count output) 2000))
+      (is (not (str/includes? output "\"projects\""))))))
 
 
 
@@ -1613,9 +1774,11 @@
         (is (= (str (.pid proc)) (str/trim (slurp (str pid-file))))))
       (when (fs/exists? url-file)
         (let [url (str/trim (slurp (str url-file)))
-              html (slurp url)]
+              html (slurp url)
+              health (json/parse-string (slurp (str url "/api/health")) true)]
           (is (re-find #"^http://127\.0\.0\.1:\d+$" url))
-          (is (str/includes? html "New Task"))))
+          (is (str/includes? html "New Task"))
+          (is (= {:ok true :live true} health))))
       (finally
         (.destroyForcibly proc)
         (.waitFor proc)))))

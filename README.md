@@ -515,11 +515,35 @@ new:
 The forge side is deliberately small, because the bridge reads the forge rather
 than the other way round. A running dashboard, found through
 `<forge root>/.swarmforge/dashboard-url` and read fresh every time. The endpoints
-the bridge calls — `/api/state`, `/api/chat`, `/api/approvals/<id>/<action>`,
+the bridge calls — `/api/health`, `/api/state`, `/api/chat`, `/api/approvals/<id>/<action>`,
 `/api/tasks/retry`, and `/api/clarifications/<id>/answer` — which mean a forge
 whose tooling predates one of them is refreshed first, or left out. And the
 forge's own adapter, `swarmforge/scripts/matrix-bridge.sh`, which arrives with
 the bridge's installation rather than with this fork.
+
+### Dashboard health and state budgets
+
+`GET /api/health` is liveness only. It returns the constant
+`{"ok":true,"live":true}` without scanning projects, boards, handoffs, chat or
+tmux, and it makes no claim that dashboard state has been generated recently.
+Reachability probes use this endpoint.
+
+`GET /api/state` remains the full authoritative Family snapshot, including all
+projects, tasks, approvals, clarifications, conversations, activity and
+completion statistics. A snapshot reads each project's board directly once,
+builds one task view and one work view per project, reads each chat, approval
+and clarification store once, and reuses those values through active-card,
+idle, status and work-queue fields. Independent project slices run with a bound
+of four workers, chat records with a bound of eight, and response order is
+preserved. A failed required project scan fails the whole request rather than
+returning a partial Family snapshot.
+
+The repeatable Saibill-scale fixture has 13 projects, 420 tasks, 450 chat
+records and a state body around 934 KB. The regression budget is health p95
+under 200 ms and state p95 around one second or better on this machine. State
+generation latency must not decide Family reachability: a slow snapshot can
+leave the previous good state in place while health remains independently
+available.
 
 Chat entries in `/api/state` carry an optional `proposal_id` when that request
 belongs to a proposal discussion and an optional `thread_id` when it belongs to

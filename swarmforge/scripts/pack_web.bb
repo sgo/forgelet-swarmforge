@@ -61,6 +61,8 @@
 (def ^:dynamic *tmux-stub* nil)
 (def ^:dynamic *pane-text* nil)
 (def ^:dynamic *sync-teardown?* false)
+(def ^:dynamic *state-cache* nil)
+(def ^:dynamic *state-metrics* nil)
 (def teardown-delay-ms 250)
 (def pane-capture-lines 2000)
 (def pane-heat (atom {}))
@@ -69,11 +71,44 @@
 (def lieutenant-activity-history (atom {}))
 (def ^:dynamic *lieutenant-activity-context* nil)
 
+(defn state-metric! [kind]
+  (when *state-metrics*
+    (swap! *state-metrics* update kind (fnil inc 0))))
+
+(defn state-cached [kind key f]
+  (if *state-cache*
+    (let [entry (delay (do (state-metric! kind) (f)))
+          cached (get (swap! *state-cache*
+                             #(if (contains? % key) % (assoc % key entry)))
+                      key)]
+      @cached)
+    (do
+      (state-metric! kind)
+      (f))))
+
+(def dashboard-project-workers 4)
+(def dashboard-chat-workers 8)
+
+(defn bounded-pmap [limit f values]
+  (let [values (vec values)]
+    (loop [offset 0
+           result []]
+      (if (>= offset (count values))
+        result
+        (let [end (min (count values) (+ offset limit))
+              jobs (mapv #(future (f %)) (subvec values offset end))
+              next-result (try
+                            (into result (mapv deref jobs))
+                            (catch Throwable throwable
+                              (doseq [job jobs] (future-cancel job))
+                              (throw throwable)))]
+          (recur end next-result))))))
+
 (declare session-name pane-target live-pane-text role-row pane-sample backend-name
          in-process-for-row in-process-task-names approvals
          handoff-files batch-dirs in-process-dir allowed-doc?
          delete-approval! retry-approval! parse-message pane-status-for role-rows
-         recorded-pane single-agent-project?)
+         recorded-pane state-pane-text state-session-alive? single-agent-project?)
 
 (defn usage []
   (binding [*out* *err*]
@@ -138,12 +173,15 @@
           (throw (ex-info "tmux load-buffer failed" result)))))))
 
 (defn role-rows [root]
-  (let [file (fs/path root ".swarmforge" "roles.tsv")]
-    (if (fs/exists? file)
-      (->> (str/split-lines (slurp (str file)))
-           (remove str/blank?)
-           (mapv #(str/split % #"\t" -1)))
-      [])))
+  (state-cached
+   :role-row-reads [::role-rows (str root)]
+   (fn []
+     (let [file (fs/path root ".swarmforge" "roles.tsv")]
+       (if (fs/exists? file)
+         (->> (str/split-lines (slurp (str file)))
+              (remove str/blank?)
+              (mapv #(str/split % #"\t" -1)))
+         [])))))
 
 (defn master-row [root]
   (if (single-agent-project? root)
@@ -215,6 +253,7 @@
     (apply sh (concat [script] args ["--root" (str root)]))))
 
 (defn pack-board [root & args]
+  (state-metric! :board-subprocesses)
   (let [result (apply pack-board-result root args)]
     (when-not (zero? (:exit result))
       (let [msg (str/trim (str (:err result) "\n" (:out result)))]
@@ -228,10 +267,37 @@
        vec))
 
 (defn lanes [root]
-  (lines (pack-board root "lanes")))
+  (state-cached
+   :lane-builds [::lanes (str root)]
+   (fn []
+     (if (fs/regular-file? (fs/path root ".swarmforge" "single-agent"))
+       (let [file (fs/path root "stages.edn")
+             stages (if (fs/regular-file? file)
+                      (:stages (edn/read-string (slurp (str file))))
+                      [])]
+         (into ["queued"] (conj (mapv :name stages) "done")))
+       (let [file (fs/path root ".swarmforge" "board" "lanes.tsv")]
+         (if (fs/regular-file? file)
+           (mapv #(first (str/split % #"\t")) (lines (slurp (str file))))
+           (mapv first (role-rows root))))))))
 
 (defn master-role [root]
-  (str/trim (pack-board root "master-lane")))
+  (state-cached
+   :master-role-builds [::master-role (str root)]
+   (fn []
+     (let [rows (vec (role-rows root))
+           single-agent? (fs/regular-file? (fs/path root ".swarmforge" "single-agent"))
+           masters (if single-agent?
+                     rows
+                     (filterv #(= "master" (nth % 1 nil)) rows))]
+       (when-not (= 1 (count masters))
+         (throw
+          (ex-info
+           (if single-agent?
+             "A single-agent project must name exactly one role"
+             "Config must name exactly one master worktree")
+           {:http-status 500})))
+       (ffirst masters)))))
 
 (defn task-entry [line]
   (let [[name lane _created updated task-id audit-count] (str/split line #"\t" -1)]
@@ -246,15 +312,18 @@
 (declare tasks)
 
 (defn active-single-agent-card [root]
-  (when (fs/regular-file? (fs/path root ".swarmforge" "single-agent"))
-    (let [stages-file (fs/path root "stages.edn")
-          project-name (when (fs/regular-file? stages-file)
-                         (:task (edn/read-string (slurp (str stages-file)))))]
-      (first
-       (remove (fn [task]
-                 (or (= (:name task) project-name)
-                     (#{"done" "queued"} (:lane task))))
-               (tasks root))))))
+  (state-cached
+   :active-card-builds [::active-card (str root)]
+   (fn []
+     (when (fs/regular-file? (fs/path root ".swarmforge" "single-agent"))
+       (let [stages-file (fs/path root "stages.edn")
+             project-name (when (fs/regular-file? stages-file)
+                            (:task (edn/read-string (slurp (str stages-file)))))]
+         (first
+          (remove (fn [task]
+                    (or (= (:name task) project-name)
+                        (#{"done" "queued"} (:lane task))))
+                  (tasks root))))))))
 
 (defn project-idle? [root]
   (and (fs/regular-file? (fs/path root ".swarmforge" "single-agent"))
@@ -368,45 +437,47 @@
   (or (last (im-status-lines role text backend)) ""))
 
 (defn board-tasks [root]
-  (mapv task-entry (lines (pack-board root "list"))))
+  (state-cached
+   :board-task-reads [::board-tasks (str root)]
+   (fn []
+     (let [file (fs/path root ".swarmforge" "board" "tasks.tsv")]
+       (if (fs/regular-file? file)
+         (mapv task-entry (lines (slurp (str file))))
+         [])))))
 
 (defn pane-status-lines-for [root role]
-  (let [row (role-row root role)
-        text (when row (live-pane-text root role))
-        backend (when row (backend-name row))]
-    (if row
-      (im-status-lines (pane-cache-key root role) text backend)
-      [])))
+  (state-cached
+   :pane-status-builds [::pane-status (str root) (str role)]
+   (fn []
+     (let [row (role-row root role)
+           text (when row (state-pane-text root role row))
+           backend (when row (backend-name row))]
+       (if row
+         (im-status-lines (pane-cache-key root role) text backend)
+         [])))))
 
 (defn pane-status-for [root role]
-  (or (last (pane-status-lines-for root role)) ""))
+  (state-cached
+   :pane-status-for-builds [::pane-status-for (str root) (str role)]
+   #(or (last (pane-status-lines-for root role)) "")))
 
-(defn active-card-names [root role]
-  (let [row (role-row root role)
-        names (when row (in-process-task-names (in-process-for-row row)))
-        cards (filter #(= role (:lane %)) (board-tasks root))]
-    (if (seq names)
-      (set names)
-      (if (= 1 (count cards))
-        #{(:name (first cards))}
-        #{}))))
+(defn active-card-names
+  ([root role] (active-card-names root role (board-tasks root)))
+  ([root role cards]
+   (let [row (role-row root role)
+         names (when row (in-process-task-names (in-process-for-row row)))
+         lane-cards (filter #(= role (:lane %)) cards)]
+     (if (seq names)
+       (set names)
+       (if (= 1 (count lane-cards))
+         #{(:name (first lane-cards))}
+         #{})))))
 
 (defn rejected-task? [root name]
   (fs/exists? (fs/path root ".swarmforge" "notify" (str "reject-" name))))
 
-(defn pending-approval-ids [root]
-  (->> (approvals root)
-       (map :task_id)
-       (remove str/blank?)
-       set))
-
-(defn pending-approval-names [root]
-  (->> (approvals root)
-       (map :task)
-       (remove str/blank?)
-       set))
-
-(defn task-with-status [root task]
+(defn task-with-status-from-view
+  [root task pending-ids pending-names active-names pane-statuses]
   (let [role (:lane task)
         name (:name task)
         task-id (:id task)]
@@ -414,11 +485,29 @@
            (cond
              (= "done" role) ""
              (rejected-task? root name) "REJECTED"
-             (or (contains? (pending-approval-ids root) task-id)
-                 (contains? (pending-approval-names root) name)) "Waiting for approval"
-             (contains? (active-card-names root role) name)
-             (pane-status-for root role)
+             (or (contains? pending-ids task-id)
+                 (contains? pending-names name)) "Waiting for approval"
+             (contains? (get active-names role #{}) name)
+             (get pane-statuses role "")
              :else "waiting in queue"))))
+
+(defn task-with-status [root task]
+  (let [board (board-tasks root)
+        approval-items (approvals root)
+        pending-ids (set (keep #(not-empty (:task_id %)) approval-items))
+        pending-names (set (keep #(not-empty (:task %)) approval-items))
+        active-by-role (into {}
+                             (map (fn [row]
+                                    [(first row)
+                                     (active-card-names root (first row) board)])
+                                  (role-rows root)))
+        pane-statuses (into {}
+                            (keep (fn [[role names]]
+                                    (when (seq names)
+                                      [role (pane-status-for root role)])))
+                            active-by-role)]
+    (task-with-status-from-view root task pending-ids pending-names
+                                active-by-role pane-statuses)))
 
 (defn batch-task-names [dir]
   (in-process-task-names (handoff-files dir)))
@@ -470,23 +559,47 @@
   (vec (keep #(merging-card root %) (role-rows root))))
 
 (defn tasks [root]
-  (let [idx (batch-index root)
-        board (mapv (fn [task]
-                      (if-let [batch (get idx (:name task))]
-                        (assoc (task-with-status root task) :batch batch)
-                        (task-with-status root task)))
-                    (board-tasks root))]
-    (into (merging-cards root) board)))
+  (state-cached
+   :task-view-builds [::tasks (str root)]
+   (fn []
+     (let [raw-board (board-tasks root)
+           idx (batch-index root)
+           approval-items (approvals root)
+           pending-ids (set (keep #(not-empty (:task_id %)) approval-items))
+           pending-names (set (keep #(not-empty (:task %)) approval-items))
+           active-by-role (into {}
+                                (map (fn [row]
+                                       [(first row)
+                                        (active-card-names root (first row)
+                                                           raw-board)])
+                                     (role-rows root)))
+           pane-statuses (into {}
+                               (keep (fn [[role names]]
+                                       (when (seq names)
+                                         [role (pane-status-for root role)])))
+                               active-by-role)
+           board (mapv (fn [task]
+                         (let [task (task-with-status-from-view
+                                     root task pending-ids pending-names
+                                     active-by-role pane-statuses)]
+                           (if-let [batch (get idx (:name task))]
+                             (assoc task :batch batch)
+                             task)))
+                       raw-board)]
+       (into (merging-cards root) board)))))
 
 (defn parse-message [path]
-  (let [content (slurp (str path))
-        [header body] (str/split content #"\n\n" 2)
-        headers (into {}
-                      (for [line (str/split-lines header)
-                            :let [[k v] (str/split line #": " 2)]
-                            :when (and k v)]
-                        [k v]))]
-    {:headers headers :body (or body "")}))
+  (state-cached
+   :message-parses [::message (str path)]
+   (fn []
+     (let [content (slurp (str path))
+           [header body] (str/split content #"\n\n" 2)
+           headers (into {}
+                         (for [line (str/split-lines header)
+                               :let [[k v] (str/split line #": " 2)]
+                               :when (and k v)]
+                           [k v]))]
+       {:headers headers :body (or body "")}))))
 
 (defn comma-list [text]
   (->> (str/split (or text "") #",")
@@ -580,7 +693,9 @@
       kind (assoc :kind kind))))
 
 (defn approvals [root]
-  (mapv #(approval-entry root %) (pending-files root)))
+  (state-cached
+   :approval-scans [::approvals (str root)]
+   #(mapv (fn [path] (approval-entry root path)) (pending-files root))))
 
 ;; An approval the dashboard resolved, kept so a reader that did not resolve it can be
 ;; told how it ended rather than only that it is gone. The bridge's room is that reader:
@@ -611,10 +726,13 @@
     (catch Exception _ nil)))
 
 (defn resolved-approvals [root]
-  (let [dir (resolved-approvals-dir root)]
-    (if (fs/directory? dir)
-      (->> (resolved-approval-files dir) (keep resolved-approval) vec)
-      [])))
+  (state-cached
+   :resolved-approval-scans [::resolved-approvals (str root)]
+   (fn []
+     (let [dir (resolved-approvals-dir root)]
+       (if (fs/directory? dir)
+         (->> (resolved-approval-files dir) (keep resolved-approval) vec)
+         [])))))
 
 (defn record-resolution!
   "Write down how an approval ended, before its pending file is gone: the id, the card,
@@ -667,9 +785,15 @@
   (fs/path worktree ".swarmforge" "handoffs" "inbox" "in_process"))
 
 (defn session-alive? [socket session]
+  (state-metric! :tmux-session-checks)
   (boolean
    (when (and socket session)
      (zero? (:exit (sh "tmux" "-S" socket "has-session" "-t" session))))))
+
+(defn state-session-alive? [root role row]
+  (state-cached
+   :tmux-session-builds [::session-alive (str root) (str role)]
+   #(session-alive? (tmux-socket root) (session-name row))))
 
 (defn role-queue-state [alive? busy?]
   (cond
@@ -681,7 +805,9 @@
   (let [worktree (nth row 2 nil)]
     (if (str/blank? worktree)
       []
-      (in-process-files (in-process-dir worktree)))))
+      (state-cached
+       :in-process-scans [::in-process (str worktree)]
+       #(in-process-files (in-process-dir worktree))))))
 
 (defn session-name [row]
   (let [role (first row)
@@ -792,6 +918,7 @@
     (safe-activity-line (strip-bullet recognized))))
 
 (defn pane-current-command [socket target]
+  (state-metric! :tmux-command-reads)
   (try
     (let [result (sh "tmux" "-S" socket "display-message" "-p" "-t" target
                      "#{pane_current_command}")]
@@ -799,29 +926,32 @@
         (not-empty (str/trim (:out result)))))
     (catch Exception _ nil)))
 
+(defn state-pane-command [root role row]
+  (state-cached
+   :pane-command-builds [::pane-command (str root) (str role)]
+   #(pane-current-command (tmux-socket root) (pane-target row))))
+
 (defn lieutenant-runtime-facts [root]
   (if *lieutenant-activity-context*
     *lieutenant-activity-context*
     (if-let [row (master-row root)]
-      (let [socket (tmux-socket root)
-            session (session-name row)
-            alive? (try
-                     (session-alive? socket session)
+      (let [alive? (try
+                     (state-session-alive? root "lieutenant" row)
                      (catch Exception _ false))]
         {:alive? alive?
          :command (when alive?
-                    (pane-current-command socket (pane-target row)))})
+                    (state-pane-command root "lieutenant" row))})
       {:alive? false})))
 
 (defn activity-fingerprint [activity]
   (select-keys activity [:alive :state :status_line]))
 
 (defn lieutenant-activity-snapshot [root]
-  (let [{:keys [alive? command]} (lieutenant-runtime-facts root)
+  (let [row (master-row root)
+        {:keys [alive? command]} (lieutenant-runtime-facts root)
         available? (and alive? (not (fallback-shell? command)))
-        row (master-row root)
         backend (when row (backend-name row))
-        text (when available? (live-pane-text root "lieutenant"))
+        text (when available? (state-pane-text root "lieutenant" row))
         state (if available? (activity-output-state text) "unavailable")
         heat (if available?
                (role-heat root "lieutenant" true text backend)
@@ -883,8 +1013,9 @@
         cards (cards-in-lane all-tasks role)
         card (first cards)
         busy? (boolean (or path card))
-        alive? (session-alive? socket (session-name row))
-        text (live-pane-text root role)
+        alive? (state-session-alive? root role row)
+        text (when (or alive? (some? *pane-text*))
+               (state-pane-text root role row))
         names (work-task-names files cards)
         batch-names (in-process-batch-task-names row)]
     (queue-row role names batch-names busy? alive?
@@ -892,9 +1023,12 @@
                (or (:updated_at from-file) (:updated_at card) ""))))
 
 (defn work-in-flight [root]
-  (let [socket (tmux-socket root)
-        all-tasks (tasks root)]
-    (mapv #(work-row-for-role root socket % all-tasks) (role-rows root))))
+  (state-cached
+   :work-view-builds [::work-in-flight (str root)]
+   (fn []
+     (let [socket (tmux-socket root)
+           all-tasks (tasks root)]
+       (mapv #(work-row-for-role root socket % all-tasks) (role-rows root))))))
 
 (defn chat-pending-dir [root]
   (fs/path root ".swarmforge" "dashboard" "requests" "pending"))
@@ -1049,6 +1183,7 @@
 (defn parse-chat
   ([path] (parse-chat nil path))
   ([root path]
+  (state-metric! :chat-file-reads)
   (let [raw (slurp (str path))
         [header body] (str/split raw #"\n\n" 2)
         headers (into {}
@@ -1071,8 +1206,12 @@
       action (assoc :actions [action])))))
 
 (defn list-chat [root]
-  (vec (concat (map #(parse-chat root %) (chat-files (chat-pending-dir root)))
-               (map #(parse-chat root %) (chat-files (chat-done-dir root))))))
+  (state-cached
+   :chat-scans [::chat (str root)]
+   #(vec (bounded-pmap dashboard-chat-workers
+                       (fn [path] (parse-chat root path))
+                       (concat (chat-files (chat-pending-dir root))
+                               (chat-files (chat-done-dir root)))))))
 
 (defn clar-pending-dir [root]
   (fs/path root ".swarmforge" "dashboard" "clarifications" "pending"))
@@ -1096,8 +1235,12 @@
      :created_at (get headers "created_at")}))
 
 (defn list-clarifications [root]
-  (vec (concat (map parse-clarification (chat-files (clar-pending-dir root)))
-               (map parse-clarification (chat-files (clar-done-dir root))))))
+  (state-cached
+   :clarification-scans [::clarifications (str root)]
+   #(vec (bounded-pmap dashboard-chat-workers
+                       parse-clarification
+                       (concat (chat-files (clar-pending-dir root))
+                               (chat-files (clar-done-dir root)))))))
 
 (defn chat-id []
   (str "req-" (str/replace (str (java.time.Instant/now)) #"[^0-9A-Za-z]" "")))
@@ -1314,64 +1457,57 @@
 (defn completion-stats
   ([root] (completion-stats root nil))
   ([root reports]
-   (let [project-name (project-task-name root)
-         reported-identities (completed-card-report/reported-identities reports)
-         current (->> (completion-cards root)
-                      (remove #(contains? reported-identities
-                                          [(:project %) (:task_id %)]))
-                      (keep :active_seconds))
-         historical (if (and (seq reports) project-name)
-                      (completed-card-report/verified-durations reports project-name)
-                      [])
-         durations (try
-                     (vec (concat historical current))
-                     (catch Exception _ []))]
-    (if (seq durations)
-      {:completed_cards (count durations)
-       :median_seconds (long (median-seconds durations))
-       :mean_seconds (long (rounded-mean durations))
-       :min_seconds (long (reduce min durations))
-       :max_seconds (long (reduce max durations))}
-      {:completed_cards 0
-       :median_seconds nil
-       :mean_seconds nil
-       :min_seconds nil
-       :max_seconds nil}))))
+   (state-cached
+    :completion-stat-builds [::completion-stats (str root)]
+    (fn []
+      (let [project-name (project-task-name root)
+            reported-identities (completed-card-report/reported-identities reports)
+            current (->> (completion-cards root)
+                         (remove #(contains? reported-identities
+                                             [(:project %) (:task_id %)]))
+                         (keep :active_seconds))
+            historical (if (and (seq reports) project-name)
+                         (completed-card-report/verified-durations reports project-name)
+                         [])
+            durations (try
+                        (vec (concat historical current))
+                        (catch Exception _ []))]
+        (if (seq durations)
+          {:completed_cards (count durations)
+           :median_seconds (long (median-seconds durations))
+           :mean_seconds (long (rounded-mean durations))
+           :min_seconds (long (reduce min durations))
+           :max_seconds (long (reduce max durations))}
+          {:completed_cards 0
+           :median_seconds nil
+           :mean_seconds nil
+           :min_seconds nil
+           :max_seconds nil}))))))
 
 (defn project-slice
   ([forge name] (project-slice forge name nil))
   ([forge name reports]
    (let [root (open-project-root forge name)
          stats (completion-stats root reports)]
-     (try
-       {:name name
-        :open true
-        :single_agent (single-agent-project? root)
-        :active_card (active-single-agent-card root)
-        :idle (project-idle? root)
-        :dashboard_url (project-dashboard-url root)
-        :lanes (lanes root)
-        :tasks (tagged name (tasks root))
-        :work_in_flight (tagged name (work-in-flight root))
-        :completion_stats stats}
-       (catch Exception _
-         {:name name
-          :open true
-          :single_agent (single-agent-project? root)
-          :active_card nil
-          :idle (project-idle? root)
-          :dashboard_url (project-dashboard-url root)
-          :lanes []
-          :tasks []
-          :work_in_flight []
-          :completion_stats stats})))))
+     {:name name
+      :open true
+      :single_agent (single-agent-project? root)
+      :active_card (active-single-agent-card root)
+      :idle (project-idle? root)
+      :dashboard_url (project-dashboard-url root)
+      :lanes (lanes root)
+      :tasks (tagged name (tasks root))
+      :work_in_flight (tagged name (work-in-flight root))
+      :completion_stats stats})))
 
 (defn forge-dashboard-state [root]
   (let [open (forge/read-open-projects root)
         reports (try
                   (completed-card-report/history-records root)
                   (catch Exception _ []))
-        projects (mapv #(project-slice root % reports) open)]
+        projects (bounded-pmap dashboard-project-workers
+                               #(project-slice root % reports)
+                               open)]
     {:forge true
      :master_role "lieutenant"
      :master_display "Lieutenant"
@@ -1403,9 +1539,19 @@
      :work_in_flight (vec (mapcat :work_in_flight projects))}))
 
 (defn api-state [root]
-  (if (forge/forge? root)
-    (forge-dashboard-state root)
-    (dashboard-state root)))
+  (if *state-cache*
+    (if (forge/forge? root)
+      (forge-dashboard-state root)
+      (dashboard-state root))
+    (binding [*state-cache* (atom {})]
+      (if (forge/forge? root)
+        (forge-dashboard-state root)
+        (dashboard-state root)))))
+
+(defn health-response []
+  {:status 200
+   :headers {"Content-Type" "application/json"}
+   :body "{\"ok\":true,\"live\":true}"})
 
 (def chat-page-default-limit 40)
 (def chat-page-max-limit 100)
@@ -2288,6 +2434,7 @@
     (nth row 2 nil)))
 
 (defn tmux-capture [socket target]
+  (state-metric! :tmux-pane-reads)
   (try
     (let [result (sh "tmux" "-S" socket "capture-pane" "-p" "-t" target
                      "-S" (str "-" pane-capture-lines))]
@@ -2306,6 +2453,16 @@
   (or *pane-text*
       (capture-pane root role)
       (recorded-pane root role)))
+
+(defn state-pane-text [root role row]
+  (state-cached
+   :pane-text-builds [::pane-text (str root) (str role)]
+   (fn []
+     (or *pane-text*
+         (if (state-session-alive? root role row)
+           (or (capture-pane root role)
+               (recorded-pane root role))
+           (recorded-pane root role))))))
 
 (defn pane-files [root role]
   (let [dir (fs/path root ".swarmforge" "sessions" role)]
@@ -2444,6 +2601,9 @@
     {:status 200
      :headers {"Content-Type" "text/html; charset=utf-8"}
      :body (dashboard-page)}
+
+    (= "/api/health" (first (str/split (or uri "") #"\?")))
+    (health-response)
 
     (= "/api/state" (first (str/split (or uri "") #"\?")))
     {:status 200
@@ -2902,6 +3062,83 @@
                 (activity-for-test root {:alive? false} ""))]
     (println (json/generate-string
               {:first first :same same :changed changed :idle idle :stale stale}))))
+
+(defn elapsed-millis [started]
+  (long (/ (- (System/nanoTime) started) 1000000.0)))
+
+(defn percentile [values fraction]
+  (let [values (vec (sort values))
+        index (min (dec (count values))
+                   (long (Math/ceil (* fraction (count values)))))]
+    (nth values index)))
+
+(defn test-health! []
+  (test-http! (handle-request nil {:method "GET" :uri "/api/health"})))
+
+(defn test-health-metrics! []
+  (let [metrics (atom {})
+        started (System/nanoTime)]
+    (binding [*state-metrics* metrics]
+      (let [response (handle-request nil {:method "GET" :uri "/api/health"})]
+        (println
+         (json/generate-string
+          {:milliseconds (elapsed-millis started)
+           :bytes (count (:body response))
+           :body (json/parse-string (:body response) true)
+           :metrics @metrics}))))))
+
+(defn test-health-during-slow-state! [root]
+  (require-root! root)
+  (let [metrics (atom {})]
+    (with-redefs [api-state (fn [_]
+                              (Thread/sleep 650)
+                              {:slow_state true})]
+      (binding [*state-metrics* metrics]
+        (let [state-job (future
+                          (handle-request root {:method "GET" :uri "/api/state"}))
+              _ (Thread/sleep 50)
+              started (System/nanoTime)
+              health (handle-request nil {:method "GET" :uri "/api/health"})
+              health-ms (elapsed-millis started)
+              state-pending? (not (future-done? state-job))
+              state-response @state-job]
+          (println
+           (json/generate-string
+            {:health_ms health-ms
+             :health_body (json/parse-string (:body health) true)
+             :state_pending_at_health state-pending?
+             :state_body (json/parse-string (:body state-response) true)
+             :metrics @metrics})))))))
+
+(defn test-dashboard-benchmark! [root iterations]
+  (require-root! root)
+  (let [iterations (max 1 (or (parse-long (str iterations)) 7))
+        metrics (atom {})
+        state-ms (atom [])
+        state-bytes (atom [])
+        health-ms (atom [])]
+    (binding [*state-metrics* metrics]
+      (dotimes [_ iterations]
+        (reset! metrics {})
+        (let [started (System/nanoTime)
+              response (handle-request root {:method "GET" :uri "/api/state"})]
+          (json/parse-string (:body response) true)
+          (swap! state-ms conj (elapsed-millis started))
+          (swap! state-bytes conj (count (:body response))))
+        (let [started (System/nanoTime)
+              response (handle-request nil {:method "GET" :uri "/api/health"})]
+          (json/parse-string (:body response) true)
+          (swap! health-ms conj (elapsed-millis started)))))
+    (println
+     (json/generate-string
+      {:iterations iterations
+       :state_ms @state-ms
+       :state_p95_ms (percentile @state-ms 0.95)
+       :state_max_ms (apply max @state-ms)
+       :state_bytes @state-bytes
+       :health_ms @health-ms
+       :health_p95_ms (percentile @health-ms 0.95)
+       :metrics @metrics}))))
 
 (defn test-answer-clarification! [root id text]
   (when (str/blank? id)

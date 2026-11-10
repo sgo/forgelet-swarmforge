@@ -44,6 +44,11 @@
                                   (second args) (nth args 2 nil)
                                   (nth args 3 nil) (nth args 4 nil))
     "--test-lieutenant-activity-timeline" (test-lieutenant-activity-timeline! (second args))
+    "--test-health" (test-health!)
+    "--test-health-metrics" (test-health-metrics!)
+    "--test-health-during-slow-state" (test-health-during-slow-state! (second args))
+    "--test-dashboard-benchmark" (test-dashboard-benchmark!
+                                  (second args) (nth args 2 nil))
     "--test-answer-clarification" (test-answer-clarification! (second args) (nth args 2 nil) (nth args 3 nil))
     "--test-task" (test-task! (second args) (nth args 2 nil))
     "--test-doc" (test-doc! (second args) (nth args 2 nil))
