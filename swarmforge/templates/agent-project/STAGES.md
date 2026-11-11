@@ -21,6 +21,22 @@ gate is current it completes the active card, promotes the oldest queued card
 to `spec`, and creates that card's request. An empty queue records project
 idleness instead. `queued` is a board state, not a gate.
 
+Every new or next-touched task report carries `## Verification` and
+`## Operator acceptance`. Verification contains automated gate counts and
+source-delivery evidence. Operator acceptance is `None.` or bounded lines:
+
+```markdown
+- owner: operator | environment: physical signed iPhone | checks: install and verify save/restore | status: pending
+```
+
+Environment-bound checks that cannot run yet stay `pending`; they do not keep a
+fully automated, pushed card in a gate lane. `stage complete` retains those
+safe residuals in its completion record, and `stage list`/`status` distinguishes
+automation incomplete, automation complete with pending acceptance, and fully
+complete. Only the operator can mark a pending check confirmed. Pending text
+never replaces release approval, destructive confirmation or another hard gate.
+Older notes without either section remain readable; add both on the next touch.
+
 `route_card.sh commit` reports the lane read back from the created board row.
 Its consumed proposal record keeps the original proposed `lane` and the actual
 `created-lane` separately, so a queued placement is visible in the audit trail.

@@ -210,6 +210,24 @@
   scenarios or record the exemption.
 - Gherkin acceptance mutation runs must report periodic progress/status so agents can distinguish normal long-running work from a hang.
 
+## Completion Reports
+- Every new or next-touched single-agent task note ends with two distinct sections:
+  `## Verification` and `## Operator acceptance`.
+- `## Verification` records automated gates, test counts and source-delivery evidence. It is not a
+  place to defer a failed or missing gate.
+- `## Operator acceptance` is `None.` or bounded entries. Use one line per entry:
+  `- owner: operator | environment: <device or environment> | checks: <checks> | status: pending`.
+  The only statuses are `pending` and `confirmed`.
+- An unavailable physical-device, signing-identity or other operator environment check may remain
+  pending after every automated stage and source push are complete. Run `stage complete`; do not
+  leave false active work in a gate lane. Only the operator can change a pending check to
+  `confirmed`.
+- Hard approvals for destructive, external, irreversible or policy-sensitive actions remain gates.
+  A pending operator-acceptance entry never substitutes for a required stage, release approval or
+  destructive confirmation.
+- Older task notes without these sections remain readable. Add both sections the next time that
+  note is touched rather than invalidating historical evidence.
+
 ## Verification
 - Before running language, build, or test commands, prefer project-local cache/configuration paths inside the assigned worktree. Avoid default cache locations that write outside the project and may trigger sandbox or permission restrictions.
 - Run constitution tools one at a time. Do not run CRAP, DRY, coverage, language mutation, Gherkin mutation, or structure-check concurrently.

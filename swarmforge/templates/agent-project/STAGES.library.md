@@ -30,6 +30,23 @@ spec -> code -> clean -> architect -> harden -> clean-final -> verify -> docs ->
 Run `bb swarmforge/scripts/stage.bb list --root .` when you think the work is
 finished. `stage complete` refuses while any required stage is todo or stale.
 
+Every new or next-touched task report carries `## Verification` and
+`## Operator acceptance`. Verification records automated gate counts and source
+delivery. Operator acceptance is `None.` or bounded entries:
+
+```markdown
+- owner: operator | environment: physical signed iPhone | checks: install and verify save/restore | status: pending
+```
+
+An environment-bound check that cannot run yet stays `pending`; it does not keep
+a fully automated, pushed card in a gate lane. `stage complete` retains those
+safe residuals and `stage list`/`status` distinguishes automation incomplete,
+automation complete with pending operator acceptance, and fully complete. Only
+the operator can mark a pending check confirmed. Pending acceptance never
+replaces a required verification, release approval, destructive confirmation or
+policy approval. Older notes remain readable; add both sections next time the
+note is touched.
+
 The template assumes a Maven reactor with an `architecture` module and the
 acceptance script under `scripts/`. Adjust the commands and evidence paths to
 the library before the first `stage check`.

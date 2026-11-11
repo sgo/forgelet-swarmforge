@@ -163,6 +163,26 @@
       (when-not (zero? (:exit result))
         (throw (ex-info (str stage " stage failed") result))))))
 
+(declare seed-single-agent-card!)
+
+(defn task-report
+  [acceptance]
+  (str "# fixture-card\n\n"
+       "## Verification\n\n"
+       "Automated gates: 418 tests, 2,662 assertions. Source pushed.\n\n"
+       "## Operator acceptance\n\n"
+       acceptance "\n"))
+
+(defn operator-acceptance-fixture
+  [acceptance]
+  (let [root (scoped-fixture)]
+    (write-file (fs/path root "tasks" "fixture-card.md")
+                (task-report acceptance))
+    (commit-change! root "add fixture-card task report")
+    (seed-single-agent-card! root)
+    (run-scoped-stages! root)
+    root))
+
 (defn seed-single-agent-card!
   ([root] (seed-single-agent-card! root "fixture-card"))
   ([root name]
@@ -212,7 +232,109 @@
           (is (= "fixture" (:task parsed)))
           (is (every? #(= "done" (:status %))
                       (remove #(= "release" (:name %)) (:stages parsed))))
-          (is (some? (:complete parsed)))))
+          (is (some? (:complete parsed)))
+          (is (= "fully complete" (:completion_status parsed)))
+          (is (= "not-recorded"
+                 (get-in parsed [:operator_acceptance :status])))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest pending-environment-bound-operator-acceptance-completes-and-persists
+  (let [root (operator-acceptance-fixture
+              (str "- owner: operator | environment: physical signed iPhone | "
+                   "checks: Install the build and verify save/restore | "
+                   "status: pending"))]
+    (try
+      (let [before (-> (run-stage root "status" "--json")
+                       :out
+                       (json/parse-string true))
+            listed (run-stage root "list")]
+        (is (= "automation complete; operator acceptance pending"
+               (:completion_status before)))
+        (is (= "pending" (get-in before [:operator_acceptance :status])))
+        (is (= 1 (count (get-in before [:operator_acceptance :entries]))))
+        (is (str/includes? (:out listed)
+                           "automation complete; operator acceptance pending"))
+        (is (str/includes? (:out listed) "operator acceptance: pending"))
+        (is (str/includes? (:out listed) "physical signed iPhone")))
+      (let [complete (run-stage root "complete")
+            status (-> (run-stage root "status" "--json")
+                       :out
+                       (json/parse-string true))
+            stored (state root)]
+        (is (zero? (:exit complete)) (:err complete))
+        (is (str/includes? (:out complete) "operator acceptance: pending"))
+        (is (str/includes? (:out complete) "physical signed iPhone"))
+        (is (= "done" (board-lane root "fixture-card")))
+        (is (= :pending
+               (get-in stored [:complete :operator_acceptance :status])))
+        (is (= "physical signed iPhone"
+               (get-in stored
+                       [:complete :operator_acceptance :entries 0 :environment])))
+        (is (= "automation complete; operator acceptance pending"
+               (:completion_status status)))
+        (is (= "pending" (get-in status [:operator_acceptance :status]))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest no-operator-acceptance-residual-completes-as-none
+  (let [root (operator-acceptance-fixture "None.")]
+    (try
+      (let [complete (run-stage root "complete")
+            status (-> (run-stage root "status" "--json")
+                       :out
+                       (json/parse-string true))]
+        (is (zero? (:exit complete)) (:err complete))
+        (is (str/includes? (:out complete) "operator acceptance: none"))
+        (is (= "fully complete" (:completion_status status)))
+        (is (= "none" (get-in status [:operator_acceptance :status])))
+        (is (= [] (get-in status [:operator_acceptance :entries]))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest malformed-or-unsafe-operator-acceptance-is-refused
+  (doseq [acceptance
+          [(str "- owner: operator | environment: iPhone | checks: verify | "
+                "status: maybe")
+           (str "- owner: agent | environment: iPhone | checks: verify | "
+                "status: pending")
+           (str "- owner: operator | environment: /Users/operator/private | "
+                "checks: verify | status: pending")
+           (str "- owner: operator | environment: token "
+                "ghp_1234567890abcdefghijklmnopqrstuvwxyz | "
+                "checks: verify | status: pending")]]
+    (let [root (operator-acceptance-fixture acceptance)]
+      (try
+        (let [complete (run-stage root "complete")]
+          (is (not (zero? (:exit complete))))
+          (is (re-find #"Operator acceptance" (str (:err complete) (:out complete))))
+          (is (not= "done" (board-lane root "fixture-card")))
+          (is (nil? (:complete (state root)))))
+        (finally
+          (fs/delete-tree root))))))
+
+(deftest pending-acceptance-cannot-bypass-a-required-release-gate
+  (let [root (scoped-fixture)
+        config (scoped-stage-config)
+        config (update config :stages conj
+                       {:name "release"
+                        :runs [["sh" "-c" "echo release-approved > target/release.txt"]]
+                        :evidence ["target/release.txt"]
+                        :stamp ["README.md"]})]
+    (try
+      (write-file (fs/path root "stages.edn") (pr-str config))
+      (write-file (fs/path root "tasks" "fixture-card.md")
+                  (task-report
+                   (str "- owner: operator | environment: iPhone | "
+                        "checks: sign and install | status: pending")))
+      (commit-change! root "add required release gate and acceptance")
+      (seed-single-agent-card! root)
+      (run-scoped-stages! root)
+      (let [complete (run-stage root "complete")]
+        (is (not (zero? (:exit complete))))
+        (is (str/includes? (str (:err complete) (:out complete))
+                           "Stages not current: release"))
+        (is (not= "done" (board-lane root "fixture-card"))))
       (finally
         (fs/delete-tree root)))))
 

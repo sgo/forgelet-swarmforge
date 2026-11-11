@@ -336,6 +336,23 @@ invalidate the stages that declare them. Missing legacy input hashes are stale;
 unknown stamp inputs visibly widen to the whole tree. The upgrader installs this
 policy into existing projects' `AGENTS.md` and `STAGES.md`.
 
+New and next-touched single-agent task reports carry `## Verification` and
+`## Operator acceptance`. Verification records automated gate evidence and
+source delivery. Operator acceptance is `None.` or bounded entries such as:
+
+```markdown
+- owner: operator | environment: physical signed iPhone | checks: install and verify save/restore | status: pending
+```
+
+An unavailable physical-device or operator-environment check may stay pending
+after all automated stages and source push are complete; `stage complete` closes
+the card and persists the safe entries. Only the operator can mark a check
+confirmed. Pending acceptance never substitutes for a required stage, release
+approval, destructive confirmation or policy-sensitive approval. `stage
+list`/`status` distinguishes automation incomplete, automation complete with
+pending acceptance, and fully complete. Historical notes without the sections
+remain readable and gain them when next touched.
+
 When a routed card exists on the single-agent board, `stage propose spec`
 binds that card's name and task ID into the proposal and carries the same board
 row through every stage. Older project-named placeholder cards are removed

@@ -94,3 +94,22 @@ The runner validates every named input, fails when one is absent, redacts input
 values from captured output and writes `target/e2e/check.log`. A card whose
 approved task note has an explicit `## E2E waiver` with a reason passes without
 a card-specific entry.
+
+## Operator acceptance
+
+New and next-touched task notes carry both `## Verification` and
+`## Operator acceptance`. Automated evidence belongs in Verification. A physical
+device or unavailable operator environment check is recorded explicitly:
+
+```markdown
+## Operator acceptance
+
+- owner: operator | environment: physical signed iPhone | checks: install and verify save/restore | status: pending
+```
+
+If no operator residual exists, write `None.` under the section. Pending
+acceptance is visible in `stage list`, `stage status --json`, and the persisted
+completion record; it does not keep a fully automated, pushed card in a gate
+lane. Only the operator can mark a check confirmed, and pending acceptance never
+replaces a required gate or approval. Older notes without the sections remain
+readable and gain them on their next edit.

@@ -43,6 +43,33 @@ Work in vertical slices: one public behaviour through every gate. Tests,
 cleanup, architecture, hardening and verification are part of that slice, not
 separate backlog items and not gates deferred to a later card.
 
+## Task report completion
+
+Every new or next-touched task note ends with `## Verification` and
+`## Operator acceptance`. Verification records automated gates, test counts and
+source delivery. Operator acceptance is either:
+
+```markdown
+## Operator acceptance
+
+None.
+```
+
+or bounded entries:
+
+```markdown
+## Operator acceptance
+
+- owner: operator | environment: physical signed iPhone | checks: install and verify save/restore | status: pending
+```
+
+Use `pending` when an environment or physical-device check is unavailable, even
+after automation and source delivery are complete. `stage complete` records the
+pending residual and closes the card; only the operator can later mark it
+`confirmed`. Pending acceptance never substitutes for a required gate, release
+approval, destructive confirmation or policy approval. Legacy notes without
+these sections remain readable; add both when the note is next touched.
+
 Single-agent routing keeps at most one active card. Additional approved cards
 wait in `queued`; do not edit a queued card into `spec` or invent a second
 request. Completing the active card through `stage complete` promotes the
