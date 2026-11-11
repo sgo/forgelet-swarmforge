@@ -12,6 +12,7 @@
        "\n"
        "Usage:\n"
        "  route_card.sh propose <project-root> <task-name> <note-file>\n"
+       "                         [--depends-on <proposal-id>]\n"
        "  route_card.sh commit <proposal-id> [--approval <record-id>]\n"
        "  route_card.sh list [--project <project>] [--forge-root <root>] [--json]\n"
        "  route_card.sh detail <proposal-id> [--forge-root <root>] [--json]\n"
@@ -41,7 +42,11 @@
        "recorded their answer, which is what a reply on the phone leaves;\n"
        "--operator-said records words from a channel that leaves no file (this\n"
        "pane). Either one passed to propose records the proposal without\n"
-       "asking again.\n"))
+       "asking again.\n"
+       "\n"
+       "A dependent proposal remains blocked while its prerequisite is pending,\n"
+       "approved/in progress, or awaiting verified completed-card cleanup. Only the\n"
+       "completed_card_report remove path stamps verified completion.\n"))
 
 (def ^:dynamic *machine-output* false)
 
@@ -50,6 +55,7 @@
 (def negative-re #"(?i)\b(no|not|dont|don't|won't|wont|wait|hold|reject|never)\b")
 
 (def proposal-id-re #"proposal-[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}")
+(def report-id-re #"[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}")
 
 (def project-slug-re #"[a-z0-9][a-z0-9-]{0,63}")
 
@@ -325,6 +331,164 @@
                  (resolve-project-root forge project)
                  (project-root project)))))))
 
+(defn parse-instant [value]
+  (when (and (string? value) (not (str/blank? value)))
+    (try
+      (java.time.Instant/parse value)
+      (catch Exception _ nil))))
+
+(defn proposal-record-for-dependency [forge id]
+  (let [id (str (or id ""))]
+    (cond
+      (not (re-matches proposal-id-re id))
+      {:status "malformed" :reason "proposal id is malformed"}
+
+      :else
+      (let [file (proposal-file forge id)]
+        (if-not (fs/regular-file? file)
+          {:status "missing" :reason "proposal does not exist"}
+          (let [proposal (try
+                           (edn/read-string (slurp (str file)))
+                           (catch Exception _ nil))]
+            (if-not (and (map? proposal)
+                         (= id (:id proposal))
+                         (not (str/blank? (or (:name proposal) "")))
+                         (not (str/blank? (or (:project proposal) ""))))
+              {:status "malformed" :reason "proposal record is malformed"}
+              (try
+                (let [project (fs/canonicalize
+                               (fs/path (str (:project proposal))))
+                      expected (fs/canonicalize (fs/path forge "projects"))]
+                  (if-not (and (= expected (fs/parent project))
+                               (fs/directory? project))
+                    {:status "malformed"
+                     :reason "proposal project is not owned by this forge"}
+                    {:status
+                     (if (or (not (str/blank?
+                                   (str (or (:superseded-at proposal) ""))))
+                             (not (str/blank?
+                                   (str (or (:superseded-by proposal) "")))))
+                       "superseded"
+                       (proposal-status proposal))
+                     :proposal proposal
+                     :project project}))
+                (catch Exception _
+                  {:status "malformed"
+                   :reason "proposal ownership is malformed"})))))))))
+
+(defn dependency-cycle? [forge id]
+  (loop [current id
+         seen #{}]
+    (cond
+      (contains? seen current) true
+      :else
+      (let [{:keys [status proposal]}
+            (proposal-record-for-dependency forge current)]
+        (cond
+          (= status "malformed")
+          (fail! "dependency_invalid" 1
+                 "A prerequisite proposal chain is malformed.")
+
+          (= status "missing")
+          (fail! "dependency_invalid" 1
+                 (str "Prerequisite proposal " current " is missing."))
+
+          :else
+          (let [next-id (some-> (:depends-on proposal) str not-empty)]
+            (if next-id
+              (recur next-id (conj seen current))
+              false)))))))
+
+(defn board-task [project task-id]
+  (when-not (str/blank? (str task-id))
+    (let [file (fs/path project ".swarmforge" "board" "tasks.tsv")]
+      (when (fs/regular-file? file)
+        (some (fn [line]
+                (let [[name lane created updated row-id audit]
+                      (str/split line #"\t" -1)]
+                  (when (= (str task-id) (or (not-empty row-id) name))
+                    {:name name
+                     :lane lane
+                     :created created
+                     :updated updated
+                     :task_id (or (not-empty row-id) name)
+                     :audit audit})))
+              (str/split-lines (slurp (str file))))))))
+
+(defn valid-completion-marker? [proposal]
+  (let [completed-at (:completed-at proposal)
+        cleanup-at (:cleanup-complete-at proposal)
+        completed-task (:completed-task-id proposal)
+        report-id (:completion-report-id proposal)
+        cleanup-report-id (:cleanup-report-id proposal)]
+    (and (parse-instant completed-at)
+         (parse-instant cleanup-at)
+         (string? completed-task)
+         (= completed-task (str (:task-id proposal)))
+         (re-matches report-id-re (str report-id))
+         (= report-id cleanup-report-id))))
+
+(defn completion-staged? [proposal]
+  (and (parse-instant (:completed-at proposal))
+       (= (:completed-task-id proposal) (str (:task-id proposal)))
+       (re-matches report-id-re (str (:completion-report-id proposal)))))
+
+(defn malformed-completion-marker? [proposal]
+  (let [completion-fields? (or (:completed-at proposal)
+                               (:completed-task-id proposal)
+                               (:completion-report-id proposal)
+                               (:cleanup-complete-at proposal)
+                               (:cleanup-report-id proposal))]
+    (and completion-fields?
+         (or (not (completion-staged? proposal))
+             (and (:cleanup-complete-at proposal)
+                  (not (valid-completion-marker? proposal)))))))
+
+(defn dependency-state [forge proposal]
+  (when-let [dependency-id (some-> (:depends-on proposal) str not-empty)]
+    (let [{:keys [status proposal project reason]}
+          (proposal-record-for-dependency forge dependency-id)
+          card-name (or (:name proposal) "")
+          task-id (:task-id proposal)
+          marker? (and proposal (valid-completion-marker? proposal))
+          staged? (and proposal (completion-staged? proposal))
+          row (when (and project task-id) (board-task project task-id))
+          completed? (and marker? (nil? row))
+          blocked? (not completed?)
+          dependency-status
+          (cond
+            (= status "completed") "completed"
+            completed? "completed"
+            (= status "consumed") "in-progress"
+            :else status)]
+      {:proposal_id dependency-id
+       :card_name (redact-output card-name)
+       :task_id (redact-output task-id)
+       :status dependency-status
+       :completion_recorded (boolean marker?)
+       :completed (boolean completed?)
+       :blocked (boolean blocked?)
+       :blocking_reason
+       (cond
+         (= status "missing") reason
+         (= status "malformed") reason
+         (= status "superseded") "prerequisite was superseded"
+         (malformed-completion-marker? proposal) "completion marker is malformed"
+         (and staged? (not marker?)) "verified card cleanup is still pending"
+         (and marker? row) "verified card cleanup is still pending"
+         (= status "pending") "prerequisite is pending approval"
+         (= status "consumed") "prerequisite is approved or in progress"
+         :else nil)})))
+
+(defn dependency-gate! [forge proposal]
+  (when-let [dependency (dependency-state forge proposal)]
+    (when (:blocked dependency)
+      (fail! "dependency_blocked" 1
+             (str "Blocked by " (:proposal_id dependency)
+                  (when-not (str/blank? (:card_name dependency))
+                    (str " (" (:card_name dependency) ")"))
+                  ": " (:blocking_reason dependency) ".")))))
+
 (defn proposal-rows [forge]
   (let [dir (fs/path forge ".swarmforge" "route-proposals")]
     (if (fs/directory? dir)
@@ -338,7 +502,7 @@
            vec)
       [])))
 
-(defn proposal-json [proposal]
+(defn proposal-json [forge proposal]
   (let [status (proposal-status proposal)
         proposed-lane (str (:lane proposal))
         created-lane (some-> (:created-lane proposal) str not-empty)
@@ -346,6 +510,11 @@
                       (or created-lane proposed-lane)
                       proposed-lane)
         project (some-> (:resolved-project proposal) fs/file-name str)
+        dependency (dependency-state forge proposal)
+        completion-marker (valid-completion-marker? proposal)
+        completion-row (when-let [project-root (:resolved-project proposal)]
+                         (board-task project-root (:task-id proposal)))
+        completed? (and completion-marker (nil? completion-row))
         base {:id (:id proposal)
               :name (redact-output (str (:name proposal)))
               :card_name (redact-output (str (:name proposal)))
@@ -357,7 +526,10 @@
               :created_at (redact-output (str (:created-at proposal)))
               :status status
               :note (redact-output (or (:note proposal) ""))
-              :consumed (= status "consumed")}
+              :consumed (= status "consumed")
+              :completion_recorded (boolean completion-marker)
+              :completed (boolean completed?)
+              :blocked (boolean (:blocked dependency))}
         task-fields (cond-> {}
                       (not (str/blank? (or (:task-id proposal) "")))
                       (assoc :task_id (redact-output (str (:task-id proposal))))
@@ -371,7 +543,23 @@
 
                       (not (str/blank? (or (:superseded-at proposal) "")))
                       (assoc :superseded_at
-                             (redact-output (str (:superseded-at proposal)))))]
+                             (redact-output (str (:superseded-at proposal))))
+
+                      (:depends-on proposal)
+                      (assoc :depends_on
+                             (redact-output (str (:depends-on proposal))))
+
+                      dependency
+                      (assoc :dependency dependency)
+
+                      (:completed-at proposal)
+                      (assoc :completed_at
+                             (redact-output (str (:completed-at proposal))))
+
+                      (:completion-report-id proposal)
+                      (assoc :completion_report_id
+                             (redact-output
+                              (str (:completion-report-id proposal)))))]
     (merge base task-fields)))
 
 (defn ensure-pending! [proposal]
@@ -460,6 +648,18 @@
         note-file (nth args 2 nil)
         approval-id (flag-value args "--approval")
         operator-said (flag-value args "--operator-said")
+        depends-on (some-> (flag-value args "--depends-on") str str/trim not-empty)
+        _ (when depends-on
+            (let [{:keys [status reason]}
+                  (proposal-record-for-dependency forge depends-on)]
+              (when (#{"missing" "malformed"} status)
+                (exit! 1 (str "Prerequisite " depends-on " is " status
+                              ": " reason ".")))
+              (when (= "superseded" status)
+                (exit! 1 (str "Prerequisite " depends-on
+                              " was superseded and cannot be depended on.")))
+              (when (dependency-cycle? forge depends-on)
+                (exit! 1 "Dependency cycle detected; proposal was not recorded."))))
         pre-approved (or (not (str/blank? (or approval-id "")))
                          (not (str/blank? (or operator-said ""))))]
     (when (str/blank? name)
@@ -482,7 +682,9 @@
           record {:id id :project (str project) :name name :note note
                   :lane lane :created-at (now)
                   :approval-id approval-id
-                  :operator-said operator-said}]
+                  :operator-said operator-said}
+          record (cond-> record
+                   depends-on (assoc :depends-on depends-on))]
       (fs/create-dirs (fs/parent (proposal-file forge id)))
       (spit (str (proposal-file forge id)) (pr-str record))
       (println "PROPOSED:" id "card" name "in" (str project) "lane" lane)
@@ -520,6 +722,7 @@
                       (str/trim (first (str/split-lines
                                         (str/trim (or (:text record) "")))))
                       "\" — nothing created. Re-propose with route_card.sh propose.")))
+      (dependency-gate! forge proposal)
       (let [current-lane (initial-lane project-root)
             _ (when (not= current-lane lane)
                 (binding [*out* *err*]
@@ -576,6 +779,8 @@
                   "proposal_not_found" "proposal was not found"
                   "proposal_consumed" "proposal was already consumed"
                   "proposal_superseded" "proposal was superseded"
+                  "dependency_blocked" "proposal is blocked by a prerequisite"
+                  "dependency_invalid" "proposal dependency is invalid"
                   "invalid_project" "proposal target is not a project in this forge"
                   "proposal_invalid" "proposal data was malformed"
                   "proposal_unavailable" "route-card operation failed"}]
@@ -591,13 +796,14 @@
                   (filter #(or (nil? project)
                                (= project
                                   (str (fs/file-name (:resolved-project %))))))
-                  (mapv proposal-json))]
+                  (mapv #(proposal-json forge %))
+                  (remove :blocked))]
     {:proposals rows}))
 
 (defn machine-detail! [args]
   (let [forge (forge-root args)
         id (first args)]
-    (proposal-json (read-proposal! forge id))))
+    (proposal-json forge (read-proposal! forge id))))
 
 (defn machine-approve! [args]
   (let [forge (forge-root args)
@@ -606,7 +812,7 @@
         said (flag-value args "--operator-said")
         {:keys [proposal]} (commit-proposal!
                             {:forge forge :id id :explicit explicit :said said})]
-    (proposal-json proposal)))
+    (proposal-json forge proposal)))
 
 (defn machine-main [operation args]
   (binding [*machine-output* true]

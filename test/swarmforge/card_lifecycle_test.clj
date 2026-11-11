@@ -9,6 +9,8 @@
 
 (def repo-root (fs/cwd))
 (def scripts (fs/path repo-root "swarmforge" "scripts"))
+(def completed-report-script
+  (fs/path scripts "completed_card_report.sh"))
 (def fake-agent-command
   (str "sh -c 'echo \"<<AGENT READY>>\"; while IFS= read -r line; do "
        "case \"$line\" in \"[phone \"*) "
@@ -69,6 +71,23 @@
       (is (zero? (:exit result)) (:err result))
       (second (re-find #"PROPOSED: (\S+)" (:out result))))))
 
+(defn propose-dependent! [forge project name note prerequisite]
+  (let [file (fs/path forge (str name ".md"))]
+    (write-file file note)
+    (let [result (route-result "propose" (str project) name (str file)
+                               "--depends-on" prerequisite
+                               "--forge-root" (str forge)
+                               "--operator-said" "yes")]
+      (is (zero? (:exit result)) (:err result))
+      (second (re-find #"PROPOSED: (\S+)" (:out result))))))
+
+(defn approve-proposal! [forge id]
+  (route-json "approve" id "--operator-said" "approve"
+              "--forge-root" (str forge) "--json"))
+
+(defn completed-report [& args]
+  (apply sh/sh (str completed-report-script) args))
+
 (defn board [root & args]
   (apply sh/sh
          (concat ["bb" (str (fs/path scripts "pack_board.bb"))]
@@ -86,6 +105,26 @@
                      {:name name :lane lane :created created :updated updated
                       :task-id task-id :audit audit}))))
       [])))
+
+(defn mark-card-done! [project name]
+  (let [result (board project "done" "--name" name)]
+    (when-not (zero? (:exit result))
+      (throw (ex-info "Could not mark fixture card done" result)))))
+
+(defn verified-cleanup!
+  [forge project-name task-id report-id]
+  (let [input (fs/path forge "tmp" (str report-id ".edn"))]
+    (write-file input
+                (pr-str {:report_id report-id
+                         :family "test"
+                         :lieutenant "lieutenant"
+                         :cards [{:project project-name
+                                  :task_id task-id
+                                  :verification "verified"}]}))
+    (let [recorded (completed-report "record" "--root" (str forge) (str input))]
+      (when-not (zero? (:exit recorded))
+        (throw (ex-info "Could not record completed-card fixture" recorded))))
+    (completed-report "remove" "--root" (str forge) report-id)))
 
 (defn route! [root name task-id]
   (board root "route" "--name" name "--task-id" task-id
@@ -511,6 +550,201 @@
         (is (= "proposal_consumed"
                (get-in duplicate-json [:error :code])))
         (is (= 2 (count (rows project)))))
+      (finally
+        (fs/delete-tree forge)))))
+
+(deftest dependent-proposal-releases-only-after-verified-card-cleanup
+  (let [forge (tmp-forge)
+        alpha (init-project! (fs/path forge "projects" "alpha-app"))
+        beta (init-project! (fs/path forge "projects" "beta-app"))]
+    (try
+      (let [prerequisite-id
+            (propose! forge alpha "prerequisite-card"
+                      "# Prerequisite\n\nFinish first.\n")
+            dependent-id
+            (propose-dependent! forge beta "dependent-card"
+                                "# Dependent\n\nWait for verified cleanup.\n"
+                                prerequisite-id)
+            prerequisite-task-id (atom nil)
+            pending-list (route-json "list" "--forge-root" (str forge) "--json")
+            dependent (route-json "detail" dependent-id
+                                  "--forge-root" (str forge) "--json")]
+        (is (= [prerequisite-id] (mapv :id (:proposals pending-list)))
+            "the blocked dependent is not part of the legacy actionable list")
+        (is (= prerequisite-id (:depends_on dependent)))
+        (is (true? (:blocked dependent)))
+        (is (= "pending" (get-in dependent [:dependency :status])))
+        (is (= "prerequisite-card"
+               (get-in dependent [:dependency :card_name])))
+
+        (let [approved (approve-proposal! forge prerequisite-id)
+              in-progress (route-json "detail" dependent-id
+                                      "--forge-root" (str forge) "--json")
+              shell-blocked (route-result "commit" dependent-id
+                                          "--operator-said" "approve"
+                                          "--forge-root" (str forge))
+              machine-blocked (route-result "approve" dependent-id
+                                            "--operator-said" "approve"
+                                            "--forge-root" (str forge)
+                                            "--json")
+              machine-error (json/parse-string (:out machine-blocked) true)]
+          (reset! prerequisite-task-id (:task_id approved))
+          (is (= "consumed" (:status approved)))
+          (is (true? (:blocked in-progress)))
+          (is (= "in-progress" (get-in in-progress [:dependency :status])))
+          (is (false? (get-in in-progress [:dependency :completed])))
+          (is (not (zero? (:exit shell-blocked))))
+          (is (str/includes? (str (:err shell-blocked) (:out shell-blocked))
+                             prerequisite-id))
+          (is (str/includes? (str (:err shell-blocked) (:out shell-blocked))
+                             "prerequisite-card"))
+          (is (not (zero? (:exit machine-blocked))))
+          (is (= "dependency_blocked"
+                 (get-in machine-error [:error :code]))))
+
+        (mark-card-done! alpha "prerequisite-card")
+        (let [cleanup (verified-cleanup!
+                       forge "alpha-app"
+                       @prerequisite-task-id
+                       "report-dependent-release")
+              _ (is (zero? (:exit cleanup)) (:err cleanup))
+              completed-prerequisite
+              (route-json "detail" prerequisite-id
+                          "--forge-root" (str forge) "--json")
+              released (route-json "detail" dependent-id
+                                   "--forge-root" (str forge) "--json")
+              marker-before (edn/read-string
+                             (slurp (str (fs/path forge ".swarmforge"
+                                                 "route-proposals"
+                                                 (str prerequisite-id ".edn")))))
+              retry (completed-report "remove" "--root" (str forge)
+                                      "report-dependent-release")
+              marker-after (edn/read-string
+                            (slurp (str (fs/path forge ".swarmforge"
+                                                "route-proposals"
+                                                (str prerequisite-id ".edn")))))]
+          (is (= "consumed" (:status completed-prerequisite)))
+          (is (true? (:completed completed-prerequisite)))
+          (is (some? (java.time.Instant/parse
+                      (:completed_at completed-prerequisite))))
+          (is (= "report-dependent-release"
+                 (:completion_report_id completed-prerequisite)))
+          (is (true? (get-in released [:dependency :completed])))
+          (is (false? (:blocked released)))
+          (is (zero? (:exit retry)) (:err retry))
+          (is (= (:completed-at marker-before) (:completed-at marker-after)))
+          (is (= [dependent-id]
+                 (mapv :id (:proposals
+                            (route-json "list" "--forge-root" (str forge)
+                                        "--json")))))
+          (let [approved-dependent (approve-proposal! forge dependent-id)
+                proposal (edn/read-string
+                          (slurp (str (fs/path forge ".swarmforge"
+                                              "route-proposals"
+                                              (str dependent-id ".edn")))))]
+            (is (= "consumed" (:status approved-dependent)))
+            (is (= prerequisite-id (:depends-on proposal))))))
+      (finally
+        (fs/delete-tree forge)))))
+
+(deftest dependent-proposals-fail-closed-without-verified-cleanup
+  (let [forge (tmp-forge)
+        alpha (init-project! (fs/path forge "projects" "alpha-app"))
+        beta (init-project! (fs/path forge "projects" "beta-app"))]
+    (try
+      (testing "missing and superseded prerequisites are refused at proposal time"
+        (let [note (fs/path forge "dependent.md")
+              _ (write-file note "# Dependent\n")
+              missing (route-result "propose" (str beta) "missing-dependent"
+                                    (str note)
+                                    "--depends-on" "proposal-20261111T000000Z"
+                                    "--forge-root" (str forge)
+                                    "--operator-said" "yes")
+              malformed-id "proposal-20261111T000001Z"
+              malformed-file (fs/path forge ".swarmforge" "route-proposals"
+                                     (str malformed-id ".edn"))
+              _ (write-file malformed-file "not an edn map\n")
+              malformed (route-result "propose" (str beta) "malformed-dependent"
+                                      (str note)
+                                      "--depends-on" malformed-id
+                                      "--forge-root" (str forge)
+                                      "--operator-said" "yes")
+              prerequisite (propose! forge alpha "superseded-card"
+                                     "# Superseded\n")
+              file (fs/path forge ".swarmforge" "route-proposals"
+                              (str prerequisite ".edn"))
+              record (edn/read-string (slurp (str file)))]
+          (is (not (zero? (:exit missing))))
+          (is (not (zero? (:exit malformed))))
+          (is (str/includes? (str (:err malformed) (:out malformed))
+                             "malformed"))
+          (write-file file
+                      (pr-str (assoc record
+                                     :superseded-at "2026-11-11T00:00:00Z")))
+          (let [superseded (route-result "propose" (str beta) "superseded-dependent"
+                                         (str note)
+                                         "--depends-on" prerequisite
+                                         "--forge-root" (str forge)
+                                         "--operator-said" "yes")]
+            (is (not (zero? (:exit superseded))))
+            (is (str/includes? (str (:err superseded) (:out superseded))
+                               "superseded")))))
+
+      (testing "a cycle in the prerequisite chain is refused"
+        (let [first-id (propose! forge alpha "cycle-first" "# First\n")
+              second-id (propose-dependent! forge beta "cycle-second" "# Second\n" first-id)
+              first-file (fs/path forge ".swarmforge" "route-proposals"
+                                   (str first-id ".edn"))
+              first-record (edn/read-string (slurp (str first-file)))
+              note (fs/path forge "cycle.md")]
+          (write-file first-file
+                      (pr-str (assoc first-record :depends-on second-id)))
+          (write-file note "# Cycle dependent\n")
+          (let [cycle (route-result "propose" (str beta) "cycle-third"
+                                    (str note)
+                                    "--depends-on" first-id
+                                    "--forge-root" (str forge)
+                                    "--operator-said" "yes")]
+            (is (not (zero? (:exit cycle))))
+            (is (str/includes? (str (:err cycle) (:out cycle))
+                               "Dependency cycle")))))
+
+      (testing "direct done-row deletion does not stamp completion"
+        (let [prerequisite-id (propose! forge alpha "direct-delete"
+                                        "# Direct delete\n")
+              dependent-id (propose-dependent! forge beta "direct-dependent"
+                                               "# Direct dependent\n"
+                                               prerequisite-id)
+              approved (approve-proposal! forge prerequisite-id)]
+          (mark-card-done! alpha "direct-delete")
+          (let [board-file (fs/path alpha ".swarmforge" "board" "tasks.tsv")
+                remaining (->> (str/split-lines (slurp (str board-file)))
+                               (remove #(str/starts-with? % "direct-delete\t"))
+                               (str/join "\n"))]
+            (write-file board-file (str remaining "\n")))
+          (let [proposal-file (fs/path forge ".swarmforge" "route-proposals"
+                                       (str prerequisite-id ".edn"))
+                record (edn/read-string (slurp (str proposal-file)))]
+            (write-file
+             proposal-file
+             (pr-str
+              (assoc record
+                     :completed-at "2026-11-11T00:00:01Z"
+                     :completed-task-id (:task_id approved)
+                     :completion-report-id "report-interrupted-cleanup"))))
+          (let [detail (route-json "detail" dependent-id
+                                   "--forge-root" (str forge) "--json")
+                commit (route-result "commit" dependent-id
+                                     "--operator-said" "approve"
+                                     "--forge-root" (str forge))]
+            (is (= "consumed" (:status approved)))
+            (is (false? (get-in detail [:dependency :completion_recorded])))
+            (is (true? (:blocked detail)))
+            (is (= "verified card cleanup is still pending"
+                   (get-in detail [:dependency :blocking_reason])))
+            (is (not (zero? (:exit commit))))
+            (is (str/includes? (str (:err commit) (:out commit))
+                               "verified card cleanup is still pending")))))
       (finally
         (fs/delete-tree forge)))))
 

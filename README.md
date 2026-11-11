@@ -624,6 +624,34 @@ once by rerunning the identical answer with `--approve-route-card`; that
 backfill preserves its response, timestamps and conversation metadata. The
 answer tool records metadata only; it never approves or executes the action.
 
+### Dependent route proposals
+
+A route proposal may name one stable prerequisite:
+
+```sh
+route_card.sh propose <project-root> <task-name> <note-file> \
+  --depends-on <proposal-id>
+```
+
+The prerequisite must exist in the same forge, must not be superseded and must
+not form a cycle. `commit` and machine `approve` refuse while it is pending,
+approved, or in progress. Approval creates the prerequisite card but does not
+release its dependents.
+
+Only `completed_card_report.sh remove`, after validating the report's exact
+verified done snapshots, records prerequisite completion. It writes a verified
+completion stamp before board cleanup and a separate cleanup-complete stamp
+after successful removal. Release requires both stamps and the absence of the
+linked board row, so a failed or interrupted cleanup remains blocked and can be
+retried without changing the original completion time.
+
+Machine proposal detail exposes `depends_on`, a bounded `dependency` object,
+`completion_recorded`, `completed` and derived `blocked` state. The legacy list
+continues to return only pending proposals that are actionable; blocked
+dependents appear in detail and become listable after verified cleanup. Proposal
+records are retained after completion and can contain only one prerequisite in
+this schema version.
+
 General Lieutenant history can be read as a bounded cursor page:
 
 ```text

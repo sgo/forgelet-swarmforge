@@ -23,7 +23,10 @@
        "\n"
        "record accepts a report id once and preserves the original record on any\n"
        "retry. remove deletes only verified rows whose done snapshot still matches\n"
-       "the recorded evidence. Retained rows remain on their boards.\n"))
+       "the recorded evidence. Before removing a row it stamps the consumed route\n"
+       "proposal that created it with verified completion and task identity, which\n"
+       "is the only event that releases dependent proposals. Retained rows remain\n"
+       "on their boards.\n"))
 
 (def report-id-re #"[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}")
 (def family-re #"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
@@ -505,6 +508,88 @@
       (.lock channel)
       (f))))
 
+(defn route-proposals-dir [forge]
+  (fs/path forge ".swarmforge" "route-proposals"))
+
+(defn linked-route-proposals [forge verified]
+  (let [dir (route-proposals-dir forge)
+        identities (set (map (juxt :project :task_id) verified))]
+    (if (fs/directory? dir)
+      (->> (fs/list-dir dir)
+           (filter #(and (fs/regular-file? %)
+                         (str/ends-with? (fs/file-name %) ".edn")))
+           (keep (fn [file]
+                   (let [proposal (try
+                                    (edn/read-string (slurp (str file)))
+                                    (catch Exception _ nil))]
+                     (when (and (map? proposal)
+                                (string? (:project proposal))
+                                (string? (:task-id proposal)))
+                       (let [project (try
+                                       (fs/canonicalize
+                                        (fs/path (str (:project proposal))))
+                                       (catch Exception _ nil))
+                             project-name (some-> project fs/file-name str)]
+                         (when (and project-name
+                                    (contains? identities
+                                               [project-name (:task-id proposal)]))
+                           {:file file :proposal proposal}))))))
+           vec)
+      [])))
+
+(defn stamp-linked-proposals! [forge verified report-id]
+  (let [completed-at (now)]
+    (doseq [{:keys [file proposal]} (linked-route-proposals forge verified)]
+      (when-not (and (string? (:consumed-at proposal))
+                     (not (str/blank? (:consumed-at proposal))))
+        (fail! (str "Linked proposal " (:id proposal)
+                    " is not consumed; completed-card cleanup was not performed.")))
+      (let [existing-completed-at (parse-instant (:completed-at proposal))
+            existing-marker? (or (:completed-at proposal)
+                                 (:completed-task-id proposal)
+                                 (:completion-report-id proposal)
+                                 (:cleanup-complete-at proposal))
+            valid-marker? (and existing-completed-at
+                               (= (:completed-task-id proposal)
+                                  (:task-id proposal))
+                               (re-matches report-id-re
+                                           (str (:completion-report-id proposal))))]
+        (when (and existing-marker? (not valid-marker?))
+          (fail! (str "Linked proposal " (:id proposal)
+                      " has a malformed completion marker.")))
+        (when-not valid-marker?
+        (atomic-write!
+         file
+         (str (pr-str
+               (assoc proposal
+                      :completed-at completed-at
+                      :completed-task-id (:task-id proposal)
+                      :completion-report-id report-id))
+              "\n")))))))
+
+(defn finalize-linked-proposals! [forge verified report-id]
+  (doseq [{:keys [file proposal]} (linked-route-proposals forge verified)]
+    (let [completed? (and (parse-instant (:completed-at proposal))
+                          (= (:completed-task-id proposal)
+                             (:task-id proposal))
+                          (re-matches report-id-re
+                                      (str (:completion-report-id proposal))))]
+      (when-not completed?
+        (fail! (str "Linked proposal " (:id proposal)
+                    " lacks its verified completion stamp.")))
+      (when (and (:cleanup-complete-at proposal)
+                 (nil? (parse-instant (:cleanup-complete-at proposal))))
+        (fail! (str "Linked proposal " (:id proposal)
+                    " has a malformed cleanup marker.")))
+      (when-not (parse-instant (:cleanup-complete-at proposal))
+        (atomic-write!
+         file
+         (str (pr-str
+               (assoc proposal
+                      :cleanup-complete-at (now)
+                      :cleanup-report-id report-id))
+              "\n"))))))
+
 (defn board-text [rows]
   (if (seq rows)
     (str (str/join "\n" (map :line rows)) "\n")
@@ -544,6 +629,10 @@
                 (when (not= completed_at (:updated row))
                   (fail! (str "Reported task id " task_id
                               " changed after the report; retained it.")))))))
+        ;; Completion is recorded before cleanup, but route-card release also
+        ;; requires the linked board row to be gone. A crash between these two
+        ;; steps therefore stays blocked and is repaired by rerunning remove.
+        (stamp-linked-proposals! forge verified report-id)
         (doseq [[project cards] by-project]
           (let [project-root (project-root! forge project)
                 remove-ids (set (map :task_id cards))]
@@ -558,8 +647,10 @@
                     (fs/delete-if-exists
                      (fs/path project-root ".swarmforge" "board"
                               (str name ".txt")))))))))
+        (finalize-linked-proposals! forge verified report-id)
         (println (str "REMOVED:" (count verified)
-                      ":" (count (:retained_cards record))))))))
+                      ":" (count (:retained_cards record))
+                      ":" (count (linked-route-proposals forge verified))))))))
 
 (defn -main [& args]
   (let [opts (parse-args args)
