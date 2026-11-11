@@ -383,7 +383,7 @@
        (or (i-status? sentence) (other-status? sentence))))
 
 (defn strip-bullet [sentence]
-  (str/replace (or sentence "") #"^[•*]\s*" ""))
+  (str/replace (or sentence "") #"^[•*›]\s*" ""))
 
 (defn codex-throwaway-bullet? [sentence]
   (let [n (str/lower-case (fold-apostrophe (strip-bullet sentence)))]
@@ -862,10 +862,10 @@
   #{"zsh" "bash" "sh" "dash" "ksh" "fish" "tcsh" "csh" "login" "-zsh" "-bash"})
 
 (def activity-working-pattern
-  #"(?im)(?:esc\s+to\s+interrupt|waiting\s+for\s+response(?:\s+\d+(?:\.\d+)?s)?|^\s*[•*]?\s*working(?:\s*\([^)\r\n]*\))?\s*$)")
+  #"(?im)^\s*(?:[•*]\s*working(?:\s*\([^)\r\n]*\))?|[✻✽✶✳]\s*.*\(esc\s+to\s+interrupt[^)\r\n]*\)|esc\s+to\s+interrupt(?:\s*[·.)-].*)?|waiting\s+for\s+response(?:\s+\d+(?:\.\d+)?s)?)\s*$")
 
 (def activity-idle-pattern
-  #"(?im)^\s*(?:\? for shortcuts|enter:send\s+esc:cancel|ready(?: for (?:the )?next (?:task|card))?[.!]?|idle[.!]?|(?:done|completed|finished)(?: successfully)?[.!]?)\s*$")
+  #"(?im)^\s*(?:[›❯]\s+ask (?:codex|claude|copilot) to do anything|\? for shortcuts|enter:send\s+esc:cancel|ready(?: for (?:the )?next (?:task|card))?[.!]?|idle[.!]?|(?:done|completed|finished)(?: successfully)?[.!]?)\s*$")
 
 (def activity-token-pattern
   #"(?i)\b(?:gh[pousr]_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|sk-[A-Za-z0-9_-]{10,}|xox[baprs]-[A-Za-z0-9-]{10,}|Bearer\s+[A-Za-z0-9._~+/=-]{10,})\b")
@@ -886,14 +886,6 @@
                            (str/replace #"^.*[\\/]" ""))]
     (contains? master-shells normalized)))
 
-(defn activity-output-state [text]
-  (let [tail (str/join "\n" (last-n-lines (pane-sample text nil)
-                                          activity-tail-lines))]
-    (cond
-      (re-find activity-working-pattern tail) "working"
-      (re-find activity-idle-pattern tail) "idle"
-      :else "unknown")))
-
 (defn safe-activity-line [line]
   (some-> line
           (str/replace #"[\p{Cc}\p{Cf}]" " ")
@@ -910,12 +902,52 @@
           str/trim
           not-empty))
 
-(defn activity-status-line [text]
-  (let [tail (str/join "\n" (last-n-lines (pane-sample text nil) 20))
-        recognized (->> (pane-sentences tail)
+(defn last-pattern-match [pattern text]
+  (let [matcher (re-matcher pattern text)]
+    (loop [found nil]
+      (if (.find matcher)
+        (recur {:start (.start matcher)
+                :line (str/trim (.group matcher))})
+        found))))
+
+(defn activity-tail-lines-for [text]
+  (last-n-lines (pane-sample text nil) activity-tail-lines))
+
+(defn activity-marker [text]
+  (let [lines (activity-tail-lines-for text)
+        tail (str/join "\n" lines)
+        working (last-pattern-match activity-working-pattern tail)
+        idle (last-pattern-match activity-idle-pattern tail)
+        marker (cond
+                 (nil? working) idle
+                 (nil? idle) working
+                 (>= (:start idle) (:start working)) idle
+                 :else working)
+        line-number (when marker
+                      (count (re-seq #"\n"
+                                     (subs tail 0 (:start marker)))))]
+    (when marker
+      (assoc marker
+             :state (if (= marker idle) "idle" "working")
+             :line-index (or line-number 0)
+             :kind (if (and (= marker idle)
+                            (re-find #"(?i)ask codex to do anything"
+                                     (:line marker)))
+                     :codex-idle-prompt
+                     :generic)))))
+
+(defn activity-output-state [text]
+  (or (:state (activity-marker text)) "unknown"))
+
+(defn activity-status-line [text marker]
+  (let [lines (activity-tail-lines-for text)
+        current (str/join "\n" (drop (or (:line-index marker) 0) lines))
+        recognized (->> (pane-sentences current)
                         (filter status-sentence?)
-                        last)]
-    (safe-activity-line (strip-bullet recognized))))
+                        last)
+        candidate (or recognized
+                      (some-> (:line marker) strip-bullet))]
+    (safe-activity-line candidate)))
 
 (defn pane-current-command [socket target]
   (state-metric! :tmux-command-reads)
@@ -952,14 +984,16 @@
         available? (and alive? (not (fallback-shell? command)))
         backend (when row (backend-name row))
         text (when available? (state-pane-text root "lieutenant" row))
-        state (if available? (activity-output-state text) "unavailable")
+        marker (when available? (activity-marker text))
+        state (if available? (or (:state marker) "unknown") "unavailable")
         heat (if available?
                (role-heat root "lieutenant" true text backend)
                0)
         activity {:alive (boolean alive?)
                   :state state
                   :heat heat
-                  :status_line (when available? (activity-status-line text))}
+                  :status_line (when (and available? marker)
+                                 (activity-status-line text marker))}
         fingerprint (activity-fingerprint activity)
         now (.format java.time.format.DateTimeFormatter/ISO_INSTANT
                      (java.time.Instant/now))

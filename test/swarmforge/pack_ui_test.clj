@@ -4702,16 +4702,110 @@
       (is (nil? (:status_line fallback)))
       (is (re-matches #"\d{4}-\d\d-\d\dT.+Z" (:last_changed_at working))))))
 
+(deftest forge-lieutenant-runtime-activity-uses-the-latest-recognized-marker
+  ;; Given Codex-style working and idle markers in either order
+  ;; When the latest explicit marker is selected from the bounded tail
+  ;; Then the newest marker determines activity without exposing footer paths
+  (let [root (tmp-dir)
+        captured-idle
+        (str "• Working (32s • esc to interrupt)\n"
+             "\n"
+             "› Ask Codex to do anything\n"
+             "\n"
+             "  DeepSeek-Flash high · ~/forgelet-forge"
+             " · Trace lieutenant prompt references · ← for agents\n")
+        idle-then-working
+        (str "› Ask Codex to do anything\n"
+             "\n"
+             "• Working (1s • esc to interrupt)\n")
+        working-then-idle
+        (str "• Working (2s • esc to interrupt)\n"
+             "\n"
+             "› Ask Codex to do anything\n")]
+    (seed-mini-forge! root)
+    (write-file (fs/path root ".swarmforge/roles.tsv")
+                (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tcodex\ttask\tforward-only\n"
+                        root))
+    (let [idle (:activity
+                (lieutenant-activity-state
+                 root "alive" "codex" captured-idle))
+          working (:activity
+                   (lieutenant-activity-state
+                    root "alive" "codex" idle-then-working))
+          idle-again (:activity
+                      (lieutenant-activity-state
+                       root "alive" "codex" working-then-idle))]
+      (is (= "idle" (:state idle)))
+      (is (= "Ask Codex to do anything" (:status_line idle)))
+      (is (not (str/includes? (:status_line idle) "forgelet-forge")))
+      (is (= "working" (:state working)))
+      (is (= "idle" (:state idle-again))))))
+
+(deftest forge-lieutenant-runtime-activity-preserves-agent-markers
+  ;; Given the existing Claude, Copilot and Grok marker forms
+  ;; When activity is classified
+  ;; Then their explicit working and idle prompts remain recognized
+  (let [root (tmp-dir)]
+    (seed-mini-forge! root)
+    (write-file (fs/path root ".swarmforge/roles.tsv")
+                (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tcodex\ttask\tforward-only\n"
+                        root))
+    (doseq [[agent text expected]
+            [["Claude" "✻ Sauteing… (esc to interrupt)\n" "working"]
+             ["Claude" "? for shortcuts\n" "idle"]
+             ["Copilot" "esc to interrupt · 4s\n" "working"]
+             ["Copilot" "❯ Ask Copilot to do anything\n" "idle"]
+             ["Grok" "Waiting for response 3s\n" "working"]
+             ["Grok" "enter:send  Esc:cancel\n" "idle"]]]
+      (let [activity
+            (:activity
+             (lieutenant-activity-state
+              root "alive" (str/lower-case agent) text))]
+        (is (= expected (:state activity))
+            (str agent " marker: " text))))))
+
+(deftest forge-lieutenant-runtime-activity-does-not-guess-from-transcript
+  ;; Given queries, a non-empty prompt, token counters and unrelated transcript output
+  ;; When no current activity marker exists
+  ;; Then the Lieutenant remains unknown and no status line is invented
+  (let [root (tmp-dir)
+        unknown-text
+        (str "How does esc to interrupt work?\n"
+             "› Ask Codex to refactor the dashboard\n"
+             "Token count: 12,345\n"
+             "DeepSeek-Flash high · 32K tokens remaining\n"
+             "An unrelated transcript paragraph.\n")]
+    (seed-mini-forge! root)
+    (write-file (fs/path root ".swarmforge/roles.tsv")
+                (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tcodex\ttask\tforward-only\n"
+                        root))
+    (let [activity (:activity
+                    (lieutenant-activity-state
+                     root "alive" "codex" unknown-text))
+          fallback (:activity
+                    (lieutenant-activity-state
+                     root "alive" "zsh"
+                     "› Ask Codex to do anything\n"))
+          missing (:activity
+                   (lieutenant-activity-state root "missing" "" ""))]
+      (is (= "unknown" (:state activity)))
+      (is (nil? (:status_line activity)))
+      (is (= "unavailable" (:state fallback)))
+      (is (= "unavailable" (:state missing)))
+      (is (nil? (:status_line fallback)))
+      (is (nil? (:status_line missing))))))
+
 (deftest forge-lieutenant-runtime-activity-bounds-and-redacts-status
   ;; Given recognized status text carrying controls, paths, tokens and an unsafe length
   ;; When it is projected into the dashboard activity fact
   ;; Then only one short safe line remains
   (let [root (tmp-dir)
-        unsafe (str "I'm checking /Users/operator/private/project and "
+        unsafe (str "esc to interrupt · 1s\n"
+                    "I'm checking /Users/operator/private/project and "
                     "ghp_abcdefghijklmnopqrstuvwxyz0123 for "
                     "swarmforge-private-socket "
                     (apply str (repeat 300 "x"))
-                    ".\u0007\nesc to interrupt · 1s\n")]
+                    ".\u0007\n")]
     (seed-mini-forge! root)
     (write-file (fs/path root ".swarmforge/roles.tsv")
                 (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tclaude\ttask\tforward-only\n"

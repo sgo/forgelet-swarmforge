@@ -545,6 +545,18 @@ generation latency must not decide Family reachability: a slow snapshot can
 leave the previous good state in place while health remains independently
 available.
 
+### Lieutenant activity markers
+
+Lieutenant activity is classified from the latest explicit marker in the
+bounded pane tail. A later `› Ask Codex to do anything` empty-composer prompt
+wins over an earlier Working marker, while a later Working or waiting indicator
+wins over an earlier idle prompt. The same rule covers the existing Claude,
+Copilot and Grok prompt and work markers. Marker status lines are normalized,
+length-bounded and redacted before they enter `/api/state`.
+
+No recognized marker means `unknown`; it is not evidence of idleness. A missing
+session or a fallback shell remains `unavailable`.
+
 Chat entries in `/api/state` carry an optional `proposal_id` when that request
 belongs to a proposal discussion and an optional `thread_id` when it belongs to
 a durable conversation. An optional bounded `source`, such as
