@@ -77,9 +77,11 @@ Do not compose, restart or modify the active forge as part of this card.
 
 ## Verification
 
-Automated stage fixtures demonstrate report-only and documentation-only
-commits preserving valid technical evidence while genuine implementation
-inputs still invalidate it. The complete layer gates pass on the committed tree.
+- `bb test`: 429 tests, 2,808 assertions, all dashboard tests.
+- `bb crap`: passed with refreshed `target/coverage/lcov.info`.
+- Focused fixtures prove report-only and documentation-only commits preserve
+  spec/code/clean evidence while requirement, feature, source, test, helper,
+  configuration and deletion changes invalidate the appropriate stages.
 
 ## Operator acceptance
 
