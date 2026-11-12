@@ -16,6 +16,15 @@ unreadable or malformed file fails the launch visibly.
 The launch boundary always removes `NO_COLOR`; terminal variables such as
 `TERM` and `COLORTERM` are preserved.
 
+The operator may install `$HOME/.config/forgelet/agent-credentials.sh` as an
+owner-only (`600`) device hook that exports `GH_TOKEN` and, when available,
+`GITHUB_PACKAGES_TOKEN`. Persistent agents source it into their final launch
+shell. `GH_TOKEN` is always exposed; the packages token is exposed only for
+projects with `pom.xml`, `.mvn/`, or `swarmforge/package-registry.conf` naming
+`github-packages`. Caller values win. The loader configures and verifies Git
+through `gh` without printing values. Restart the project agent after changing
+the hook.
+
 ## Documentation contract
 
 Every completed card includes the `docs` gate. The maintained surfaces are:

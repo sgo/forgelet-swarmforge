@@ -444,6 +444,211 @@
         (stop-agent-session! project)
         (delete-tree! forge)))))
 
+(deftest persistent-agent-launches-load-device-github-credentials
+  (let [root (tmp-dir)
+        home (fs/path root "home")
+        bin (fs/path root "bin")
+        project (fs/path root "ordinary")
+        packages-project (fs/path root "packages")
+        registry-project (fs/path root "registry")
+        hook (fs/path home ".config" "forgelet" "agent-credentials.sh")
+        agent-log (fs/path root "agent.log")
+        auth-log (fs/path root "auth.log")
+        loader (fs/path repo-root "swarmforge" "scripts"
+                       "load-project-runtime-env.sh")
+        gh-token "gh-token-sentinel-never-log"
+        packages-token "packages-token-sentinel-never-log"
+        probe (fs/path root "probe.sh")
+        gh (fs/path bin "gh")
+        git (fs/path bin "git")]
+    (try
+      (doseq [dir [project packages-project registry-project]]
+        (fs/create-dirs (fs/path dir "swarmforge" "scripts"))
+        (fs/copy (fs/path repo-root "swarmforge" "templates" "agent-project"
+                           "scripts" "github-packages-token.sh")
+                 (fs/path dir "swarmforge" "scripts" "github-packages-token.sh")
+                 {:replace-existing true})
+        (fs/set-posix-file-permissions
+         (fs/path dir "swarmforge" "scripts" "github-packages-token.sh")
+         "rwxr-xr-x"))
+      (write-file (fs/path packages-project "pom.xml") "<project/>\n")
+      (write-file (fs/path registry-project "swarmforge" "package-registry.conf")
+                  "github-packages\n")
+      (write-file
+       gh
+       (str "#!/bin/sh\n"
+            "printf 'gh:%s:%s\\n' \"$*\" \"${GH_TOKEN:+present}\" "
+            ">> \"$SWARMFORGE_TEST_AUTH_LOG\"\n"
+            "exit 0\n"))
+      (write-file
+       git
+       (str "#!/bin/sh\n"
+            "printf 'git:%s:%s\\n' \"$*\" \"${GH_TOKEN:+present}\" "
+            ">> \"$SWARMFORGE_TEST_AUTH_LOG\"\n"
+            "exit 0\n"))
+      (fs/set-posix-file-permissions gh "rwxr-xr-x")
+      (fs/set-posix-file-permissions git "rwxr-xr-x")
+      (write-file
+       probe
+       (str "#!/usr/bin/env bash\n"
+            "gh_state=absent; [[ -n \"${GH_TOKEN:-}\" ]] && gh_state=present\n"
+            "packages_state=absent; [[ -n \"${GITHUB_PACKAGES_TOKEN:-}\" ]] && "
+            "packages_state=present\n"
+            "printf 'agent:%s|%s\\n' \"$gh_state\" \"$packages_state\" "
+            "> \"$SWARMFORGE_TEST_AGENT_LOG\"\n"
+            "git ls-remote https://github.com/fixture/repository.git >/dev/null\n"
+            "git push --dry-run https://github.com/fixture/repository.git HEAD >/dev/null\n"
+            "if maven_token=\"$(./swarmforge/scripts/github-packages-token.sh 2>/dev/null)\"; then\n"
+            "  [[ -n \"$maven_token\" ]] && printf 'maven:present\\n' >> \"$SWARMFORGE_TEST_AGENT_LOG\"\n"
+            "else\n"
+            "  printf 'maven:absent\\n' >> \"$SWARMFORGE_TEST_AGENT_LOG\"\n"
+            "fi\n"
+            "if [[ -n \"${EXPECTED_GH_TOKEN:-}\" ]]; then\n"
+            "  [[ \"$GH_TOKEN\" == \"$EXPECTED_GH_TOKEN\" ]] && "
+            "printf 'gh:caller\\n' >> \"$SWARMFORGE_TEST_AGENT_LOG\"\n"
+            "fi\n"
+            "if [[ -n \"${EXPECTED_PACKAGES_TOKEN:-}\" ]]; then\n"
+            "  [[ \"$GITHUB_PACKAGES_TOKEN\" == \"$EXPECTED_PACKAGES_TOKEN\" ]] && "
+            "printf 'packages:caller\\n' >> \"$SWARMFORGE_TEST_AGENT_LOG\"\n"
+            "fi\n"))
+      (fs/set-posix-file-permissions probe "rwxr-xr-x")
+
+      (let [run-probe
+            (fn [dir extra]
+              (fs/delete-if-exists agent-log)
+              (fs/delete-if-exists auth-log)
+              (run-env dir
+                       (merge {"HOME" (str home)
+                               "PATH" (str bin ":" (System/getenv "PATH"))
+                               "SWARMFORGE_TEST_AGENT_LOG" (str agent-log)
+                               "SWARMFORGE_TEST_AUTH_LOG" (str auth-log)}
+                              extra)
+                       "bash" (str loader) (str probe)))]
+        (testing "an absent hook preserves the previous launch behavior"
+          (let [result (run-probe project {})
+                text (str (:out result) (:err result))]
+            (is (zero? (:exit result)) (:err result))
+            (is (str/includes? (slurp (str agent-log))
+                               "agent:absent|absent"))
+            (is (not (str/includes? text gh-token)))
+            (is (not (str/includes? text packages-token)))))
+
+        (write-file
+         hook
+         (str "export GH_TOKEN='" gh-token "'\n"
+              "export GITHUB_PACKAGES_TOKEN='" packages-token "'\n"))
+        (fs/set-posix-file-permissions hook "rw-------")
+
+        (testing "ordinary projects receive GH_TOKEN but not the packages token"
+          (let [result (run-probe project {})
+                text (str (:out result) (:err result))]
+            (is (zero? (:exit result)) (:err result))
+            (is (str/includes? (slurp (str agent-log))
+                               "agent:present|absent"))
+            (is (str/includes? (slurp (str agent-log)) "maven:absent"))
+            (is (str/includes? (slurp (str auth-log))
+                               "gh:auth setup-git --hostname github.com:present"))
+            (is (str/includes? (slurp (str auth-log))
+                               "gh:auth status --hostname github.com:present"))
+            (is (str/includes? (slurp (str auth-log))
+                               "git:ls-remote https://github.com/fixture/repository.git:present"))
+            (is (str/includes? (slurp (str auth-log))
+                               "git:push --dry-run https://github.com/fixture/repository.git HEAD:present"))
+            (is (not (str/includes? text gh-token)))
+            (is (not (str/includes? text packages-token)))))
+
+        (testing "ordinary projects never expose even an explicitly supplied packages token"
+          (let [result (run-probe project
+                                  {"GITHUB_PACKAGES_TOKEN" "ordinary-must-not-receive"})]
+            (is (zero? (:exit result)) (:err result))
+            (is (str/includes? (slurp (str agent-log))
+                               "agent:present|absent"))))
+
+        (testing "Maven projects receive both distinct tokens"
+          (let [result (run-probe packages-project {})
+                text (str (:out result) (:err result))]
+            (is (zero? (:exit result)) (:err result))
+            (is (str/includes? (slurp (str agent-log))
+                               "agent:present|present"))
+            (is (str/includes? (slurp (str agent-log)) "maven:present"))
+            (is (not (str/includes? text gh-token)))
+            (is (not (str/includes? text packages-token)))))
+
+        (testing "an explicit package-registry declaration also receives both tokens"
+          (let [result (run-probe registry-project {})]
+            (is (zero? (:exit result)) (:err result))
+            (is (str/includes? (slurp (str agent-log))
+                               "agent:present|present"))
+            (is (str/includes? (slurp (str agent-log)) "maven:present"))))
+
+        (testing "explicit caller values win over the device hook"
+          (let [caller-gh "caller-gh-token-value"
+                caller-packages "caller-packages-token-value"
+                result (run-probe packages-project
+                                  {"GH_TOKEN" caller-gh
+                                   "GITHUB_PACKAGES_TOKEN" caller-packages
+                                   "EXPECTED_GH_TOKEN" caller-gh
+                                   "EXPECTED_PACKAGES_TOKEN" caller-packages})
+                text (str (:out result) (:err result))
+                log (slurp (str agent-log))]
+            (is (zero? (:exit result)) (:err result))
+            (is (str/includes? log "gh:caller"))
+            (is (str/includes? log "packages:caller"))
+            (is (not (str/includes? text caller-gh)))
+            (is (not (str/includes? text caller-packages))))))
+      (finally
+        (when (fs/exists? hook)
+          (fs/set-posix-file-permissions hook "rw-------"))
+        (delete-tree! root)))))
+
+(deftest malformed-or-incomplete-device-credential-hooks-fail-bounded
+  (let [root (tmp-dir)
+        home (fs/path root "home")
+        project (fs/path root "project")
+        hook (fs/path home ".config" "forgelet" "agent-credentials.sh")
+        loader (fs/path repo-root "swarmforge" "scripts"
+                       "load-project-runtime-env.sh")
+        secret "credential-hook-secret-never-print"]
+    (try
+      (fs/create-dirs project)
+      (write-file (fs/path project "pom.xml") "<project/>\n")
+      (let [run-hook
+            (fn [extra]
+              (run-env project
+                       (merge {"HOME" (str home)
+                               "PATH" (System/getenv "PATH")}
+                              extra)
+                       "bash" (str loader) "printf 'unexpected success\\n'"))]
+        (doseq [[label body mode expected]
+                [["syntax" "if then\n" "rw-------" "malformed shell syntax"]
+                 ["missing-gh"
+                  (str "export GITHUB_PACKAGES_TOKEN='" secret "'\n")
+                  "rw-------" "did not load GH_TOKEN"]
+                 ["missing-packages"
+                  (str "export GH_TOKEN='" secret "'\n")
+                  "rw-------" "did not load GITHUB_PACKAGES_TOKEN"]
+                 ["group-readable"
+                  (str "export GH_TOKEN='" secret "'\n"
+                       "export GITHUB_PACKAGES_TOKEN='" secret "'\n")
+                  "rw-r--r--" "must be owner-only"]]]
+          (write-file hook body)
+          (fs/set-posix-file-permissions hook mode)
+          (let [result (run-hook {})
+                text (str (:out result) (:err result))]
+            (is (not (zero? (:exit result))) label)
+            (is (str/includes? text expected) label)
+            (is (not (str/includes? text secret)) label)))
+        (fs/set-posix-file-permissions hook "---------")
+        (let [result (run-hook {})
+              text (str (:out result) (:err result))]
+          (is (not (zero? (:exit result))))
+          (is (str/includes? text "cannot read credential hook"))
+          (is (not (str/includes? text secret)))))
+      (finally
+        (when (fs/exists? hook)
+          (fs/set-posix-file-permissions hook "rw-------"))
+        (delete-tree! root)))))
+
 (deftest installed-agent-project-cache-is-complete-and-composes-every-agent
   (let [root (tmp-dir)
         forge (fixture-forge)

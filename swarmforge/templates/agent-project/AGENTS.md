@@ -17,6 +17,13 @@ Caller-supplied values win over that file. Do not commit device-specific values.
 The launch boundary removes `NO_COLOR` so agent output keeps colour; do not
 restore it in project configuration.
 
+The launch shell may also source the operator-owned
+`$HOME/.config/forgelet/agent-credentials.sh` hook. `GH_TOKEN` is available for
+GitHub pushes; `GITHUB_PACKAGES_TOKEN` is available only for Maven or explicitly
+package-registry projects. Never print either token. Check credentials by
+variable name or successful command outcome only. Do not copy hook values into
+the project, stage state, task notes, logs or handoffs.
+
 The operator gives the card. You write the task note and Gherkin, validate
 them, and record the spec bundle. It is approved automatically by default, or
 proposed for operator approval when the forge opts back into that policy. Do

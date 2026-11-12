@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Print the classic GitHub Packages token the release publishes with.
-# The devbox exports GITHUB_PACKAGES_TOKEN in a login shell. This helper
-# deliberately does not fall back to `gh auth token`: GH_TOKEN is a
-# fine-grained token, and that token type cannot read GitHub Packages.
+# The persistent-agent launch exposes this variable from the owner-only device
+# credential hook for Maven/package-registry projects. This helper deliberately
+# does not fall back to `gh auth token`: GH_TOKEN is a fine-grained token, and
+# that token type cannot read GitHub Packages.
 set -euo pipefail
 
 token="${GITHUB_PACKAGES_TOKEN:-}"

@@ -178,6 +178,25 @@ when present. Values already present in the launcher environment win, so a
 caller can override the file. A missing file is harmless; unreadable or
 malformed content fails the launch visibly.
 
+Persistent project launches also source one optional device-local credential
+hook at `$HOME/.config/forgelet/agent-credentials.sh`. It must be owned by the
+current user, mode `600`, a regular non-symlink shell file, and it must export
+the GitHub credentials it reads from the operator's keychain. Hook output is
+suppressed and the hook is sourced into the final agent shell, so exports
+survive without placing token values in commands, configuration, repositories
+or logs.
+
+`GH_TOKEN` is available to every project agent. `GITHUB_PACKAGES_TOKEN` is
+available only when the project declares a package-registry need through
+`pom.xml`, `.mvn/`, or `swarmforge/package-registry.conf` containing
+`github-packages`. The tokens remain distinct. Explicit caller values override
+the hook; an ordinary project never receives the packages token. When
+`GH_TOKEN` is present the loader runs `gh auth setup-git` and
+`gh auth status`, reporting variable names only on failure. An absent hook is
+backward compatible; a present malformed, non-readable, unsafe or incomplete
+hook fails before the agent starts. Restart existing persistent agents after
+installing or changing the hook.
+
 Every persistent project or forge-role launch boundary removes inherited
 `NO_COLOR`, including a value supplied by the runtime environment file. A valid
 caller-provided `TERM`, `COLORTERM` and `LANG` is preserved. If a pane inherits

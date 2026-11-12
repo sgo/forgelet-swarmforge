@@ -42,6 +42,13 @@ A token helper lives under `scripts/`, Maven settings under `.mvn/`, and the
 `distributionManagement` in the `pom.xml`. A configured release with no way to publish fails
 loudly when the release is attempted.
 
+## `swarmforge/package-registry.conf` - whether the agent receives a registry credential
+
+Optional. Maven projects are already detected by `pom.xml` or `.mvn/`. A non-Maven project
+that resolves GitHub Packages assets can put `github-packages` in this file. Only then does
+the persistent-agent launch expose `GITHUB_PACKAGES_TOKEN`; ordinary projects receive only
+`GH_TOKEN`. The file declares a credential need and never contains the token itself.
+
 ## `swarmforge/hooks/card-complete.sh` - what happens when a card finishes
 
 The project's finishing step. The tooling decides *when* it is true; the project decides
