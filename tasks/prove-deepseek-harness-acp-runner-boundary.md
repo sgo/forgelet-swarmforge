@@ -120,5 +120,4 @@ fixture test.
 
 ## Operator acceptance
 
-None unless the live trial requires a human permission decision or additional
-host access.
+None.
