@@ -355,6 +355,22 @@ invalidate the stages that declare them. Missing legacy input hashes are stale;
 unknown stamp inputs visibly widen to the whole tree. The upgrader installs this
 policy into existing projects' `AGENTS.md` and `STAGES.md`.
 
+Task-note spec hashes omit exactly two report-metadata sections:
+`## Verification` and `## Operator acceptance`. The sections remain in the file,
+and `stage complete` parses them in full for report validation and operator
+residuals, but editing them does not stale the spec or technical gates.
+Requirement-bearing content and every other task-note section still count.
+
+Projects should stamp the exact inputs their commands consume. This layer's
+`code` stamp covers Babashka task configuration, root launchers, devbox helpers,
+scripts, templates, roles, constitution, tests and browser-test configuration;
+`clean` covers the CRAP/coverage command, helpers and coverage test sources.
+Documentation and task notes are excluded where no gate consumes them. Do not
+copy `:whole-tree` as a substitute for identifying real inputs. Missing files
+remain visible as missing and make the stage stale; unknown stamp values still
+widen to the whole tree. The exact committed-tree and all-stages-current
+completion rules are unchanged.
+
 New and next-touched single-agent task reports carry `## Verification` and
 `## Operator acceptance`. Verification records automated gate evidence and
 source delivery. Operator acceptance is `None.` or bounded entries such as:

@@ -30,6 +30,18 @@ spec -> code -> clean -> architect -> harden -> clean-final -> verify -> docs ->
 Run `bb swarmforge/scripts/stage.bb list --root .` when you think the work is
 finished. `stage complete` refuses while any required stage is todo or stale.
 
+## Source inputs and report metadata
+
+Task-note spec hashes omit only `## Verification` and
+`## Operator acceptance`. `stage complete` still reads both in full for report
+validation and residuals. Other requirement content still invalidates the spec.
+
+Use focused `:stamp` inputs for files a gate actually consumes rather than
+`:whole-tree`. Missing inputs stay stale, unknown values widen visibly to the
+whole tree, and completion still requires a committed tree with every
+non-optional stage current. README, docs and unrelated task notes should affect
+technical freshness only when a gate genuinely consumes them.
+
 Every new or next-touched task report carries `## Verification` and
 `## Operator acceptance`. Verification records automated gate counts and source
 delivery. Operator acceptance is `None.` or bounded entries:

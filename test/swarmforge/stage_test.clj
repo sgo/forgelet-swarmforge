@@ -149,6 +149,61 @@
     (commit-change! root "scoped stage fixture")
     root))
 
+(def evidence-task-requirement
+  (str "# evidence-card\n\n"
+       "## Requirement\n\n"
+       "Keep the real requirement stable.\n\n"))
+
+(def evidence-task-report
+  (str "## Verification\n\n"
+       "Focused gates will run.\n\n"
+       "## Operator acceptance\n\n"
+       "None.\n"))
+
+(defn evidence-only-fixture []
+  (let [root (fixture)
+        config {:task "fixture"
+                :stages
+                [{:name "spec"
+                  :approval :operator
+                  :spec ["tasks/evidence-card.md" "features"]
+                  :stamp ["tasks/evidence-card.md" "features"]}
+                 {:name "code"
+                  :runs [["true"]]
+                  :evidence []
+                  :stamp ["source.txt" "bb.edn"]}
+                 {:name "clean"
+                  :runs [["sh" "-c" "mkdir -p target && echo clean > target/clean.txt"]]
+                  :evidence ["target/clean.txt"]
+                  :stamp ["test.txt" "bb.edn"]}
+                 {:name "deploy"
+                  :runs [["true"]]
+                  :evidence []
+                  :stamp ["source.txt"]}]}]
+    (write-file (fs/path root "stages.edn") (pr-str config))
+    (write-file (fs/path root ".swarmforge" "single-agent") "agent\n")
+    (write-file (fs/path root ".swarmforge" "board" "tasks.tsv")
+                "evidence-card\tspec\t2026-11-07T00:00:00Z\t2026-11-07T00:00:00Z\tevidence-task\t0\n")
+    (write-file (fs/path root "tasks" "evidence-card.md")
+                (str evidence-task-requirement evidence-task-report))
+    (write-file (fs/path root "features" "requirement.feature")
+                "Feature: stable requirement\n")
+    (write-file (fs/path root "source.txt") "source\n")
+    (write-file (fs/path root "test.txt") "test\n")
+    (write-file (fs/path root "bb.edn") "{}\n")
+    (write-file (fs/path root "README.md") "# Evidence fixture\n")
+    (write-file (fs/path root "docs" "manual.md") "# Manual\n")
+    (commit-change! root "evidence-only fixture")
+    root))
+
+(defn run-evidence-stages! [root]
+  (run-stage root "propose" "spec"
+             "tasks/evidence-card.md" "features/requirement.feature")
+  (doseq [stage ["code" "clean" "deploy"]]
+    (let [result (run-stage root "check" stage)]
+      (when-not (zero? (:exit result))
+        (throw (ex-info (str stage " stage failed") result))))))
+
 (defn stage-statuses [root]
   (let [status (-> (run-stage root "status" "--json")
                    :out
@@ -335,6 +390,107 @@
         (is (str/includes? (str (:err complete) (:out complete))
                            "Stages not current: release"))
         (is (not= "done" (board-lane root "fixture-card"))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest evidence-only-commits-preserve-technical-stage-freshness
+  (let [root (evidence-only-fixture)]
+    (try
+      (run-evidence-stages! root)
+      (let [all-current {"spec" "done" "code" "done" "clean" "done"
+                         "deploy" "done"}]
+        (is (= all-current (stage-statuses root)))
+
+        (write-file (fs/path root "README.md") "# Updated evidence fixture\n")
+        (write-file (fs/path root "docs" "manual.md")
+                    "# Updated manual\n\nNo runtime input changed.\n")
+        (commit-change! root "documentation only")
+        (is (= all-current (stage-statuses root)))
+
+        (write-file
+         (fs/path root "tasks" "evidence-card.md")
+         (str evidence-task-requirement
+              "## Verification\n\n"
+              "Tests and clean completed.\n\n"
+              "## Operator acceptance\n\n"
+              "- owner: operator | environment: physical device | "
+              "checks: verify the visible result | status: pending\n"))
+        (commit-change! root "finalize task report")
+        (is (= all-current (stage-statuses root)))
+        (let [complete (run-stage root "complete")]
+          (is (zero? (:exit complete)) (:err complete))
+          (is (str/includes? (:out complete) "operator acceptance: pending"))
+          (is (= :pending
+                 (get-in (state root)
+                         [:complete :operator_acceptance :status]))))
+
+        (write-file
+         (fs/path root "tasks" "evidence-card.md")
+         (str evidence-task-requirement
+              "## Verification\n\n"
+              "Final report exists.\n\n"
+              "## Operator acceptance\n\n"
+              "- owner: operator | environment: iPhone | "
+              "checks: verify | status: maybe\n"))
+        (commit-change! root "malformed final report")
+        (let [refused (run-stage root "complete")]
+          (is (not (zero? (:exit refused))))
+          (is (str/includes? (str (:err refused) (:out refused))
+                             "Operator acceptance status"))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest genuine-source-test-and-configuration-changes-invalidate-stages
+  (let [root (evidence-only-fixture)]
+    (try
+      (run-evidence-stages! root)
+      (let [current {"spec" "done" "code" "done" "clean" "done"
+                     "deploy" "done"}]
+        (write-file (fs/path root "tasks" "evidence-card.md")
+                    (str evidence-task-requirement
+                         "Changed requirement.\n\n"
+                         evidence-task-report))
+        (commit-change! root "change task requirement")
+        (is (= (assoc current "spec" "stale") (stage-statuses root)))
+        (write-file (fs/path root "tasks" "evidence-card.md")
+                    (str evidence-task-requirement evidence-task-report))
+        (commit-change! root "restore task requirement")
+        (is (= current (stage-statuses root)))
+
+        (write-file (fs/path root "features" "requirement.feature")
+                    "Feature: changed requirement\n")
+        (commit-change! root "change feature")
+        (is (= (assoc current "spec" "stale") (stage-statuses root)))
+        (write-file (fs/path root "features" "requirement.feature")
+                    "Feature: stable requirement\n")
+        (commit-change! root "restore feature")
+
+        (write-file (fs/path root "source.txt") "changed source\n")
+        (commit-change! root "change source")
+        (is (= (assoc current "code" "stale" "deploy" "stale")
+               (stage-statuses root)))
+        (write-file (fs/path root "source.txt") "source\n")
+        (commit-change! root "restore source")
+
+        (write-file (fs/path root "test.txt") "changed test\n")
+        (commit-change! root "change test")
+        (is (= (assoc current "clean" "stale") (stage-statuses root)))
+        (write-file (fs/path root "test.txt") "test\n")
+        (commit-change! root "restore test")
+
+        (write-file (fs/path root "bb.edn") "{:changed true}\n")
+        (commit-change! root "change bb configuration")
+        (is (= (assoc current "code" "stale" "clean" "stale")
+               (stage-statuses root)))
+        (write-file (fs/path root "bb.edn") "{}\n")
+        (commit-change! root "restore bb configuration")
+
+        (fs/delete (fs/path root "test.txt"))
+        (commit-change! root "delete test input")
+        (is (= (assoc current "clean" "stale") (stage-statuses root)))
+        (write-file (fs/path root "test.txt") "test\n")
+        (commit-change! root "restore test input")
+        (is (= current (stage-statuses root))))
       (finally
         (fs/delete-tree root)))))
 

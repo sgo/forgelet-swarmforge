@@ -36,6 +36,26 @@ every Babashka helper before the full coverage run starts. During coverage,
 the shim also prevents helper entrypoints from starting while Cloverage loads
 their definitions, without omitting any source file from the CRAP report.
 
+## Source inputs and report metadata
+
+Task-note spec hashes omit exactly two evidence sections: `## Verification` and
+`## Operator acceptance`. Those sections remain in the task file and
+`stage complete` reads them in full for final-report validation and operator
+acceptance. All requirement text before them and every other task-note section
+still affects freshness.
+
+Stage stamps list the source inputs a gate actually consumes. This layer's
+`code` stamp covers `bb.edn`, root launchers, devbox helpers, shared
+scripts/templates/roles/constitution, tests and browser-test configuration.
+`clean` covers `bb.edn`, stage configuration, Babashka helpers, the coverage
+shim and the in-process coverage tests. `README.md`, `docs/` and `tasks/` are
+excluded because these gates do not consume them.
+
+An unknown stamp value still widens visibly to the whole tree. A missing stamped
+file remains represented as missing, so deleting a real input makes the stage
+stale. Commit and completion rules are unchanged: stage completion still
+requires every non-optional stage current on the exact committed tree.
+
 ## Intentional gate boundaries
 
 This checkout owns a shared script layer, not a product application. The

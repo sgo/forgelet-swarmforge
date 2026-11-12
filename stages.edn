@@ -7,11 +7,32 @@
   {:name "code"
    :runs [["bb" "test"]]
    :evidence []
-   :stamp [:whole-tree]}
+   :stamp [".gitignore"
+           "AGENTS.md"
+           "mission.md"
+           "bb.edn"
+           "stages.edn"
+           "swarm"
+           "get-agent-project"
+           "get-swarm-forge"
+           "convert-pack-project"
+           "close-swarm"
+           "devbox"
+           "swarmforge"
+           "test/layer_coverage.clj"
+           "test/swarmforge"
+           "test/dashboard/dashboard.spec.js"
+           "test/dashboard/package.json"
+           "test/dashboard/package-lock.json"
+           "test/dashboard/playwright.config.js"]}
   {:name "clean"
    :runs [["bb" "crap"]]
    :evidence ["target/coverage/lcov.info"]
-   :stamp [:whole-tree]}
+   :stamp ["bb.edn"
+           "stages.edn"
+           "swarmforge/scripts"
+           "test/layer_coverage.clj"
+           "test/swarmforge/coverage_in_process_test.clj"]}
   {:name "release"
    :optional true
    :runs []

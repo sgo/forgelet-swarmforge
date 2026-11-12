@@ -62,6 +62,20 @@ Run `bb swarmforge/scripts/stage.bb list --root .` when you think the work is
 finished. The list is the reminder; `stage complete` refuses while any required
 stage is todo or stale.
 
+## Source inputs and report metadata
+
+Task-note spec hashes omit only `## Verification` and
+`## Operator acceptance`. Those remain in the file and `stage complete` parses
+them for report validation and residuals, but changing their content does not
+re-run a technical gate. Requirement text and every other section still count.
+
+Declare focused `:stamp` inputs matching what each gate consumes. Do not copy
+`:whole-tree` merely for convenience: an unrelated task, README or design-doc
+commit should not invalidate tested source. Missing inputs stay visible and
+stale, and unknown stamp values still widen to the whole tree with a warning.
+Committing and completing still require the exact final tree and every
+non-optional stage current.
+
 The template's `stages.edn` assumes a Maven reactor with an `architecture`
 module and the acceptance script under `scripts/`. Adjust the commands and
 evidence paths to the project before the first `stage check`.

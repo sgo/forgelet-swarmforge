@@ -26,7 +26,12 @@
        "A new task report has ## Verification and ## Operator acceptance\n"
        "sections. Operator acceptance is None. or bounded entries with owner,\n"
        "environment, checks and pending/confirmed status. Pending entries do\n"
-       "not replace any executable, release, destructive or policy gate.\n"))
+       "not replace any executable, release, destructive or policy gate.\n"
+       "\n"
+       "For task notes, spec hashing omits only the ## Verification and\n"
+       "## Operator acceptance sections; stage completion still parses both.\n"
+       "Use focused :stamp inputs for the files a gate actually consumes instead\n"
+       "of copying :whole-tree. Missing inputs remain fail-visible.\n"))
 
 (defn usage []
   (println usage-text))
@@ -422,17 +427,57 @@
        sort
        vec))
 
+(def report-metadata-headings
+  #{"## Verification" "## Operator acceptance"})
+
+(defn strip-report-metadata [text]
+  (let [lines (str/split-lines (or text ""))
+        trailing-newline? (str/ends-with? (or text "") "\n")]
+    (loop [remaining lines
+           skipping? false
+           kept []]
+      (if-let [line (first remaining)]
+        (let [trimmed (str/trim line)]
+          (cond
+            skipping?
+            (if (str/starts-with? trimmed "## ")
+              (if (contains? report-metadata-headings trimmed)
+                (recur (next remaining) true kept)
+                (recur (next remaining) false (conj kept line)))
+              (recur (next remaining) true kept))
+
+            (contains? report-metadata-headings trimmed)
+            (recur (next remaining) true kept)
+
+            :else
+            (recur (next remaining) false (conj kept line))))
+        (let [result (str/join "\n" kept)]
+          (if (and trailing-newline?
+                   (not (str/ends-with? result "\n")))
+            (str result "\n")
+            result))))))
+
+(defn spec-content [root file]
+  (let [text (slurp (str (fs/path root file)))]
+    (if (and (str/starts-with? file "tasks/")
+             (str/ends-with? file ".md"))
+      (strip-report-metadata text)
+      text)))
+
 (defn spec-hash [root files]
   (sha256 (.getBytes
            (str/join "\n"
-                     (map #(str % "\n" (file-hash (fs/path root %)))
+                     (map #(str %
+                                "\n"
+                                (sha256 (.getBytes (spec-content root %)
+                                                   "UTF-8")))
                           files))
            "UTF-8")))
 
 (defn spec-body [root files]
   (str/join "\n\n"
             (for [file files]
-              (str "--- " file " ---\n" (slurp (str (fs/path root file)))))))
+              (str "--- " file " ---\n" (spec-content root file)))))
 
 (declare approved-spec-proposal)
 
