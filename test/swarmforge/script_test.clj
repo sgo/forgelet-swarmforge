@@ -4,6 +4,15 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]))
 
+(deftest dsh-acp-probe-proves-the-hermetic-runner-boundary
+  (let [result (sh/sh "node" "--test"
+                      (str (fs/path (fs/cwd)
+                                    "test" "swarmforge"
+                                    "dsh_acp_probe.test.mjs"))
+                      :dir (str (fs/cwd)))]
+    (is (zero? (:exit result))
+        (str (:err result) (:out result)))))
+
 (def repo-root (fs/cwd))
 (def scripts-dir (fs/path repo-root "swarmforge" "scripts"))
 

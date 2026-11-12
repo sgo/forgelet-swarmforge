@@ -460,6 +460,10 @@ The layer currently ships:
 - `java-maven-project` for Maven build wiring, local SNAPSHOT installation and
   release-only registry publishing.
 
+The trial-only DeepSeek Harness ACP runner proof is documented in
+[`docs/dsh-acp-runner-proof.md`](docs/dsh-acp-runner-proof.md). It is opt-in
+and does not change the existing Codex or project runner boundary.
+
 Cross-forge issues pass through `forge_request.sh` in the receiving forge.
 `intake` validates the repository and `forge-requesters`, records the issue
 digest under `.swarmforge/forge-requests/`, and creates no work. Only local
