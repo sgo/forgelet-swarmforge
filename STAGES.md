@@ -56,6 +56,42 @@ file remains represented as missing, so deleting a real input makes the stage
 stale. Commit and completion rules are unchanged: stage completion still
 requires every non-optional stage current on the exact committed tree.
 
+## Status input expansion
+
+`stage status --json`, `stage list`, stage checks and completion share one
+per-command input cache. A declaration such as `console/src` is expanded from
+`console/src`, and a wildcard with a fixed prefix is started from that prefix.
+Only a wildcard with no fixed directory prefix, such as
+`*/build.gradle.kts`, starts at the project root. Repeated stage declarations
+reuse the same resolved file list, file hashes and spec content for that
+command. The cache is in memory for one invocation; it cannot leak between
+projects or processes.
+
+This ordering is part of freshness semantics. The full worktree tree remains
+diagnostic metadata, exact stamps still decide whether a stage is current, and
+unknown inputs still widen to `"."`. Rooted expansion changes only where the
+same declared glob is evaluated.
+
+Before the change, the Forgelet app checkout (56,482 files excluding `.git`,
+about 36 GB) did not finish `stage status --json` within 120 seconds.
+Fingerprint expansion alone took 100.8 seconds. The temporary Git index was not
+the cause: `git add -A` took about 0.09 seconds and `git write-tree` about 0.02
+seconds. Most stage directories were scanned from the project root once per
+stage, so identical source declarations repeatedly walked tens of thousands of
+unrelated files.
+
+After rooted expansion and per-command reuse, completed cold and warm app runs
+took 2.67 and 2.28 seconds on 2026-11-13; a later run under concurrent gate
+load took 3.21 seconds. It resolved 648 unique declared files and hashed
+4,879,364 bytes; the 3,812 stage-input occurrences were cache lookups after
+their first expansion. The largest declared groups were `acceptance` (176
+files, 1,146,543 bytes), `desktop` (72 files, 955,419 bytes), `qa` (92 files,
+686,674 bytes), `features` (86 files, 466,234 bytes) and `tasks` (90 files,
+431,985 bytes). The layer checkout took about 0.14 seconds and the small fixture
+about 0.07 seconds. A fixture with 1,000 committed generated files and 200
+additional ignored files remains bounded and does not add generated paths to
+any declared fingerprint.
+
 ## Intentional gate boundaries
 
 This checkout owns a shared script layer, not a product application. The

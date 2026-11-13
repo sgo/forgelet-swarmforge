@@ -46,12 +46,27 @@
 (defn now []
   (str (Instant/now)))
 
+(def ^:dynamic *operation-cache* nil)
+
+(defn cached-operation [key f]
+  (if *operation-cache*
+    (let [entry (delay (f))
+          cached (get (swap! *operation-cache*
+                             #(if (contains? % key)
+                                %
+                                (assoc % key entry)))
+                      key)]
+      @cached)
+    (f)))
+
 (defn sha256 [^bytes bytes]
   (let [digest (MessageDigest/getInstance "SHA-256")]
     (format "%064x" (BigInteger. 1 (.digest digest bytes)))))
 
 (defn file-hash [path]
-  (sha256 (Files/readAllBytes (fs/path path))))
+  (cached-operation
+   [:file-hash (str (fs/canonicalize (fs/path path)))]
+   #(sha256 (Files/readAllBytes (fs/path path)))))
 
 (defn read-edn [path]
   (edn/read-string (slurp (str path))))
@@ -458,11 +473,14 @@
             result))))))
 
 (defn spec-content [root file]
-  (let [text (slurp (str (fs/path root file)))]
-    (if (and (str/starts-with? file "tasks/")
-             (str/ends-with? file ".md"))
-      (strip-report-metadata text)
-      text)))
+  (cached-operation
+   [:spec-content (str root) file]
+   (fn []
+     (let [text (slurp (str (fs/path root file)))]
+       (if (and (str/starts-with? file "tasks/")
+                (str/ends-with? file ".md"))
+         (strip-report-metadata text)
+         text)))))
 
 (defn spec-hash [root files]
   (sha256 (.getBytes
@@ -523,19 +541,35 @@
    (or (:stamp stage) [:whole-tree])))
 
 (defn input-files [root pattern]
-  (cond
-    (= pattern ".") (->> (fs/glob root "**")
-                         (filter fs/regular-file?)
-                         (sort))
-    (glob? pattern) (->> (fs/glob root pattern)
-                         (filter fs/regular-file?)
-                         (sort))
-    (fs/directory? (fs/path root pattern))
-    (->> (fs/glob root (str pattern "/**"))
-         (filter fs/regular-file?)
-         (sort))
-    (fs/regular-file? (fs/path root pattern)) [(fs/path root pattern)]
-    :else []))
+  (cached-operation
+   [:input-files (str root) pattern]
+   (fn []
+     (cond
+       (= pattern ".") (->> (fs/glob root "**")
+                            (filter fs/regular-file?)
+                            (sort))
+       (glob? pattern)
+       (let [segments (str/split pattern #"/")
+             prefix-parts (take-while #(not (re-find #"[*?\[]" %)) segments)
+             prefix (str/join "/" prefix-parts)
+             remaining (drop (count prefix-parts) segments)
+             remaining-pattern (str/join "/" remaining)]
+         (if (str/blank? prefix)
+           (->> (fs/glob root pattern)
+                (filter fs/regular-file?)
+                (sort))
+           (let [base (fs/path root prefix)]
+             (if (fs/directory? base)
+               (->> (fs/glob base remaining-pattern)
+                    (filter fs/regular-file?)
+                    (sort))
+               []))))
+       (fs/directory? (fs/path root pattern))
+       (->> (fs/glob (fs/path root pattern) "**")
+            (filter fs/regular-file?)
+            (sort))
+       (fs/regular-file? (fs/path root pattern)) [(fs/path root pattern)]
+       :else []))))
 
 (defn input-fingerprint-entries [root patterns]
   (->> patterns
@@ -1327,4 +1361,6 @@
         "help" (usage)
         (usage)))))
 
-(apply -main *command-line-args*)
+(when (= (str *file*) (System/getProperty "babashka.file"))
+  (binding [*operation-cache* (atom {})]
+    (apply -main *command-line-args*)))

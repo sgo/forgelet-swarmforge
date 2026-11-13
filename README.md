@@ -371,6 +371,16 @@ remain visible as missing and make the stage stale; unknown stamp values still
 widen to the whole tree. The exact committed-tree and all-stages-current
 completion rules are unchanged.
 
+Stage status expands a directory from that directory and a wildcard from its
+fixed leading directory, rather than repeatedly walking the project root. One
+command also reuses resolved inputs and file hashes across stages. On the
+56,482-file Forgelet app checkout, profiling found 100.8 seconds in repeated
+fingerprint expansion while the temporary Git index took well under a tenth of
+a second per operation. Rooted expansion reduced the complete app snapshot from
+more than 120 seconds to roughly 2.3 to 3.2 seconds across cold, warm and
+concurrent-gate runs. Freshness still comes only from the declared stamps;
+scanning is cheaper, not weaker.
+
 New and next-touched single-agent task reports carry `## Verification` and
 `## Operator acceptance`. Verification records automated gate evidence and
 source delivery. Operator acceptance is `None.` or bounded entries such as:

@@ -10,6 +10,18 @@
 (def stage-script (fs/path repo-root "swarmforge" "scripts" "stage.bb"))
 (def pack-web-test (fs/path repo-root "test" "swarmforge" "pack_web_test.bb"))
 
+(load-file (str stage-script))
+
+(def stage-operation-cache-var
+  (get (ns-publics 'stage) '*operation-cache*))
+
+(defn stage-call [name & args]
+  (apply (deref (ns-resolve 'stage (symbol name))) args))
+
+(defn with-stage-cache [f]
+  (with-bindings {stage-operation-cache-var (atom {})}
+    (f)))
+
 (def stage-config
   {:task "fixture"
    :stages
@@ -148,6 +160,65 @@
     (write-file (fs/path root "stages.edn") (pr-str (scoped-stage-config)))
     (commit-change! root "scoped stage fixture")
     root))
+
+(defn legacy-input-files [root pattern]
+  (let [glob? (boolean (re-find #"[*?\[\]]" pattern))]
+    (cond
+      (= pattern ".") (->> (fs/glob root "**")
+                           (filter fs/regular-file?)
+                           (sort))
+      glob? (->> (fs/glob root pattern)
+                 (filter fs/regular-file?)
+                 (sort))
+      (fs/directory? (fs/path root pattern))
+      (->> (fs/glob root (str pattern "/**"))
+           (filter fs/regular-file?)
+           (sort))
+      (fs/regular-file? (fs/path root pattern)) [(fs/path root pattern)]
+      :else [])))
+
+(deftest rooted-input-expansion-preserves-declared-path-semantics
+  (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-inputs."})]
+    (try
+      (doseq [[path content]
+              [["src/root.txt" "root\n"]
+               ["src/main/Main.java" "class Main {}\n"]
+               ["src/main/nested/Helper.java" "class Helper {}\n"]
+               ["src/test/MainTest.java" "class MainTest {}\n"]
+               ["modules/a/build.gradle.kts" "plugins {}\n"]
+               ["modules/b/build.gradle.kts" "plugins {}\n"]
+               ["modules/a/nested/ignored.txt" "not a module build\n"]]]
+        (write-file (fs/path root path) content))
+      (with-stage-cache
+        (fn []
+          (doseq [pattern ["."
+                           "src/root.txt"
+                           "src/main"
+                           "src/*.txt"
+                           "**/*.txt"
+                           "modules/*/build.gradle.kts"
+                           "missing/**"]]
+            (is (= (mapv str (legacy-input-files root pattern))
+                   (mapv str (stage-call "input-files" root pattern)))
+                pattern))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest input-expansion-cache-is-scoped-to-one-stage-command
+  (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-cache."})]
+    (try
+      (write-file (fs/path root "src" "main" "Main.java") "class Main {}\n")
+      (with-stage-cache
+        (fn []
+          (let [before (mapv str (stage-call "input-files" root "src/main"))]
+            (write-file (fs/path root "src" "main" "Later.java")
+                        "class Later {}\n")
+            (is (= before
+                   (mapv str (stage-call "input-files" root "src/main")))))))
+      (is (some #(str/ends-with? % "Later.java")
+                (mapv str (stage-call "input-files" root "src/main"))))
+      (finally
+        (fs/delete-tree root)))))
 
 (def evidence-task-requirement
   (str "# evidence-card\n\n"
@@ -516,6 +587,40 @@
           (is (= all-done (into {} (map (juxt :name :status)) (:stages status)))))
         (let [complete (run-stage root "complete")]
           (is (zero? (:exit complete)) (:err complete))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest large-generated-trees-stay-out-of-status-fingerprints
+  (let [root (scoped-fixture)]
+    (try
+      (run-scoped-stages! root)
+      (doseq [index (range 1000)]
+        (write-file
+         (fs/path root "generated" (str "module-" (mod index 20))
+                  (str "artifact-" index ".txt"))
+         (str "generated " index "\n")))
+      (doseq [index (range 200)]
+        (write-file
+         (fs/path root "target" "generated" (str "ignored-" index ".txt"))
+         (str "ignored " index "\n")))
+      (commit-change! root "add large generated tree")
+      (let [started (System/nanoTime)
+            status (-> (run-stage root "status" "--json")
+                       :out
+                       (json/parse-string true))
+            elapsed-ms (/ (- (System/nanoTime) started) 1000000.0)
+            inputs (set (mapcat :inputs (:stages status)))]
+        (is (= {"spec" "done" "code" "done" "clean" "done"
+                "architect" "done" "harden" "done" "qa" "done"
+                "docs" "done" "deploy" "done"}
+               (into {} (map (juxt :name :status)) (:stages status))))
+        (is (not-any? #(or (= "generated" %)
+                           (str/starts-with? % "generated/")
+                           (str/starts-with? % "target/"))
+                      inputs))
+        (is (< elapsed-ms 10000.0)
+            (format "status took %.0f ms with an unrelated generated tree"
+                    elapsed-ms)))
       (finally
         (fs/delete-tree root)))))
 
