@@ -97,5 +97,4 @@ forge was composed, stopped, restarted or modified.
 
 ## Operator acceptance
 
-None. The optimization changes status latency but not the stage freshness or
-completion contract.
+None.
