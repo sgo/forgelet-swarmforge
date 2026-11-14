@@ -114,11 +114,18 @@ packages_token_was_set="${GITHUB_PACKAGES_TOKEN+x}"
 packages_token_before="${GITHUB_PACKAGES_TOKEN-}"
 
 if $credential_hook_present; then
+  if project_needs_packages_token; then
+    export SWARMFORGE_PROJECT_NEEDS_PACKAGES_TOKEN=1
+  else
+    unset SWARMFORGE_PROJECT_NEEDS_PACKAGES_TOKEN
+  fi
   # Source into this shell so exports survive the final exec. Output is
   # suppressed so a hook cannot accidentally disclose a credential.
   if ! source "$credential_hook" >/dev/null 2>&1; then
+    unset SWARMFORGE_PROJECT_NEEDS_PACKAGES_TOKEN
     credential_error "credential hook failed to load required GitHub credentials"
   fi
+  unset SWARMFORGE_PROJECT_NEEDS_PACKAGES_TOKEN
   { set +x; } 2>/dev/null
 fi
 

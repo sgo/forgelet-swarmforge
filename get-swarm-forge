@@ -573,6 +573,7 @@ required_files=(
   swarmforge/scripts/done_with_current.sh
   swarmforge/scripts/route_card.sh
   swarmforge/scripts/route_card.bb
+  swarmforge/scripts/install-agent-credentials.sh
   swarmforge/constitution/articles/handoffs.prompt
   swarmforge/constitution/articles/workflow.prompt
   swarmforge/constitution/articles/engineering.prompt

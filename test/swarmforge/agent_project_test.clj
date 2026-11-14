@@ -649,6 +649,217 @@
           (fs/set-posix-file-permissions hook "rw-------"))
         (delete-tree! root)))))
 
+(deftest install-agent-credentials-is-safe-idempotent-and-scopes-tokens
+  (let [root (tmp-dir)
+        home (fs/path root "home")
+        bin (fs/path root "bin")
+        hook (fs/path home ".config" "forgelet" "agent-credentials.sh")
+        keychain (fs/path home "Library" "Keychains" "fixture.keychain-db")
+        ordinary (fs/path root "ordinary")
+        maven (fs/path root "maven")
+        auth-log (fs/path root "auth.log")
+        agent-log (fs/path root "agent.log")
+        installer (fs/path repo-root "swarmforge" "scripts"
+                          "install-agent-credentials.sh")
+        loader (fs/path repo-root "swarmforge" "scripts"
+                       "load-project-runtime-env.sh")
+        security (fs/path bin "security")
+        gh (fs/path bin "gh")
+        git (fs/path bin "git")
+        stat (fs/path bin "stat")
+        probe (fs/path root "probe.sh")
+        gh-token "gh-token-installer-sentinel-never-print"
+        packages-token "packages-token-installer-sentinel-never-print"
+        installer-env
+        (fn [extra]
+          (merge {"HOME" (str home)
+                  "PATH" (str bin ":" (System/getenv "PATH"))
+                  "SWARMFORGE_SECURITY_COMMAND" (str security)
+                  "SWARMFORGE_GH_COMMAND" (str gh)
+                  "SWARMFORGE_TEST_AUTH_LOG" (str auth-log)}
+                 extra))]
+    (try
+      (fs/create-dirs keychain)
+      (doseq [dir [ordinary maven]]
+        (fs/create-dirs dir))
+      (write-file (fs/path maven "pom.xml") "<project/>\n")
+      (write-file
+       security
+       (str "#!/bin/sh\n"
+            "if [[ -n \"${FAKE_MISSING:-}\" && \"$*\" == *\"-s ${FAKE_MISSING}\"* ]]; then\n"
+            "  exit 44\n"
+            "fi\n"
+            "case \"$*\" in\n"
+            "  *\"-s GH_TOKEN\"*) printf '%s\\n' \"" gh-token "\" ;;\n"
+            "  *\"-s GITHUB_PACKAGES_TOKEN\"*) printf '%s\\n' \"" packages-token "\" ;;\n"
+            "  *) exit 44 ;;\n"
+            "esac\n"))
+      (write-file
+       gh
+       (str "#!/bin/sh\n"
+            "[[ \"${FAKE_GH_FAIL:-}\" == 1 ]] && exit 1\n"
+            "printf 'gh:%s:%s\\n' \"$*\" \"${GH_TOKEN:+present}\" "
+            ">> \"$SWARMFORGE_TEST_AUTH_LOG\"\n"))
+      (write-file
+       git
+       (str "#!/bin/sh\n"
+            "printf 'git:%s:%s\\n' \"$*\" \"${GH_TOKEN:+present}\" "
+            ">> \"$SWARMFORGE_TEST_AUTH_LOG\"\n"))
+      (write-file
+       stat
+       (str "#!/bin/sh\n"
+            "if [[ \"$1\" == '-f' && \"$2\" == '%u' ]] || "
+            "[[ \"$1\" == '-c' && \"$2\" == '%u' ]]; then\n"
+            "  printf '%s\\n' \"${FAKE_OWNER:-$(id -u)}\"\n"
+            "  exit 0\n"
+            "fi\n"
+            "exec /usr/bin/stat \"$@\"\n"))
+      (doseq [file [security gh git stat]]
+        (fs/set-posix-file-permissions file "rwxr-xr-x"))
+      (write-file
+       probe
+       (str "#!/usr/bin/env bash\n"
+            "gh_state=absent; [[ -n \"${GH_TOKEN:-}\" ]] && gh_state=present\n"
+            "packages_state=absent; [[ -n \"${GITHUB_PACKAGES_TOKEN:-}\" ]] && "
+            "packages_state=present\n"
+            "printf 'agent:%s|%s\\n' \"$gh_state\" \"$packages_state\" "
+            "> \"$SWARMFORGE_TEST_AGENT_LOG\"\n"
+            "if maven_token=\"$(./swarmforge/scripts/github-packages-token.sh "
+            "2>/dev/null)\"; then\n"
+            "  [[ -n \"$maven_token\" ]] && printf 'maven:present\\n' "
+            ">> \"$SWARMFORGE_TEST_AGENT_LOG\"\n"
+            "else\n"
+            "  printf 'maven:absent\\n' >> \"$SWARMFORGE_TEST_AGENT_LOG\"\n"
+            "fi\n"))
+      (fs/set-posix-file-permissions probe "rwxr-xr-x")
+      (doseq [dir [ordinary maven]]
+        (fs/create-dirs (fs/path dir "swarmforge" "scripts"))
+        (let [helper (fs/path dir "swarmforge" "scripts"
+                              "github-packages-token.sh")]
+          (fs/copy (fs/path repo-root "swarmforge" "templates" "agent-project"
+                             "scripts" "github-packages-token.sh")
+                   helper {:replace-existing true})
+          (fs/set-posix-file-permissions helper "rwxr-xr-x")))
+
+      (let [install
+            (fn [extra]
+              (run-env root (installer-env extra)
+                       "bash" (str installer) "--install"
+                       "--hook" (str hook) "--keychain" (str keychain)
+                       "--account" "fixture"))
+            first (install {})]
+        (is (zero? (:exit first)) (:err first))
+        (is (fs/regular-file? hook))
+        (is (not (fs/sym-link? hook)))
+        (is (= "600"
+               (str/trim (:out (sh/sh "stat" "-f" "%Lp" (str hook))))))
+        (is (= "700"
+               (str/trim (:out (sh/sh "stat" "-f" "%Lp"
+                                      (str (fs/parent hook)))))))
+        (let [first-body (slurp (str hook))]
+          (is (str/includes? first-body "find-generic-password"))
+          (is (str/includes? first-body
+                             "SWARMFORGE_PROJECT_NEEDS_PACKAGES_TOKEN"))
+          (is (not (str/includes? first-body gh-token)))
+          (is (not (str/includes? first-body packages-token)))
+          (is (not (str/includes? (str (:out first) (:err first)) gh-token)))
+          (is (not (str/includes? (str (:out first) (:err first))
+                                  packages-token)))
+          (let [second (install {})]
+            (is (zero? (:exit second)) (:err second))
+            (is (= first-body (slurp (str hook)))))
+          (let [checked (run-env root (installer-env {})
+                                 "bash" (str installer) "--check"
+                                 "--hook" (str hook)
+                                 "--keychain" (str keychain)
+                                 "--account" "fixture")]
+            (is (zero? (:exit checked)) (:err checked))
+            (is (not (str/includes? (str (:out checked) (:err checked))
+                                    gh-token)))
+            (is (not (str/includes? (str (:out checked) (:err checked))
+                                    packages-token)))))
+
+        (doseq [[dir agent-expected maven-expected]
+                [[ordinary "agent:present|absent" "maven:absent"]
+                 [maven "agent:present|present" "maven:present"]]]
+          (fs/delete-if-exists agent-log)
+          (fs/delete-if-exists auth-log)
+          (let [result
+                (run-env dir
+                         {"HOME" (str home)
+                          "PATH" (str bin ":" (System/getenv "PATH"))
+                          "SWARMFORGE_TEST_AGENT_LOG" (str agent-log)
+                          "SWARMFORGE_TEST_AUTH_LOG" (str auth-log)}
+                         "bash" (str loader) (str probe))
+                text (str (:out result) (:err result))
+                log (slurp (str agent-log))]
+            (is (zero? (:exit result)) (:err result))
+            (is (str/includes? log agent-expected) dir)
+            (is (str/includes? log maven-expected) dir)
+            (is (str/includes? (slurp (str auth-log))
+                               "gh:auth setup-git --hostname github.com:present"))
+            (is (not (str/includes? text gh-token)))
+            (is (not (str/includes? text packages-token)))))
+
+        (testing "missing Keychain items fail by name"
+          (doseq [service ["GH_TOKEN" "GITHUB_PACKAGES_TOKEN"]]
+            (let [failed (run-env root
+                                  (installer-env {"FAKE_MISSING" service})
+                                  "bash" (str installer) "--check"
+                                  "--hook" (str hook)
+                                  "--keychain" (str keychain)
+                                  "--account" "fixture")]
+              (is (not (zero? (:exit failed))) service)
+              (is (str/includes? (:err failed) service) service))))
+
+        (let [failed-auth (run-env root (installer-env {"FAKE_GH_FAIL" "1"})
+                                   "bash" (str installer) "--check"
+                                   "--hook" (str hook)
+                                   "--keychain" (str keychain))]
+          (is (not (zero? (:exit failed-auth))))
+          (is (str/includes? (:err failed-auth)
+                             "could not configure Git authentication")))
+
+        (testing "unsafe mode, ownership and malformed syntax fail bounded"
+          (let [backup (fs/path root "agent-credentials.backup")]
+            (fs/move hook backup)
+            (fs/create-sym-link hook backup)
+            (let [symlink (run-env root (installer-env {})
+                                   "bash" (str installer) "--check"
+                                   "--hook" (str hook)
+                                   "--keychain" (str keychain))]
+              (is (not (zero? (:exit symlink))))
+              (is (str/includes? (:err symlink)
+                                 "must not be a symbolic link")))
+            (fs/delete hook)
+            (fs/move backup hook))
+          (fs/set-posix-file-permissions hook "rw-r--r--")
+          (let [unsafe (run-env root (installer-env {})
+                                "bash" (str installer) "--check"
+                                "--hook" (str hook) "--keychain" (str keychain))]
+            (is (not (zero? (:exit unsafe))))
+            (is (str/includes? (:err unsafe) "must be owner-only")))
+          (fs/set-posix-file-permissions hook "rw-------")
+          (let [wrong-owner
+                (run-env root (installer-env {"FAKE_OWNER" "999999"})
+                         "bash" (str installer) "--check"
+                         "--hook" (str hook) "--keychain" (str keychain))]
+            (is (not (zero? (:exit wrong-owner))))
+            (is (str/includes? (:err wrong-owner)
+                               "must be owned by the current user")))
+          (write-file hook "if then\n")
+          (fs/set-posix-file-permissions hook "rw-------")
+          (let [malformed (run-env root (installer-env {})
+                                   "bash" (str installer) "--check"
+                                   "--hook" (str hook)
+                                   "--keychain" (str keychain))]
+            (is (not (zero? (:exit malformed))))
+            (is (str/includes? (:err malformed) "malformed shell syntax")))))
+      (finally
+        (when (fs/exists? hook)
+          (fs/set-posix-file-permissions hook "rw-------"))
+        (delete-tree! root)))))
+
 (deftest installed-agent-project-cache-is-complete-and-composes-every-agent
   (let [root (tmp-dir)
         forge (fixture-forge)

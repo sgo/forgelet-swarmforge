@@ -23,7 +23,8 @@ shell. `GH_TOKEN` is always exposed; the packages token is exposed only for
 projects with `pom.xml`, `.mvn/`, or `swarmforge/package-registry.conf` naming
 `github-packages`. Caller values win. The loader configures and verifies Git
 through `gh` without printing values. Restart the project agent after changing
-the hook.
+the hook. Use `install-agent-credentials.sh --install` or `--check` from the
+shared layer to create or verify the device hook without printing values.
 
 ## Documentation contract
 

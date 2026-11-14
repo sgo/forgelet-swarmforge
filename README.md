@@ -197,6 +197,19 @@ backward compatible; a present malformed, non-readable, unsafe or incomplete
 hook fails before the agent starts. Restart existing persistent agents after
 installing or changing the hook.
 
+The non-interactive installer reads the existing `GH_TOKEN` and
+`GITHUB_PACKAGES_TOKEN` Keychain services and writes only lookup commands:
+
+```sh
+install-agent-credentials.sh --install
+install-agent-credentials.sh --check
+```
+
+Both commands require the two Keychain items, a usable `gh` authentication
+setup, a regular file owned by the current user, mode `600`, and valid shell
+syntax. `--install` is idempotent and refuses an unsafe existing hook.
+Diagnostics name services and checks but never print credential values.
+
 Every persistent project or forge-role launch boundary removes inherited
 `NO_COLOR`, including a value supplied by the runtime environment file. A valid
 caller-provided `TERM`, `COLORTERM` and `LANG` is preserved. If a pane inherits

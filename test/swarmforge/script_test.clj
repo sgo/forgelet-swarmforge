@@ -2073,7 +2073,8 @@
         marker "get-swarm-forge: failed, and left its scratch at "]
     (try
       (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"
-                    "route_card.sh" "route_card.bb"]]
+                    "route_card.sh" "route_card.bb"
+                    "install-agent-credentials.sh"]]
         (write-file (fs/path base "swarmforge/scripts" name) (str name "\n")))
       (write-file (fs/path base "swarmforge/roles/lieutenant.prompt") "LIEUTENANT\n")
       (write-file (fs/path base "swarmforge/constitution/articles/engineering.prompt") "ENG\n")
@@ -2160,7 +2161,8 @@
         local-file (fs/path host "swarmforge/roles/local-lieutenant.prompt")]
     (try
       (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"
-                    "route_card.sh" "route_card.bb"]]
+                    "route_card.sh" "route_card.bb"
+                    "install-agent-credentials.sh"]]
         (write-file (fs/path base "swarmforge/scripts" name) (str name "\n")))
       (write-file (fs/path base "swarmforge/roles/lieutenant.prompt") "LAYER-LIEUTENANT\n")
       (write-file (fs/path base "swarmforge/roles/local-lieutenant.prompt") "LAYER-DEFAULT-LOCAL\n")
@@ -2238,7 +2240,8 @@
     (try
       (write-file (fs/path host "README.md") "host-readme\n")
       (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"
-                    "route_card.sh" "route_card.bb"]]
+                    "route_card.sh" "route_card.bb"
+                    "install-agent-credentials.sh"]]
         (write-file (fs/path base "swarmforge/scripts" name) (str name "\n")))
       (write-file (fs/path base "swarmforge/scripts/route_card.sh")
                   "CURRENT-ROUTE-SH\n")
@@ -2342,7 +2345,8 @@
       (write-file (fs/path host "swarmforge/skills/a-forges-own/SKILL.md") "OWN\n")
       (write-file (fs/path host "swarmforge/skills/forge-requests-by-issue/SKILL.md") "STALE\n")
       (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"
-                    "route_card.sh" "route_card.bb"]]
+                    "route_card.sh" "route_card.bb"
+                    "install-agent-credentials.sh"]]
         (write-file (fs/path base "swarmforge/scripts" name) (str name "\n")))
       (write-file (fs/path base "swarmforge/skills/forge-requests-by-issue/SKILL.md") "LAYER-SKILL\n")
       (write-file
@@ -2442,6 +2446,9 @@
         (is (= "route_card.bb\n"
                (slurp (str (fs/path host
                                     "swarmforge/scripts/route_card.bb")))))
+        (is (= "install-agent-credentials.sh\n"
+               (slurp (str (fs/path host
+                                    "swarmforge/scripts/install-agent-credentials.sh")))))
         (is (fs/exists? (fs/path host "swarm"))))
       (finally
         (fs/delete-tree host)
