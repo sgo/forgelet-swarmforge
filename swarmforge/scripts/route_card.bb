@@ -20,6 +20,7 @@
        "  route_card.sh commit <proposal-id> [--approval <record-id>]\n"
        "                         [--operator-said <words>]\n"
        "  route_card.sh list [--project <project>] [--forge-root <root>] [--json]\n"
+       "  route_card.sh backlog [--project <project>] [--forge-root <root>] [--json]\n"
        "  route_card.sh detail <proposal-id> [--forge-root <root>] [--json]\n"
        "  route_card.sh approve <proposal-id> [--approval <record-id>]\n"
        "                           [--operator-said <words>] [--forge-root <root>] [--json]\n"
@@ -28,7 +29,8 @@
        "approval evidence and never creates a card. commit creates the card only\n"
        "after the proposal was presented and the operator approved that exact\n"
        "proposal. Each approval is single-use.\n"
-       "list, detail and approve emit one JSON document on stdout. They are the\n"
+       "list, backlog, detail and approve emit one JSON document on stdout.\n"
+       "They are the\n"
        "machine interface used by Forgelet Host; propose and commit retain their\n"
        "existing human-readable output.\n"
        "\n"
@@ -666,6 +668,75 @@
                              (boolean (:invalidated-board-removed proposal))))]
     (merge base task-fields)))
 
+(defn dependency-chain-error [forge proposal]
+  (loop [dependency-id (some-> (:depends-on proposal) str not-empty)
+         seen #{(:id proposal)}]
+    (when dependency-id
+      (if (contains? seen dependency-id)
+        {:status "cyclic"
+         :dependency_id dependency-id
+         :reason "dependency cycle detected"}
+        (let [{:keys [status proposal reason]}
+              (proposal-record-for-dependency forge dependency-id)]
+          (cond
+            (#{"missing" "malformed" "superseded" "invalidated"} status)
+            {:status status
+             :dependency_id dependency-id
+             :reason (or reason (str "prerequisite is " status))}
+
+            :else
+            (recur (some-> (:depends-on proposal) str not-empty)
+                   (conj seen dependency-id))))))))
+
+(defn active-dependency-state [forge proposal]
+  (let [direct (dependency-state forge proposal)]
+    (if-let [chain-error (dependency-chain-error forge proposal)]
+      {:proposal_id (:dependency_id chain-error)
+       :card_name (redact-output (or (:card_name direct) ""))
+       :task_id (redact-output (or (:task_id direct) ""))
+       :status (:status chain-error)
+       :completion_recorded (boolean (:completion_recorded direct))
+       :completed false
+       :blocked true
+       :blocking_reason (redact-output (:reason chain-error))
+       :error (redact-output (:reason chain-error))}
+      direct)))
+
+(defn active-backlog-lifecycle [proposal]
+  (case (proposal-status proposal)
+    "pending" "pending"
+    "consumed" "in-progress"
+    nil))
+
+(defn active-backlog-row [forge proposal]
+  (let [base (proposal-json forge proposal)
+        dependency (active-dependency-state forge proposal)
+        lifecycle (active-backlog-lifecycle proposal)
+        completion-recorded (boolean (valid-completion-marker? proposal))
+        blocked (boolean (:blocked dependency))
+        actionable (and (= "pending" lifecycle) (not blocked))]
+    (assoc base
+           :active_lifecycle lifecycle
+           :actionable actionable
+           :blocked blocked
+           :depends_on (some-> (:depends-on proposal) str not-empty)
+           :dependency_id (:proposal_id dependency)
+           :dependency_task_id (:task_id dependency)
+           :dependency_card_name (:card_name dependency)
+           :dependency_status (if dependency (:status dependency) "none")
+           :dependency_blocked_reason (:blocking_reason dependency)
+           :dependency_error (:error dependency)
+           :dependency_completion_recorded
+           (boolean (:completion_recorded dependency))
+           :dependency_completed (boolean (:completed dependency))
+           :completion_recorded completion-recorded)))
+
+(defn active-backlog-row? [proposal]
+  (case (proposal-status proposal)
+    "pending" true
+    "consumed" (not (valid-completion-marker? proposal))
+    false))
+
 (defn ensure-pending! [proposal]
   (case (proposal-status proposal)
     "invalidated" (fail! "proposal_invalidated" 1
@@ -1158,6 +1229,17 @@
                   (remove :blocked))]
     {:proposals rows}))
 
+(defn machine-backlog! [args]
+  (let [forge (forge-root args)
+        project (project-filter args forge)
+        rows (->> (proposal-rows forge)
+                  (filter active-backlog-row?)
+                  (filter #(or (nil? project)
+                               (= project
+                                  (str (fs/file-name (:resolved-project %))))))
+                  (mapv #(active-backlog-row forge %)))]
+    {:proposals rows}))
+
 (defn machine-detail! [args]
   (let [forge (forge-root args)
         id (first args)]
@@ -1181,6 +1263,7 @@
     (try
       (let [result (case operation
                      "list" (machine-list! args)
+                     "backlog" (machine-backlog! args)
                      "detail"
                      (do
                        (when (str/blank? (first args))
@@ -1211,6 +1294,7 @@
     "migrate-presentations" (migrate-presentations! (rest args))
     "commit" (commit! (rest args))
     "list" (machine-main "list" (rest args))
+    "backlog" (machine-main "backlog" (rest args))
     "detail" (machine-main "detail" (rest args))
     "inspect" (machine-main "inspect" (rest args))
     "approve" (machine-main "approve" (rest args))

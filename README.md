@@ -764,6 +764,21 @@ dependents appear in detail and become listable after verified cleanup. Proposal
 records are retained after completion and can contain only one prerequisite in
 this schema version.
 
+Hosts that render a proposal forest can opt into the complete active backlog:
+
+```sh
+route_card.sh backlog --forge-root <root> [--project <project>] [--json]
+```
+
+`backlog` includes pending proposals, including blocked dependants, and consumed
+proposals still approved or in progress. It excludes superseded, invalidated and
+verified-completed history. Rows retain the safe detail fields and add
+`active_lifecycle`, `actionable`, `blocked`, dependency status/task/card, a
+bounded dependency error, and completion state. Missing, malformed, superseded
+or cyclic dependency evidence fails closed as an explicit error. Ordering is by
+`created-at` then proposal id; tree shape remains the host's concern. The
+existing `list` command and its actionable-only semantics are unchanged.
+
 General Lieutenant history can be read as a bounded cursor page:
 
 ```text

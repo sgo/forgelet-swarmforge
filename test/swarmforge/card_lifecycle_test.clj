@@ -501,6 +501,165 @@
         (fs/set-posix-file-permissions dir "rwxr-xr-x")
         (fs/delete-tree forge)))))
 
+(deftest active-proposal-backlog-tracks-pending-blocked-and-in-progress
+  (let [forge (tmp-forge)
+        project (init-project! (fs/path forge "projects" "backlog-app"))
+        project-name "backlog-app"]
+    (try
+      (let [parent-id (propose! forge project "parent-card" "# Parent\n")
+            child-id (propose-dependent! forge project "child-card"
+                                         "# Child\n" parent-id)
+            free-id (propose! forge project "free-card" "# Free\n")
+            consumed-id (propose! forge project "consumed-card"
+                                  "# Consumed\n")
+            consumed-file (fs/path forge ".swarmforge/route-proposals"
+                                  (str consumed-id ".edn"))
+            consumed-record (edn/read-string (slurp (str consumed-file)))]
+        (write-file consumed-file
+                    (pr-str (assoc consumed-record
+                                   :consumed-at "2026-11-14T12:00:00Z"
+                                   :task-id "task-consumed-in-progress")))
+        (let [backlog (route-json "backlog" "--forge-root" (str forge) "--json")
+              rows (:proposals backlog)
+              by-id (into {} (map (juxt :id identity) rows))
+              actionable-list (route-json "list"
+                                          "--forge-root" (str forge) "--json")]
+          (is (= [parent-id child-id free-id consumed-id]
+                 (mapv :id rows)))
+          (is (not (contains? (set (mapv :id (:proposals actionable-list)))
+                              child-id))
+              "legacy list remains pending-and-actionable only")
+          (is (= {:active_lifecycle "pending" :actionable true :blocked false}
+                 (select-keys (get by-id parent-id)
+                              [:active_lifecycle :actionable :blocked])))
+          (is (= {:active_lifecycle "pending" :actionable false :blocked true}
+                 (select-keys (get by-id child-id)
+                              [:active_lifecycle :actionable :blocked])))
+          (is (= parent-id (get-in by-id [child-id :depends_on])))
+          (is (= "pending" (get-in by-id [child-id :dependency_status])))
+          (is (= "parent-card"
+                 (get-in by-id [child-id :dependency_card_name])))
+          (is (= "in-progress"
+                 (get-in by-id [consumed-id :active_lifecycle])))
+          (is (false? (get-in by-id [consumed-id :actionable])))
+          (is (false? (get-in by-id [consumed-id :completion_recorded]))))
+
+        (let [approved (approve-proposal! forge parent-id)
+              in-progress (route-json "backlog"
+                                      "--forge-root" (str forge) "--json")
+              by-id (into {} (map (juxt :id identity)
+                                 (:proposals in-progress)))
+              parent-task-id (:task_id approved)]
+          (is (= "consumed" (:status approved)))
+          (is (= "in-progress"
+                 (get-in by-id [parent-id :active_lifecycle])))
+          (is (true? (get-in by-id [child-id :blocked])))
+          (is (= "in-progress"
+                 (get-in by-id [child-id :dependency_status])))
+          (is (= parent-task-id
+                 (get-in by-id [child-id :dependency_task_id])))
+
+          (mark-card-done! project "parent-card")
+          (let [cleanup (verified-cleanup! forge project-name parent-task-id
+                                           "report-active-backlog")
+                released (route-json "backlog"
+                                     "--forge-root" (str forge) "--json")
+                by-id (into {} (map (juxt :id identity)
+                                   (:proposals released)))
+                actionable (route-json "list"
+                                       "--forge-root" (str forge) "--json")]
+            (is (zero? (:exit cleanup)) (:err cleanup))
+            (is (not (contains? by-id parent-id)))
+            (is (true? (get-in by-id [child-id :actionable])))
+            (is (false? (get-in by-id [child-id :blocked])))
+            (is (= "completed"
+                   (get-in by-id [child-id :dependency_status])))
+            (is (true? (get-in by-id [child-id :dependency_completed])))
+            (is (contains? (set (mapv :id (:proposals actionable))) child-id)))))
+      (finally
+        (fs/delete-tree forge)))))
+
+(deftest active-proposal-backlog-surfaces-dependency-errors
+  (let [forge (tmp-forge)
+        project (init-project! (fs/path forge "projects" "backlog-errors"))
+        notes-dir (fs/path forge ".swarmforge/route-proposals")
+        missing-id (propose! forge project "missing-child" "# Missing\n")
+        superseded-dependency
+        (propose! forge project "superseded-parent" "# Parent\n")
+        superseded-child
+        (propose-dependent! forge project "superseded-child"
+                            "# Child\n" superseded-dependency)
+        cycle-a (propose! forge project "cycle-a" "# A\n")
+        cycle-b (propose-dependent! forge project "cycle-b"
+                                    "# B\n" cycle-a)
+        redacted-id (propose! forge project "redacted-card"
+                              (str "# Redacted\n\n/Users/operator/private "
+                                   "ghp_abcdefghijklmnopqrstuvwxyz0123\n"))]
+    (try
+      (let [missing-file (fs/path notes-dir (str missing-id ".edn"))
+            superseded-file (fs/path notes-dir
+                                     (str superseded-dependency ".edn"))
+            cycle-a-file (fs/path notes-dir (str cycle-a ".edn"))
+            cycle-b-file (fs/path notes-dir (str cycle-b ".edn"))]
+        (write-file missing-file
+                    (pr-str (assoc (edn/read-string (slurp (str missing-file)))
+                                   :depends-on "proposal-20261114T999999999999Z")))
+        (write-file superseded-file
+                    (pr-str (assoc (edn/read-string (slurp (str superseded-file)))
+                                   :superseded-at "2026-11-14T12:00:00Z")))
+        (write-file cycle-a-file
+                    (pr-str (assoc (edn/read-string (slurp (str cycle-a-file)))
+                                   :depends-on cycle-b)))
+        (write-file cycle-b-file
+                    (pr-str (assoc (edn/read-string (slurp (str cycle-b-file)))
+                                   :depends-on cycle-a))))
+      (let [result (route-result "backlog" "--forge-root" (str forge) "--json")
+            backlog (json/parse-string (:out result) true)
+            by-id (into {} (map (juxt :id identity) (:proposals backlog)))
+            serialized (:out result)]
+        (is (zero? (:exit result)) (:err result))
+        (is (= (mapv :id
+                     (sort-by (juxt :created_at :id) (:proposals backlog)))
+               (mapv :id (:proposals backlog))))
+        (is (= "missing"
+               (get-in by-id [missing-id :dependency_status])))
+        (is (str/includes?
+             (get-in by-id [missing-id :dependency_error])
+             "does not exist"))
+        (is (true? (get-in by-id [missing-id :blocked])))
+        (is (= "superseded"
+               (get-in by-id [superseded-child :dependency_status])))
+        (is (false? (get-in by-id [superseded-child :actionable])))
+        (is (= "cyclic" (get-in by-id [cycle-a :dependency_status])))
+        (is (= "cyclic" (get-in by-id [cycle-b :dependency_status])))
+        (is (true? (get-in by-id [cycle-a :blocked])))
+        (is (true? (get-in by-id [cycle-b :blocked])))
+        (is (str/includes? (get-in by-id [cycle-a :dependency_error])
+                           "cycle"))
+        (is (str/includes? (get-in by-id [redacted-id :note])
+                           "[redacted-path]"))
+        (is (str/includes? (get-in by-id [redacted-id :note])
+                           "[redacted-token]"))
+        (is (not (str/includes? serialized "/Users/operator")))
+        (is (not (str/includes? serialized
+                                "ghp_abcdefghijklmnopqrstuvwxyz0123"))))
+
+      (let [bad-dep "proposal-20261114T999999999998Z"
+            malformed-file (fs/path notes-dir (str bad-dep ".edn"))
+            child (propose! forge project "malformed-child" "# Child\n")
+            child-file (fs/path notes-dir (str child ".edn"))]
+        (write-file malformed-file "not an edn map\n")
+        (write-file child-file
+                    (pr-str (assoc (edn/read-string (slurp (str child-file)))
+                                   :depends-on bad-dep)))
+        (let [result (route-result "backlog" "--forge-root" (str forge) "--json")
+              error (json/parse-string (:out result) true)]
+          (is (not (zero? (:exit result))))
+          (is (= "proposal_invalid" (get-in error [:error :code])))
+          (is child)))
+      (finally
+        (fs/delete-tree forge)))))
+
 (deftest invalidated-approval-removes-only-the-active-board-row
   (let [forge (tmp-forge)
         project (init-project! (fs/path forge "projects" "invalid-app"))
