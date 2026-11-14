@@ -182,7 +182,7 @@ lanes, dependencies and prior approval fields are preserved.
 
 Composition now requires both route-card files and restores the layer copy after
 the bridge kit installs. The deployed forge-root `route_card.bb` matches the
-source hash. The active dashboard and forge were not restarted.
+source hash (`f2863dd…`). The active dashboard and forge were not restarted.
 
 The live approval retry for `proposal-20261114T105356319556Z` consumed exactly
 that proposal and created exactly one queued card. A duplicate attempt returned
