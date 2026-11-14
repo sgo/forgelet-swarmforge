@@ -172,6 +172,15 @@ Closing the project stops both the relay and the `swarmforge-agent` session;
 `agent-runner.bb --stop-agent` stops only the agent, leaving the phone relay
 running.
 
+While a delivered request is otherwise idle, the runner reads that project's
+typed clarification records before considering a continuation nudge. Any open
+clarification holds every later nudge pass, including after its attention moves
+from unseen to seen. Answering or withdrawing the last open clarification
+refreshes activity before normal nudging resumes. Malformed or ambiguous
+clarification state also holds the request, with one bounded diagnostic in the
+runner state and log. Continuation text directs blocked agents to the typed
+`pack_dashboard_request.sh clarify-chat` path.
+
 Each single-agent launch also loads assignment-only defaults from
 `${SWARMFORGE_PROJECT_RUNTIME_ENV:-$HOME/.config/forgelet/project-runtime.env}`
 when present. Values already present in the launcher environment win, so a

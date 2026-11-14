@@ -167,14 +167,22 @@
         nil
         (start-dashboard! root)))))
 
+(defn request-files-in [dir]
+  (if (fs/directory? dir)
+    (->> (fs/list-dir dir)
+         (filter #(str/ends-with? (fs/file-name %) ".request"))
+         (sort-by str)
+         vec)
+    []))
+
 (defn request-files [root]
-  (let [dir (fs/path root ".swarmforge" "dashboard" "requests" "pending")]
-    (if (fs/directory? dir)
-      (->> (fs/list-dir dir)
-           (filter #(str/ends-with? (fs/file-name %) ".request"))
-           (sort-by str)
-           vec)
-      [])))
+  (request-files-in (fs/path root ".swarmforge" "dashboard" "requests" "pending")))
+
+(defn request-record-files [root]
+  (vec
+   (concat
+    (request-files-in (fs/path root ".swarmforge" "dashboard" "requests" "pending"))
+    (request-files-in (fs/path root ".swarmforge" "dashboard" "requests" "done")))))
 
 (defn parse-request [file]
   (let [text (slurp (str file))
@@ -183,11 +191,124 @@
                       (for [line (str/split-lines headers)
                             :let [[key value] (str/split line #":\s*" 2)]
                             :when (and key value)]
-                        [key value]))]
-    {:id (or (get entries "id")
-             (str/replace (fs/file-name file) #"\.request$" ""))
-     :status (get entries "status")
-     :body (or body "")}))
+                        [key value]))
+        file-id (str/replace (fs/file-name file) #"\.request$" "")]
+    (cond-> {:id (or (get entries "id") file-id)
+             :header-id (get entries "id")
+             :request-file-id file-id
+             :status (get entries "status")
+             :body (or body "")}
+      (contains? entries "author")
+      (assoc :author (get entries "author"))
+
+      (contains? entries "direction")
+      (assoc :direction (get entries "direction"))
+
+      (contains? entries "kind")
+      (assoc :kind (get entries "kind"))
+
+      (contains? entries "clarification_id")
+      (assoc :clarification_id (get entries "clarification_id"))
+
+      (contains? entries "attention_state")
+      (assoc :attention (get entries "attention_state")))))
+
+(def clarification-id-pattern
+  #"clar-[A-Za-z0-9][A-Za-z0-9._~:-]{0,139}")
+(def clarification-lifecycles #{"open" "answered" "withdrawn"})
+(def clarification-attention-states #{"unseen" "seen"})
+
+(defn clarification-candidate? [request]
+  (or (= "clarification" (:kind request))
+      (contains? request :attention)
+      (and (= "project-agent" (:author request))
+           (= "project-agent" (:direction request))
+           (:clarification_id request))))
+
+(defn valid-clarification-record? [request]
+  (let [id (:clarification_id request)]
+    (and (= "project-agent" (:author request))
+         (= "project-agent" (:direction request))
+         (= "clarification" (:kind request))
+         (string? id)
+         (re-matches clarification-id-pattern id)
+         (= id (:header-id request))
+         (= id (:request-file-id request))
+         (contains? clarification-lifecycles (:status request))
+         (contains? clarification-attention-states (:attention request)))))
+
+(defn clarification-state [root]
+  (try
+    (if-let [problem
+             (some (fn [path]
+                     (when-not (and (fs/regular-file? path)
+                                    (not (fs/sym-link? path)))
+                       "unsafe-record"))
+                   (request-record-files root))]
+      {:lifecycle :invalid :reason problem}
+      (let [records (map parse-request (request-record-files root))
+            candidates (filter clarification-candidate? records)]
+        (cond
+          (some (complement valid-clarification-record?) candidates)
+          {:lifecycle :invalid :reason "malformed-clarification"}
+
+          (some (fn [[_ matches]] (> (count matches) 1))
+                (group-by :clarification_id candidates))
+          {:lifecycle :invalid :reason "ambiguous-clarification-id"}
+
+          :else
+          (let [ids (->> candidates
+                         (filter #(= "open" (:status %)))
+                         (map :clarification_id)
+                         distinct
+                         sort
+                         vec)]
+            (if (seq ids)
+              {:lifecycle :open :ids ids}
+              {:lifecycle :clear})))))
+    (catch Exception _
+      {:lifecycle :invalid :reason "unreadable-clarification-state"})))
+
+(defn clarification-hold [state]
+  (case (:lifecycle state)
+    :open {:state "open"
+           :clarification-id (first (:ids state))
+           :open-count (count (:ids state))}
+    :invalid {:state "invalid"
+              :reason (:reason state)}
+    :clear nil))
+
+(declare write-delivery-state!)
+
+(defn update-clarification-hold! [root id state clarification now]
+  (let [hold (clarification-hold clarification)
+        previous (:clarification-hold state)]
+    (cond
+      (= hold previous)
+      state
+
+      hold
+      (let [updated (assoc state :clarification-hold hold)]
+        (write-delivery-state! root id updated)
+        (if (= "open" (:state hold))
+          (println "continuation nudges hold: waiting for clarification"
+                   (:clarification-id hold)
+                   (str "(open=" (:open-count hold) ")"))
+          (println "continuation nudges hold: clarification state is invalid"
+                   (str "(" (:reason hold) ")")))
+        updated)
+
+      previous
+      (let [updated (-> state
+                        (dissoc :clarification-hold)
+                        (assoc :last-activity-at now))]
+        (write-delivery-state! root id updated)
+        (println "continuation nudge hold cleared:"
+                 (or (:clarification-id previous) (:reason previous)))
+        updated)
+
+      :else
+      state)))
 
 (defn pending-requests [root]
   (->> (request-files root)
@@ -515,7 +636,10 @@
 (defn continuation-text [root id]
   (str "[phone " id "] Continuation nudge. The routed card is still open. "
        "Continue from the current card, task note and stage state; do not "
-       "restart completed work. If blocked, use the clarification channel. "
+       "restart completed work. If blocked, use the typed project-chat "
+       "clarification command: "
+       (fs/path root "swarmforge" "scripts" "pack_dashboard_request.sh")
+       " clarify-chat <clarification-id> <question-file>. "
        "When finished, answer with: "
        (fs/path root "swarmforge" "scripts" "pack_dashboard_request.sh")
        " answer " id " ./tmp/answer.txt. Write only the operator-facing "
@@ -535,13 +659,19 @@
         text (or (visible-pane root) "")
         state (note-activity! root id (delivery-state root id) text)
         now (System/currentTimeMillis)
+        clarification (clarification-state root)
+        state (update-clarification-hold! root id state clarification now)
         last-activity (long (or (:last-activity-at state) now))
         last-nudge (long (or (:last-nudge-at state) 0))
         idle-ms (* 1000 (long (:idle-nudge-seconds options)))
         cooldown-ms (* 1000 (long (:nudge-cooldown-seconds options)))]
-    (if (and (not (busy? text))
-             (>= (- now last-activity) idle-ms)
-             (>= (- now last-nudge) cooldown-ms))
+    (cond
+      (:clarification-hold state)
+      nil
+
+      (and (not (busy? text))
+           (>= (- now last-activity) idle-ms)
+           (>= (- now last-nudge) cooldown-ms))
       (do
         (println "nudging delivered request after inactivity:" id)
         (send-continuation! root id)
@@ -549,6 +679,8 @@
                                (assoc state
                                       :last-activity-at (System/currentTimeMillis)
                                       :last-nudge-at now)))
+
+      :else
       (println "request" id "already delivered; monitoring the agent"))))
 
 (defn run-once! [root agent-command options]

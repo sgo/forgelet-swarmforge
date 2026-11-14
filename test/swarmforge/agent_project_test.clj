@@ -96,6 +96,62 @@
         (> (System/currentTimeMillis) deadline) false
         :else (do (Thread/sleep 50) (recur))))))
 
+(defn delivery-state-path [project id]
+  (fs/path project ".swarmforge" "agent-runner" "requests" (str id ".edn")))
+
+(defn seed-delivered-request! [project id]
+  (write-file
+   (delivery-state-path project id)
+   (str (pr-str {:delivered-at 0
+                 :last-activity-at 0
+                 :pane-digest ""})
+        "\n")))
+
+(defn age-delivery-state! [project id]
+  (let [file (delivery-state-path project id)
+        state (edn/read-string (slurp (str file)))]
+    (write-file file
+                (str (pr-str (assoc state
+                                    :last-activity-at
+                                    (- (System/currentTimeMillis) 86400000)))
+                     "\n"))))
+
+(defn start-fake-idle-agent! [project input-log]
+  (let [sock (str (fs/path project ".swarmforge" "agent-tmux.sock"))
+        script (fs/path project ".swarmforge" "fake-idle-agent.sh")
+        escaped-log (str/replace (str input-log) "'" "'\"'\"'")]
+    (write-file
+     script
+     (str "#!/bin/sh\n"
+          "printf '<<AGENT READY>>\\n'\n"
+          "while IFS= read -r line; do\n"
+          "  printf '%s\\n' \"$line\" >> '" escaped-log "'\n"
+          "done\n"))
+    (fs/set-posix-file-permissions script "rwxr-xr-x")
+    (fs/create-dirs (fs/parent sock))
+    (sh/sh "tmux" "-S" sock "new-session" "-d" "-s" "swarmforge-agent"
+           "-c" (str project) (str script))
+    sock))
+
+(defn runner-once [project idle-seconds cooldown-seconds]
+  (let [runner (str (fs/path project "swarmforge" "scripts" "agent-runner.bb"))]
+    (run project
+         "bb" runner
+         "--root" (str project)
+         "--once" "--no-serve"
+         "--idle-nudge-seconds" (str idle-seconds)
+         "--nudge-cooldown-seconds" (str cooldown-seconds))))
+
+(defn regular-file-content [path]
+  (if (fs/regular-file? path)
+    (slurp (str path))
+    ""))
+
+(defn pack-web-test [project & args]
+  (apply run project
+         "bb" (str (fs/path repo-root "test" "swarmforge" "pack_web_test.bb"))
+         args))
+
 (def fake-agent-command
   "sh -c 'echo \"<<AGENT READY>>\"; while IFS= read -r line; do case \"$line\" in \"[phone \"*) id=${line#\\[phone }; id=${id%%]*}; mkdir -p tmp; printf \"fake answer from %s\\n\" \"$id\" > tmp/answer.txt; ./swarmforge/scripts/pack_dashboard_request.sh answer \"$id\" ./tmp/answer.txt; echo \"<<AGENT READY>>\";; esac; done'")
 
@@ -1414,6 +1470,261 @@
             (str "runner output: " (:out once-ready) (:err once-ready))))
       (finally
         (sh/sh "tmux" "-S" sock "kill-server")
+        (delete-tree! forge)))))
+
+(deftest continuation-nudges-wait-for-open-project-clarifications
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent")
+        request-id "req-promote-hold"
+        first-id "clar-hold-first"
+        second-id "clar-hold-second"
+        answered-id "clar-hold-answered"
+        input-log (fs/path project ".swarmforge" "agent-input.log")
+        question-file (fs/path project "tmp" "clarification-question.md")
+        clarify-command (str (fs/path project "swarmforge" "scripts"
+                                        "pack_dashboard_request.sh"))
+        delivery-file (delivery-state-path project request-id)]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge) "agent"))))
+      (write-file (fs/path project ".swarmforge" "dashboard" "requests" "pending"
+                           (str request-id ".request"))
+                  (str "id: " request-id "\nstatus: pending\n"
+                       "created_at: 2026-11-14T17:00:00Z\n\nRouted card.\n"))
+      (seed-delivered-request! project request-id)
+      (start-fake-idle-agent! project input-log)
+      (write-file question-file "Which contract should be used?")
+
+      (let [created (run project clarify-command "clarify-chat" first-id
+                         (str question-file) "--root" (str project))
+            held (runner-once project 0 0)
+            repeated (runner-once project 0 0)
+            stored (edn/read-string (slurp (str delivery-file)))]
+        (is (zero? (:exit created)) (:err created))
+        (is (= "" (regular-file-content input-log))
+            "creating a typed clarification does not wake the agent")
+        (is (zero? (:exit held)) (:err held))
+        (is (str/includes? (:out held) "waiting for clarification"))
+        (is (zero? (:exit repeated)) (:err repeated))
+        (is (= {:state "open"
+                :clarification-id first-id
+                :open-count 1}
+               (:clarification-hold stored)))
+        (is (= "" (regular-file-content input-log))
+            "repeated idle passes do not nudge while clarification is open"))
+
+      (let [seen (pack-web-test project "--test-mark-chat-clarification-seen"
+                                (str project) first-id)]
+        (is (zero? (:exit seen)) (:err seen)))
+      (age-delivery-state! project request-id)
+      (let [seen-pass (runner-once project 0 0)
+            stored (edn/read-string (slurp (str delivery-file)))]
+        (is (zero? (:exit seen-pass)) (:err seen-pass))
+        (is (= "open" (get-in stored [:clarification-hold :state])))
+        (is (= "" (regular-file-content input-log))
+            "marking a clarification seen does not release the nudge hold"))
+
+      (let [withdrawn (run project clarify-command "withdraw-clarification"
+                           first-id "--root" (str project))]
+        (is (zero? (:exit withdrawn)) (:err withdrawn)))
+      (age-delivery-state! project request-id)
+      (let [released (runner-once project 3600 0)
+            stored (edn/read-string (slurp (str delivery-file)))]
+        (is (zero? (:exit released)) (:err released))
+        (is (str/includes? (:out released) "nudge hold cleared"))
+        (is (not (contains? stored :clarification-hold)))
+        (is (< (- (System/currentTimeMillis)
+                  (long (:last-activity-at stored)))
+               60000))
+        (is (= "" (regular-file-content input-log))
+            "resolution refreshes activity instead of nudging immediately"))
+
+      (age-delivery-state! project request-id)
+      (let [resumed (runner-once project 0 0)
+            sent (regular-file-content input-log)]
+        (is (zero? (:exit resumed)) (:err resumed))
+        (is (str/includes? (:out resumed) "nudging delivered request"))
+        (is (str/includes? sent "[phone req-promote-hold] Continuation nudge"))
+        (is (str/includes? sent "clarify-chat <clarification-id> <question-file>"))
+        (is (not (str/includes? sent "clarification channel"))))
+
+      (write-file input-log "")
+      (doseq [id [second-id answered-id]]
+        (let [created (run project clarify-command "clarify-chat" id
+                           (str question-file) "--root" (str project))]
+          (is (zero? (:exit created)) (:err created))))
+      (let [answered
+            (pack-web-test
+             project "--test-post-chat-json" (str project)
+             (json/generate-string
+              {:text "Use the shared contract."
+               :request_id "req-promote-zanswer"
+               :clarification_id answered-id}))
+            mixed (runner-once project 0 0)
+            stored (edn/read-string (slurp (str delivery-file)))]
+        (is (zero? (:exit answered)) (:err answered))
+        (is (str/includes?
+             (slurp (str (fs/path project ".swarmforge" "dashboard" "requests"
+                                 "pending" (str answered-id ".request"))))
+             "status: answered"))
+        (is (zero? (:exit mixed)) (:err mixed))
+        (is (= 1 (get-in stored [:clarification-hold :open-count])))
+        (is (= second-id
+               (get-in stored [:clarification-hold :clarification-id])))
+        (is (= "" (regular-file-content input-log))
+            "one open clarification still holds after another is answered"))
+
+      (let [withdrawn (run project clarify-command "withdraw-clarification"
+                           second-id "--root" (str project))]
+        (is (zero? (:exit withdrawn)) (:err withdrawn)))
+      (age-delivery-state! project request-id)
+      (let [released (runner-once project 3600 0)
+            stored (edn/read-string (slurp (str delivery-file)))]
+        (is (zero? (:exit released)) (:err released))
+        (is (not (contains? stored :clarification-hold)))
+        (is (= "" (regular-file-content input-log))))
+      (finally
+        (sh/sh "tmux" "-S" (str (fs/path project ".swarmforge"
+                                           "agent-tmux.sock"))
+               "kill-server")
+        (delete-tree! forge)))))
+
+(deftest typed-clarification-answer-is-the-first-agent-wake
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent")
+        request-id "req-promote-wake"
+        chat-id "req-20261114T180000000000Z"
+        clarification-id "clar-first-wake"
+        input-log (fs/path project ".swarmforge" "agent-input.log")
+        question-file (fs/path project "tmp" "clarification-question.md")
+        clarify-command (str (fs/path project "swarmforge" "scripts"
+                                        "pack_dashboard_request.sh"))]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge) "agent"))))
+      (write-file (fs/path project ".swarmforge" "dashboard" "requests" "pending"
+                           (str request-id ".request"))
+                  (str "id: " request-id "\nstatus: pending\n"
+                       "created_at: 2026-11-14T17:00:00Z\n\nRouted card.\n"))
+      (seed-delivered-request! project request-id)
+      (start-fake-idle-agent! project input-log)
+      (write-file question-file "May I proceed with the shared contract?")
+      (let [created (run project clarify-command "clarify-chat" clarification-id
+                         (str question-file) "--root" (str project))]
+        (is (zero? (:exit created)) (:err created))
+        (is (= "" (regular-file-content input-log))))
+
+      (let [answered
+            (pack-web-test
+             project "--test-post-chat-json" (str project)
+             (json/generate-string
+              {:text "Yes, proceed with the shared contract."
+               :request_id chat-id
+               :clarification_id clarification-id}))]
+        (is (zero? (:exit answered)) (:err answered))
+        (is (= "" (regular-file-content input-log))
+            "recording the operator answer does not bypass the normal delivery path"))
+
+      (let [delivered (runner-once project 3600 0)
+            sent (regular-file-content input-log)]
+        (is (zero? (:exit delivered)) (:err delivered))
+        (is (str/includes? sent (str "[phone " chat-id "]"))
+            "the operator's project-chat answer is delivered first")
+        (is (str/includes? sent "Yes, proceed with the shared contract."))
+        (is (not (str/includes? sent "Continuation nudge"))))
+      (finally
+        (sh/sh "tmux" "-S" (str (fs/path project ".swarmforge"
+                                           "agent-tmux.sock"))
+               "kill-server")
+        (delete-tree! forge)))))
+
+(deftest continuation-nudge-clarification-state-is-project-scoped-and-fails-closed
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent")
+        other-project (fs/path forge "projects" "other")
+        request-id "req-promote-scoped"
+        other-clarification "clar-other-project"
+        malformed-clarification "clar-malformed"
+        input-log (fs/path project ".swarmforge" "agent-input.log")
+        question-file (fs/path project "tmp" "clarification-question.md")
+        clarify-command (str (fs/path project "swarmforge" "scripts"
+                                        "pack_dashboard_request.sh"))]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge) "agent"))))
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge) "other"))))
+      (write-file question-file "Other project question?")
+      (let [other-created
+            (run other-project clarify-command "clarify-chat"
+                 other-clarification (str question-file)
+                 "--root" (str other-project))]
+        (is (zero? (:exit other-created)) (:err other-created)))
+      (write-file (fs/path project ".swarmforge" "dashboard" "requests" "pending"
+                           (str request-id ".request"))
+                  (str "id: " request-id "\nstatus: pending\n"
+                       "created_at: 2026-11-14T17:00:00Z\n\nRouted card.\n"))
+      (seed-delivered-request! project request-id)
+      (start-fake-idle-agent! project input-log)
+
+      (let [normal (runner-once project 0 0)]
+        (is (zero? (:exit normal)) (:err normal))
+        (is (str/includes? (:out normal) "nudging delivered request"))
+        (is (str/includes? (regular-file-content input-log)
+                           "Continuation nudge")
+            "another project's clarification does not suppress this project"))
+
+      (write-file input-log "")
+      (write-file question-file "Target project question?")
+      (let [created (run project clarify-command "clarify-chat"
+                         malformed-clarification (str question-file)
+                         "--root" (str project))
+            record (fs/path project ".swarmforge" "dashboard" "requests"
+                            "pending" (str malformed-clarification ".request"))]
+        (is (zero? (:exit created)) (:err created))
+        (write-file record
+                    (str/replace (slurp (str record))
+                                 "attention_state: unseen"
+                                 "attention_state: mystery")))
+      (age-delivery-state! project request-id)
+      (let [first-pass (runner-once project 0 0)
+            second-pass (runner-once project 0 0)
+            stored (edn/read-string
+                    (slurp (str (delivery-state-path project request-id))))]
+        (is (zero? (:exit first-pass)) (:err first-pass))
+        (is (str/includes? (:out first-pass)
+                           "clarification state is invalid"))
+        (is (zero? (:exit second-pass)) (:err second-pass))
+        (is (not (str/includes? (:out second-pass)
+                                "clarification state is invalid"))
+            "the bounded malformed-state diagnostic is emitted once")
+        (is (= {:state "invalid" :reason "malformed-clarification"}
+               (:clarification-hold stored)))
+        (is (= "" (regular-file-content input-log))
+            "malformed clarification state fails closed across passes"))
+
+      (let [record (fs/path project ".swarmforge" "dashboard" "requests"
+                            "pending" (str malformed-clarification ".request"))
+            duplicate (fs/path project ".swarmforge" "dashboard" "requests"
+                             "done" (str malformed-clarification ".request"))]
+        (write-file record
+                    (str/replace (slurp (str record))
+                                 "attention_state: mystery"
+                                 "attention_state: unseen"))
+        (fs/create-dirs (fs/parent duplicate))
+        (fs/copy record duplicate {:replace-existing true})
+        (age-delivery-state! project request-id)
+        (let [ambiguous (runner-once project 0 0)
+              stored (edn/read-string
+                      (slurp (str (delivery-state-path project request-id))))]
+          (is (zero? (:exit ambiguous)) (:err ambiguous))
+          (is (str/includes? (:out ambiguous)
+                             "ambiguous-clarification-id"))
+          (is (= {:state "invalid"
+                  :reason "ambiguous-clarification-id"}
+                 (:clarification-hold stored)))
+          (is (= "" (regular-file-content input-log))
+              "duplicate clarification identities fail closed")))
+      (finally
+        (sh/sh "tmux" "-S" (str (fs/path project ".swarmforge"
+                                           "agent-tmux.sock"))
+               "kill-server")
         (delete-tree! forge)))))
 
 (deftest an-idle-agent-with-a-request-in-its-composer-is-given-enter
