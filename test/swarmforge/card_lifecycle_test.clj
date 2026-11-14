@@ -288,30 +288,50 @@
             listed (route-json "list" "--forge-root" (str forge) "--json")
             pending (route-json "detail" id
                                 "--forge-root" (str forge) "--json")
-            approved
+            generic
             (route-result "approve" id
-                          "--operator-said" "approve"
+                          "--operator-said" "go ahead"
                           "--json"
                           "--forge-root" (str forge))
-            consumed (route-json "detail" id
-                                 "--forge-root" (str forge) "--json")
-            duplicate
+            wrong-proposal
             (route-result "approve" id
-                          "--operator-said" "approve"
+                          "--operator-said"
+                          "approve proposal-20261114T999999999999Z"
                           "--json"
                           "--forge-root" (str forge))]
         (is (= [id] (mapv :id (:proposals listed))))
         (is (= "pending" (:status pending)))
-        (is (zero? (:exit approved)) (str (:err approved) (:out approved)))
-        (is (= id (:id (json/parse-string (:out approved) true))))
-        (is (= "consumed" (:status consumed)))
-        (is (= "spec" (:created_lane consumed)))
-        (is (= 1 (count (rows project))))
-        (is (not (zero? (:exit duplicate))))
-        (is (= "proposal_consumed"
-               (get-in (json/parse-string (:out duplicate) true)
+        (is (not (zero? (:exit generic))))
+        (is (= "approval_not_tied"
+               (get-in (json/parse-string (:out generic) true)
                        [:error :code])))
-        (is (= 1 (count (rows project)))))
+        (is (not (zero? (:exit wrong-proposal))))
+        (is (= "approval_not_tied"
+               (get-in (json/parse-string (:out wrong-proposal) true)
+                       [:error :code])))
+        (is (= "pending"
+               (:status (route-json "detail" id
+                                    "--forge-root" (str forge) "--json"))))
+        (let [approved (route-result "approve" id
+                                     "--operator-said" "approve"
+                                     "--json"
+                                     "--forge-root" (str forge))
+              consumed (route-json "detail" id
+                                   "--forge-root" (str forge) "--json")
+              duplicate (route-result "approve" id
+                                      "--operator-said" "approve"
+                                      "--json"
+                                      "--forge-root" (str forge))]
+          (is (zero? (:exit approved)) (str (:err approved) (:out approved)))
+          (is (= id (:id (json/parse-string (:out approved) true))))
+          (is (= "consumed" (:status consumed)))
+          (is (= "spec" (:created_lane consumed)))
+          (is (= 1 (count (rows project))))
+          (is (not (zero? (:exit duplicate))))
+          (is (= "proposal_consumed"
+                 (get-in (json/parse-string (:out duplicate) true)
+                         [:error :code])))
+          (is (= 1 (count (rows project))))))
       (finally
         (fs/delete-tree forge)))))
 

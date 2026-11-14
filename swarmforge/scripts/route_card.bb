@@ -1061,12 +1061,13 @@
       (when-not (affirmative? (:text record) name id
                               (or structured-tie?
                                   (record-tied-to-proposal? record id)))
-        (exit! 1 (str "Not approved: " (:via record) " reads \""
-                      (str/trim (first (str/split-lines
-                                        (str/trim (or (:text record) "")))))
-                      "\" — that does not approve " id
-                      ". Name the exact proposal id or card name; a generic"
-                      " discussion phrase is not approval.")))
+        (fail! "approval_not_tied" 1
+               (str "Not approved: " (:via record) " reads \""
+                    (str/trim (first (str/split-lines
+                                      (str/trim (or (:text record) "")))))
+                    "\" — that does not approve " id
+                    ". Name the exact proposal id or card name; a generic"
+                    " discussion phrase is not approval.")))
       (dependency-gate! forge proposal)
       (let [current-lane (initial-lane project-root)
             _ (when (not= current-lane lane)
@@ -1134,6 +1135,7 @@
                   "proposal_consumed" "proposal was already consumed"
                   "proposal_invalidated" "proposal was invalidated"
                   "proposal_not_presented" "proposal has no valid presentation record"
+                  "approval_not_tied" "approval is not tied to this proposal"
                   "proposal_superseded" "proposal was superseded"
                   "dependency_blocked" "proposal is blocked by a prerequisite"
                   "dependency_invalid" "proposal dependency is invalid"

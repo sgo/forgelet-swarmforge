@@ -173,6 +173,29 @@ argument shape as `RouteCardGateway`, not only a fake host command. Include
 list -> detail -> machine approve -> consumed detail, duplicate approval, and
 approval of a newly proposed valid record.
 
+## Verification
+
+The migration selected the same ten legacy proposals in dry-run and production,
+changed exactly those ten files, and made no change on a second run. Every
+migrated `presented-at` equals its original `created-at`; ids, projects, notes,
+lanes, dependencies and prior approval fields are preserved.
+
+Composition now requires both route-card files and restores the layer copy after
+the bridge kit installs. The deployed forge-root `route_card.bb` matches the
+source hash. The active dashboard and forge were not restarted.
+
+The live approval retry for `proposal-20261114T105356319556Z` consumed exactly
+that proposal and created exactly one queued card. A duplicate attempt returned
+`proposal_consumed` and created no second row. A fresh isolated proposal through
+the deployed command completed list, detail, approve and consumed detail with
+`presented-at` intact.
+
+The machine `approve <exact-id>` path treats its argument as a structured tie;
+human `commit` retains the stricter exact-name or tied-record rule. Untied
+generic consent and approval naming another proposal return the specific
+`approval_not_tied` machine error. `bb test` passed 445 tests with 3,042
+assertions plus all 17 dashboard browser tests, and `bb crap` passed.
+
 ## Operator acceptance
 
 None.
