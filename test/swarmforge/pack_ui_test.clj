@@ -5083,7 +5083,8 @@
              "❯ \n"
              "────────────────────────────────────────────\n"
              "  Sonnet 5.5 | Context: 18% used | 7d: 1%\n"
-             "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+             "  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+             "    new task? /clear to save 180.9k tokens\n")
         with-transcript
         (str "✻ Crunched for 5s · done 9:11 AM\n\n"
              "I answered the project chat request.\n\n"
