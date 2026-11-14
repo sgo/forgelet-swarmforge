@@ -2078,7 +2078,9 @@
       (is (= "open" (:lifecycle item)))
       (is (= "unseen" (:attention item)))
       (is (= (str/trimr body) (str/trimr (:body item))))
-      (is (= {:unresolved 1 :latest_change_at (:created_at item)}
+      (is (= {:unseen true
+              :unresolved 1
+              :latest_change_at (:created_at item)}
              (:clarification_attention state)))
       (is (= 1 (count files)))
       (is (not (fs/exists? argv-file)))
@@ -2089,6 +2091,79 @@
         (is (= 1 (count
                   (fs/list-dir
                    (fs/path root ".swarmforge/dashboard/requests/pending")))))))))
+
+(deftest project-clarification-attention-tracks-unseen-and-resolution
+  (let [root (tmp-dir)
+        argv-file (str (fs/path root "tmux.argv"))
+        first-id "clar-attention-first"
+        second-id "clar-attention-second"
+        malformed-id "clar-attention-malformed"
+        attention #(:clarification_attention (web-state root))]
+    (setup-pack! root ["specifier"])
+    (write-file (fs/path root ".swarmforge/tmux-socket")
+                (str (fs/path root "tmux.sock") "\n"))
+    (is (= {:unseen false :unresolved 0 :latest_change_at nil}
+           (attention)))
+
+    (clarify-project! root first-id "First question?")
+    (clarify-project! root second-id "Second question?")
+    (let [all-unseen (attention)]
+      (is (true? (:unseen all-unseen)))
+      (is (= 2 (:unresolved all-unseen)))
+      (is (= all-unseen (attention)) "restart and repeated state are deterministic"))
+
+    (let [seen (pack-web root true "--test-mark-chat-clarification-seen"
+                         (str root) first-id)
+          mixed (attention)]
+      (is (zero? (:exit seen)) (:err seen))
+      (is (true? (:unseen mixed)))
+      (is (= 2 (:unresolved mixed))))
+
+    (let [seen (pack-web root true "--test-mark-chat-clarification-seen"
+                         (str root) second-id)
+          seen-only (attention)]
+      (is (zero? (:exit seen)) (:err seen))
+      (is (false? (:unseen seen-only)))
+      (is (= 2 (:unresolved seen-only))))
+
+    (let [answered
+          (pack-web-env
+           root {"SWARMFORGE_TMUX_STUB" argv-file}
+           "--test-post-chat-json" (str root)
+           (json/generate-string
+            {:text "Answer to the first."
+             :request_id "req-attention-first"
+             :clarification_id first-id}))
+          remaining (attention)]
+      (is (zero? (:exit answered)) (:err answered))
+      (is (false? (:unseen remaining)))
+      (is (= 1 (:unresolved remaining))))
+
+    (let [withdrawn
+          (pack-web root true "--test-withdraw-chat-clarification"
+                    (str root) second-id)
+          resolved (attention)]
+      (is (zero? (:exit withdrawn)) (:err withdrawn))
+      (is (false? (:unseen resolved)))
+      (is (= 0 (:unresolved resolved)))
+      (is (not (str/blank? (:latest_change_at resolved)))))
+
+    (clarify-project! root malformed-id "Malformed attention?")
+    (let [file (fs/path root ".swarmforge/dashboard/requests/pending"
+                        (str malformed-id ".request"))
+          record (slurp (str file))]
+      (write-file file (str/replace record
+                                    "attention_state: unseen"
+                                    "attention_state: mystery")))
+    (let [malformed (attention)
+          repeated (attention)]
+      (is (= {:unseen false :unresolved 0}
+             (select-keys malformed [:unseen :unresolved])))
+      (is (= malformed repeated))
+      (is (= (json/generate-string malformed)
+             (json/generate-string repeated)))
+      (is (= #{:unseen :unresolved :latest_change_at}
+             (set (keys malformed)))))))
 
 (deftest project-chat-reply-answers-clarification-after-wake
   ;; Given an open project-agent clarification
@@ -2149,6 +2224,7 @@
     (let [state (web-state forge)
           slice (first (:projects state))]
       (is (= 1 (get-in slice [:clarification_attention :unresolved])))
+      (is (true? (get-in slice [:clarification_attention :unseen])))
       (is (not (str/blank?
                 (get-in slice [:clarification_attention :latest_change_at]))))
       (is (not (contains? slice :chat))))))

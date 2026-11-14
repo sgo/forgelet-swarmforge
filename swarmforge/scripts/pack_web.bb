@@ -1572,11 +1572,13 @@
 
 (defn clarification-attention [chat]
   (let [clarifications (filter #(= "clarification" (:kind %)) chat)
+        open (filter #(= "open" (:lifecycle %)) clarifications)
         latest (->> clarifications
                     (keep clarification-latest-change)
                     sort
                     last)]
-    {:unresolved (count (filter #(= "open" (:lifecycle %)) clarifications))
+    {:unseen (boolean (some #(= "unseen" (:attention %)) open))
+     :unresolved (count open)
      :latest_change_at latest}))
 
 ;; A request typed into the pane without the command that answers it leaves the

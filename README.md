@@ -626,9 +626,11 @@ dashboard projects the message's author, kind, lifecycle, attention and
 timestamps; an operator reply sent with its `clarification_id` both wakes the
 project agent and atomically marks the previous open clarification answered.
 Each project slice also carries
-`clarification_attention: {unresolved, latest_change_at}` so a Family client can
-derive attention without scanning message text. The old clarification store and
-Matrix path remain available for migration.
+`clarification_attention: {unseen, unresolved, latest_change_at}` so a Family
+client can derive attention without scanning message text. `unseen` is true
+exactly when at least one open clarification is unseen; marking it seen leaves
+it unresolved. The old clarification store and Matrix path remain available for
+migration.
 
 The repeatable Saibill-scale fixture has 13 projects, 420 tasks, 450 chat
 records and a state body around 934 KB. The regression budget is health p95
