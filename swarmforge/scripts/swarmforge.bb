@@ -475,7 +475,7 @@
          "- Do not clone those repos into `./tmp`.\n"
          "- If merge_and_process.sh or ready_for_next reports a merge conflict, resolve the conflicted files, git add, and commit. Do not invent git merge. Parallel cards on one tree will conflict; that is expected.\n"
          "- Operator follow-ups arrive as `[id] text` in this pane. Answer with `pack_dashboard_request.sh answer <id> ./tmp/answer.txt`.\n"
-         "- Ask the operator with `pack_dashboard_request.sh clarify ./tmp/question.txt`. Do not ask in the pane.\n"
+         "- Ask the operator in project chat with `pack_dashboard_request.sh clarify-chat clar-<stable-id> ./tmp/question.txt`. Do not ask in the pane.\n"
          "- Do not ask for approval in the pane. Queue `git_handoff`; the operator uses Attention.\n"
          "- When a card's work merges into the master worktree and the board already marks the card done, the tooling runs `swarmforge/hooks/card-complete.sh` if the project provides one, and prints what it did. A `HOOK_FAILED` line means the project's finishing step failed: report it to the operator rather than quietly continuing.\n"
          (when last-role?

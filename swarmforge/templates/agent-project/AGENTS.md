@@ -46,6 +46,13 @@ gate. Do not create a project-named card to stand in for the routed card. If
 more than one routed card is active and the task note cannot identify one, stop
 and make the operator choose rather than guessing.
 
+When a decision is genuinely the operator's, ask in project chat with a stable
+clarification id:
+`pack_dashboard_request.sh clarify-chat clar-<stable-id> ./tmp/question.txt`.
+The question may use multiline Markdown. If the answer is insufficient, create
+a new clarification that references the earlier one instead of reopening the
+answered record.
+
 Work in vertical slices: one public behaviour through every gate. Tests,
 cleanup, architecture, hardening and verification are part of that slice, not
 separate backlog items and not gates deferred to a later card.

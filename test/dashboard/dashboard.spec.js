@@ -1,11 +1,15 @@
 const { test, expect } = require("@playwright/test");
-const { spawn } = require("child_process");
+const { execFileSync, spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
 const repoRoot = path.resolve(__dirname, "../..");
 const packWeb = path.join(repoRoot, "swarmforge/scripts/pack_web.sh");
+const dashboardRequest = path.join(
+  repoRoot,
+  "swarmforge/scripts/pack_dashboard_request.sh"
+);
 
 function writeFile(file, text) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -84,6 +88,10 @@ function seedForge(root) {
 async function startDashboard() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "swarmforge-dashboard."));
   seedForge(root);
+  return startPack(root);
+}
+
+async function startPack(root) {
   const child = spawn(packWeb, ["--serve", root, "0"], {
     cwd: repoRoot,
     stdio: ["ignore", "pipe", "pipe"]
@@ -108,14 +116,33 @@ async function startDashboard() {
   return { root, child, url };
 }
 
-async function stopDashboard(handle) {
+async function stopDashboard(handle, options = {}) {
   if (handle && handle.child && !handle.child.killed) {
     handle.child.kill("SIGTERM");
     await new Promise((resolve) => handle.child.once("exit", resolve));
   }
-  if (handle && handle.root) {
+  if (handle && handle.root && !options.keepRoot) {
     fs.rmSync(handle.root, { recursive: true, force: true });
   }
+}
+
+async function startProjectDashboard() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "swarmforge-project."));
+  seedProject(root);
+  writeFile(path.join(root, ".swarmforge/single-agent"), "agent\n");
+  writeFile(
+    path.join(root, ".swarmforge/roles.tsv"),
+    `specifier\tmaster\t${root}\tspecifier\tSpecifier\tcodex\ttask\n`
+  );
+  const question = path.join(root, "tmp/clarification.md");
+  writeFile(question, "## Decision needed\n\nShould the cave use **twenty** rooms?\n");
+  execFileSync(
+    dashboardRequest,
+    ["clarify-chat", "clar-project-visible", question, "--root", root],
+    { cwd: repoRoot, encoding: "utf8" }
+  );
+  const handle = await startPack(root);
+  return { ...handle, requestId: "clar-project-visible" };
 }
 
 test.describe("pack dashboard", () => {
@@ -366,6 +393,42 @@ test.describe("pack dashboard", () => {
       await clar.locator("#clar-response").fill("Yes, any of the 20 rooms.");
       await clar.locator("#clar-ok").click();
       await expect(page.locator("#attention-clarifications .att-row")).toHaveCount(0);
+    } finally {
+      await stopDashboard(local);
+    }
+  });
+
+  test("project chat shows and answers a typed clarification", async ({ page }) => {
+    let local = await startProjectDashboard();
+    try {
+      await page.goto(local.url);
+      const clarification = page.locator(
+        `[data-chat-id="${local.requestId}"][data-chat-kind="clarification"]`
+      );
+      await expect(clarification).toBeVisible();
+      await expect(clarification).toContainText("Clarification · open");
+      await expect(clarification).toContainText("Should the cave use **twenty** rooms?");
+      await expect(clarification.locator(".clar-state")).toContainText("seen", {
+        timeout: 5000
+      });
+      await clarification.getByRole("button", { name: "Reply" }).click();
+      await page.locator("#chat-input").fill("Yes, all twenty rooms.");
+      await page.locator("#chat-input").press("Enter");
+      await expect(clarification.locator(".clar-state")).toContainText("answered");
+      await expect(clarification.getByRole("button", { name: "Reply" })).toHaveCount(0);
+      await expect(page.locator("#chat-history")).toContainText("Yes, all twenty rooms.");
+
+      const projectRoot = local.root;
+      const requestId = local.requestId;
+      await stopDashboard(local, { keepRoot: true });
+      local = { ...(await startPack(projectRoot)), requestId };
+      await page.goto(local.url);
+      const reopened = page.locator(
+        `[data-chat-id="${local.requestId}"][data-chat-kind="clarification"]`
+      );
+      await expect(reopened.locator(".clar-state")).toContainText("answered");
+      await expect(reopened.getByRole("button", { name: "Reply" })).toHaveCount(0);
+      await expect(page.locator("#chat-history")).toContainText("Yes, all twenty rooms.");
     } finally {
       await stopDashboard(local);
     }

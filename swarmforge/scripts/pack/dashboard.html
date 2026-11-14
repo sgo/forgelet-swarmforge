@@ -108,8 +108,11 @@ header.top h1{margin:0;font-size:15px}.meta{color:var(--muted);font-size:12px}.m
 .history{flex:1;min-height:0;background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px;overflow:auto;display:flex;flex-direction:column;gap:8px;font-size:11px}
 .att-row input[type=text]{flex:1;min-width:8rem;border:1px solid #c6cbc5;border-radius:6px;padding:4px 6px;font:inherit;font-size:11px}
 .bubble-you{border-left:3px solid #6b7c72;padding-left:8px;white-space:pre-wrap}
+.bubble-agent{border-left:3px solid #c9851a;padding:8px;white-space:pre-wrap;background:#fffaf0;border-radius:0 7px 7px 0}
 .bubble-ts{color:#4a4f4c;padding-left:12px;font-style:italic;white-space:pre-wrap}
 .bubble-status{color:var(--green);padding-left:12px;white-space:pre-wrap}
+.clarification-meta{display:flex;align-items:center;gap:8px;margin-bottom:5px;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.04em}
+.clarification-meta .btn{margin-left:auto;text-transform:none;letter-spacing:normal}
 .composer{display:flex;gap:6px;margin-top:8px;align-items:flex-end}
 .composer textarea{flex:1;height:calc(1.35em * 4 + 16px);line-height:1.35;border:1px solid #c6cbc5;border-radius:6px;padding:6px 8px;font:inherit;font-size:12px;resize:none}
 .float-layer{position:fixed;inset:0;background:rgba(30,34,31,.28);z-index:100;display:none;align-items:center;justify-content:center}
@@ -1381,9 +1384,53 @@ function statusBlock(lines) {
   return el;
 }
 
+let replyClarificationId = "";
+let seenClarificationRequests = new Set();
+
+function beginClarificationReply(item) {
+  replyClarificationId = item.id || "";
+  const input = $("chat-input");
+  input.placeholder = "Reply to " + (item.id || "clarification") +
+    "… (Enter send · Shift+Enter newline)";
+  input.focus();
+}
+
+function clarificationStateText(item) {
+  const lifecycle = item.lifecycle || item.status || "open";
+  const attention = item.attention || "unseen";
+  return "Clarification · " + lifecycle + " · " + attention;
+}
+
+function clarificationMeta(item) {
+  const meta = document.createElement("div");
+  meta.className = "clarification-meta";
+  const label = document.createElement("span");
+  label.className = "clar-state";
+  label.textContent = clarificationStateText(item);
+  meta.appendChild(label);
+  if ((item.lifecycle || item.status) === "open") {
+    const reply = document.createElement("button");
+    reply.type = "button";
+    reply.className = "btn btn-sm clar-reply";
+    reply.textContent = "Reply";
+    reply.onclick = () => beginClarificationReply(item);
+    meta.appendChild(reply);
+  }
+  return meta;
+}
+
 function chatTurn(item, statusLines) {
   const wrap = document.createElement("div");
   wrap.dataset.chatId = item.id || "";
+  if (item.kind === "clarification") {
+    wrap.dataset.chatKind = "clarification";
+    const body = document.createElement("div");
+    body.className = "bubble-agent";
+    body.appendChild(clarificationMeta(item));
+    body.appendChild(document.createTextNode(item.body || ""));
+    wrap.appendChild(body);
+    return wrap;
+  }
   const you = document.createElement("div");
   you.className = "bubble-you";
   you.textContent = item.body || "";
@@ -1418,11 +1465,38 @@ function renderChat(data) {
   const latestPending = pendingChatId(items);
   const statusLines = data.lieutenant_status || [];
   items.forEach((item) => {
-    const showStatus = item.id === latestPending && !item.response;
+    const clarification = item.kind === "clarification";
+    const showStatus = !clarification && item.id === latestPending && !item.response;
     let wrap = history.querySelector("[data-chat-id=\"" + item.id + "\"]");
     if (!wrap) {
-      history.appendChild(chatTurn(item, showStatus ? statusLines : []));
-      return;
+      wrap = chatTurn(item, showStatus ? statusLines : []);
+      history.appendChild(wrap);
+    }
+    if (clarification) {
+      const state = wrap.querySelector(".clar-state");
+      if (state) state.textContent = clarificationStateText(item);
+      const reply = wrap.querySelector(".clar-reply");
+      const open = (item.lifecycle || item.status) === "open";
+      if (!open && reply) reply.remove();
+      if (!open && replyClarificationId === item.id) {
+        replyClarificationId = "";
+        $("chat-input").placeholder =
+          "Follow-up… (Enter send · Shift+Enter newline)";
+      }
+      if (open && item.attention === "unseen" &&
+          !seenClarificationRequests.has(item.id)) {
+        seenClarificationRequests.add(item.id);
+        fetch("/api/clarifications/" + encodeURIComponent(item.id) + "/seen", {
+          method: "POST"
+        }).then((res) => {
+          if (res.ok) {
+            item.attention = "seen";
+            if (state) state.textContent = clarificationStateText(item);
+          } else {
+            seenClarificationRequests.delete(item.id);
+          }
+        }).catch(() => seenClarificationRequests.delete(item.id));
+      }
     }
     const reply = wrap.querySelector(".bubble-ts");
     const statusEl = wrap.querySelector(".bubble-status");
@@ -1456,12 +1530,23 @@ function renderChat(data) {
 async function sendChat() {
   const text = $("chat-input").value.trim();
   if (!text) return;
-  await fetch("/api/chat", {
+  const payload = {text};
+  if (replyClarificationId) payload.clarification_id = replyClarificationId;
+  const res = await fetch("/api/chat", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({text})
+    body: JSON.stringify(payload)
   });
+  if (!res.ok) {
+    let message = "Could not deliver reply";
+    try { message = (await res.json()).error || message; } catch (_) {}
+    $("error").textContent = message;
+    return;
+  }
   $("chat-input").value = "";
+  replyClarificationId = "";
+  $("chat-input").placeholder =
+    "Follow-up… (Enter send · Shift+Enter newline)";
   loadState();
 }
 

@@ -41,6 +41,9 @@
        "  pack_web.sh --test-status-pane <root> <text>\n"
        "  pack_web.sh --test-status-persist <root> <first> <second>\n"
        "  pack_web.sh --test-answer-clarification <root> <id> <text>\n"
+       "  pack_web.sh --test-create-chat-clarification <root> <id> <body-file> [reference-id]\n"
+       "  pack_web.sh --test-mark-chat-clarification-seen <root> <id>\n"
+       "  pack_web.sh --test-withdraw-chat-clarification <root> <id>\n"
        "  pack_web.sh --test-task <root> <name>\n"
        "  pack_web.sh --test-delete-task <root> <name>\n"
        "  pack_web.sh --test-delete-approval <root> <id>\n"
@@ -1082,8 +1085,48 @@
 (def chat-proposal-id-re #"proposal-[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}")
 (def chat-request-id-re #"[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}")
 (def chat-source-re #"[A-Za-z0-9][A-Za-z0-9._~:-]{0,127}")
+(def clarification-id-re #"clar-[A-Za-z0-9][A-Za-z0-9._~:-]{0,139}")
+(def clarification-max-chars 16384)
 (def chat-token-re
   #"\b(?:gh[pousr]_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|sk-[A-Za-z0-9_-]{10,}|xox[baprs]-[A-Za-z0-9-]{10,}|Bearer\s+[A-Za-z0-9._~+/=-]{10,})\b")
+(def clarification-path-re
+  #"(?<![\p{L}\p{N}_+.-])(?:~|/(?:Users|home|private|var|tmp|opt|Volumes|srv|Applications|Library|usr|etc|bin))/[^\s)\]},>]+|(?<![\p{L}\p{N}_])[A-Za-z]:\\[^\s)\]},>]+")
+(def clarification-control-re
+  #"[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]")
+
+(declare chat-request-invalid!)
+
+(defn valid-clarification-id? [value]
+  (boolean (and (string? value)
+                (re-matches clarification-id-re value)
+                (not (re-find chat-token-re value)))))
+
+(defn valid-instant-text? [value]
+  (and (string? value)
+       (try
+         (java.time.Instant/parse value)
+         true
+         (catch Exception _ false))))
+
+(defn safe-clarification-body [text]
+  (let [body (str/trimr (or text ""))]
+    (when (str/blank? body)
+      (chat-request-invalid! "Clarification text is required."))
+    (when (re-find clarification-control-re body)
+      (chat-request-invalid! "Clarification text contains a control character."))
+    (when (> (count body) clarification-max-chars)
+      (chat-request-invalid!
+       (str "Clarification text must be at most "
+            clarification-max-chars " characters.")))
+    (-> body
+        (str/replace clarification-path-re "[redacted-path]")
+        (str/replace chat-token-re "[redacted-token]"))))
+
+(defn safe-clarification-reference [value]
+  (when (some? value)
+    (when-not (valid-clarification-id? value)
+      (chat-request-invalid! "Clarification reference is invalid."))
+    value))
 
 (defn chat-thread-id [headers]
   (let [value (some-> (get headers "thread_id") str/trim not-empty)]
@@ -1214,6 +1257,45 @@
     (when action
       (resolve-chat-action root action))))
 
+(defn clarification-metadata [headers]
+  (let [id (get headers "clarification_id")
+        status (get headers "status")
+        attention (get headers "attention_state")
+        reference (get headers "reference_id")
+        created-at (get headers "created_at")
+        answered-at (get headers "answered_at")
+        withdrawn-at (get headers "withdrawn_at")
+        seen-at (get headers "seen_at")
+        answered-by (get headers "answered_by")]
+    (when (and (= "project-agent" (get headers "author"))
+               (= "project-agent" (get headers "direction"))
+               (= "clarification" (get headers "kind"))
+               (= id (get headers "id"))
+               (valid-clarification-id? id)
+               (contains? #{"open" "answered" "withdrawn"} status)
+               (contains? #{"unseen" "seen"} attention)
+               (valid-instant-text? created-at)
+               (or (nil? reference)
+                   (and (valid-clarification-id? reference)
+                        (not= id reference)))
+               (or (nil? answered-at) (valid-instant-text? answered-at))
+               (or (nil? withdrawn-at) (valid-instant-text? withdrawn-at))
+               (or (nil? seen-at) (valid-instant-text? seen-at))
+               (or (nil? answered-by)
+                   (re-matches chat-request-id-re answered-by)))
+      (cond-> {:author "project-agent"
+               :direction "project-agent"
+               :kind "clarification"
+               :clarification_id id
+               :lifecycle status
+               :attention attention
+               :created_at created-at}
+        reference (assoc :reference_id reference)
+        answered-at (assoc :answered_at answered-at)
+        withdrawn-at (assoc :withdrawn_at withdrawn-at)
+        seen-at (assoc :seen_at seen-at)
+        answered-by (assoc :answered_by answered-by)))))
+
 (defn parse-chat
   ([path] (parse-chat nil path))
   ([root path]
@@ -1228,7 +1310,10 @@
         proposal-id (chat-proposal-id headers)
         thread-id (chat-thread-id headers)
         source (chat-source headers)
-        action (chat-action root headers)]
+        action (chat-action root headers)
+        clarification (clarification-metadata headers)
+        reply-to (when (valid-clarification-id? (get headers "clarification_id"))
+                   (get headers "clarification_id"))]
     (cond-> {:id (get headers "id")
              :status (get headers "status")
              :body (or body "")
@@ -1237,7 +1322,9 @@
       proposal-id (assoc :proposal_id proposal-id)
       thread-id (assoc :thread_id thread-id)
       source (assoc :source source)
-      action (assoc :actions [action])))))
+      action (assoc :actions [action])
+      clarification (merge clarification)
+      (and reply-to (not clarification)) (assoc :clarification_id reply-to)))))
 
 (defn list-chat [root]
   (state-cached
@@ -1316,6 +1403,172 @@
     (chat-request-invalid! (str kind " is invalid.")))
   value)
 
+(defn render-chat-request
+  [{:keys [id status body response created_at updated_at thread_id source
+           proposal_id author direction kind clarification_id reference_id
+           attention_state attention answered_at answered_by withdrawn_at seen_at]}]
+  (str "id: " id "\n"
+       "status: " status "\n"
+       (when thread_id (str "thread_id: " thread_id "\n"))
+       (when source (str "source: " source "\n"))
+       (when proposal_id (str "proposal_id: " proposal_id "\n"))
+       (when author (str "author: " author "\n"))
+       (when direction (str "direction: " direction "\n"))
+       (when kind (str "kind: " kind "\n"))
+       (when clarification_id (str "clarification_id: " clarification_id "\n"))
+       (when reference_id (str "reference_id: " reference_id "\n"))
+       (when-let [attention (or attention_state attention)]
+         (str "attention_state: " attention "\n"))
+       "created_at: " created_at "\n"
+       (when updated_at (str "updated_at: " updated_at "\n"))
+       (when answered_at (str "answered_at: " answered_at "\n"))
+       (when answered_by (str "answered_by: " answered_by "\n"))
+       (when withdrawn_at (str "withdrawn_at: " withdrawn_at "\n"))
+       (when seen_at (str "seen_at: " seen_at "\n"))
+       (when-not (str/blank? response)
+         (str "response: " (str/replace response #"\n" (constantly "\\n")) "\n"))
+       "\n"
+       (or body "")
+       (when-not (str/ends-with? (or body "") "\n") "\n")))
+
+(defn atomic-write-chat-record! [path record]
+  (fs/create-dirs (fs/parent path))
+  (let [tmp (fs/create-temp-file {:dir (fs/parent path)
+                                  :prefix ".chat-record."})]
+    (spit (str tmp) (render-chat-request record))
+    (fs/move tmp path {:replace-existing true :atomic-move true})))
+
+(defn find-clarification-record [root id]
+  (when (valid-clarification-id? id)
+    (some (fn [path]
+            (when (fs/regular-file? path)
+              (let [entry (parse-chat path)]
+                (when (and (= "clarification" (:kind entry))
+                           (= id (:clarification_id entry)))
+                  {:path path :entry entry}))))
+          [(chat-request-file root "pending" id)
+           (chat-request-file root "done" id)])))
+
+(defn same-clarification-content?
+  [entry body reference-id]
+  (and (= "clarification" (:kind entry))
+       (= (str/trimr (or body ""))
+          (str/trimr (or (:body entry) "")))
+       (= reference-id (:reference_id entry))))
+
+(defn create-chat-clarification!
+  [root id text reference-id]
+  (when-not (valid-clarification-id? id)
+    (chat-request-invalid! "Clarification id is invalid."))
+  (let [body (safe-clarification-body text)
+        reference-id (safe-clarification-reference reference-id)]
+    (with-chat-request-lock
+      root
+      (fn []
+        (if-let [{:keys [entry]} (existing-chat-request root id)]
+          (if (same-clarification-content? entry body reference-id)
+            {:clarification_id id :lifecycle (:lifecycle entry)}
+            (throw (ex-info "Clarification id was reused with different content."
+                            {:http-status 409})))
+          (do
+            (when (and reference-id
+                       (nil? (find-clarification-record root reference-id)))
+              (chat-request-invalid! "Clarification reference is unknown."))
+            (let [now (iso-now)
+                  record {:id id
+                          :status "open"
+                          :body body
+                          :created_at now
+                          :updated_at now
+                          :author "project-agent"
+                          :direction "project-agent"
+                          :kind "clarification"
+                          :clarification_id id
+                          :reference_id reference-id
+                          :attention_state "unseen"}]
+              (atomic-write-chat-record!
+               (chat-request-file root "pending" id)
+               record)
+              {:clarification_id id :lifecycle "open"})))))))
+
+(defn change-open-clarification! [found id transition]
+  (when-not found
+    (throw (ex-info (str "Unknown clarification: " id)
+                    {:http-status 404})))
+  (let [{:keys [path entry]} found]
+    (when-not (= "open" (:lifecycle entry))
+      (throw (ex-info
+              (str "Clarification is " (:lifecycle entry)
+                   " and cannot be changed: " id)
+              {:http-status 409})))
+    (let [now (iso-now)
+          changed (transition entry now)]
+      (atomic-write-chat-record! path changed)
+      changed)))
+
+(defn update-clarification-record!
+  [root id transition]
+  (with-chat-request-lock
+    root
+    #(change-open-clarification!
+      (find-clarification-record root id) id transition)))
+
+(defn mark-clarification-answered! [root id reply-id]
+  (update-clarification-record!
+   root id
+   (fn [entry now]
+     (assoc entry
+            :status "answered"
+            :lifecycle "answered"
+            :answered_at now
+            :answered_by reply-id
+            :updated_at now))))
+
+(defn withdraw-chat-clarification! [root id]
+  (update-clarification-record!
+   root id
+   (fn [entry now]
+     (assoc entry
+            :status "withdrawn"
+            :lifecycle "withdrawn"
+            :withdrawn_at now
+            :updated_at now))))
+
+(defn mark-chat-clarification-seen! [root id]
+  (with-chat-request-lock
+    root
+    (fn []
+      (let [{:keys [path entry] :as found} (find-clarification-record root id)]
+        (when-not found
+          (throw (ex-info (str "Unknown clarification: " id)
+                          {:http-status 404})))
+        (if (= "seen" (:attention entry))
+          entry
+          (let [now (iso-now)
+                changed (assoc entry
+                               :attention "seen"
+                               :attention_state "seen"
+                               :seen_at now
+                               :updated_at now)]
+            (atomic-write-chat-record! path changed)
+            changed))))))
+
+(defn clarification-latest-change [entry]
+  (->> [(:withdrawn_at entry) (:answered_at entry) (:seen_at entry)
+        (:created_at entry)]
+       (keep not-empty)
+       sort
+       last))
+
+(defn clarification-attention [chat]
+  (let [clarifications (filter #(= "clarification" (:kind %)) chat)
+        latest (->> clarifications
+                    (keep clarification-latest-change)
+                    sort
+                    last)]
+    {:unresolved (count (filter #(= "open" (:lifecycle %)) clarifications))
+     :latest_change_at latest}))
+
 ;; A request typed into the pane without the command that answers it leaves the
 ;; operator with nothing: the request is written down, and the reply lands only
 ;; where they cannot see it. The reminder rides with the request itself, in the
@@ -1361,28 +1614,25 @@
 (defn write-chat-request!
   ([root text]
    (write-chat-request! root text {}))
-  ([root text {:keys [request_id thread_id source proposal_id]}]
+  ([root text {:keys [request_id thread_id source proposal_id clarification_id]}]
    (let [id (or request_id (fresh-chat-id root))
          text (str/trimr (or text ""))
          file (fs/path (chat-pending-dir root) (str id ".request"))]
-     (fs/create-dirs (fs/parent file))
-     (let [tmp (fs/create-temp-file {:dir (fs/parent file)
-                                     :prefix ".chat-request."})]
-       (spit (str tmp)
-             (str "id: " id "\n"
-                  "status: pending\n"
-                  "created_at: " (.format java.time.format.DateTimeFormatter/ISO_INSTANT
-                                          (java.time.Instant/now)) "\n"
-                  (when thread_id (str "thread_id: " thread_id "\n"))
-                  (when source (str "source: " source "\n"))
-                  (when proposal_id (str "proposal_id: " proposal_id "\n"))
-                  "\n"
-                  text "\n"))
-       (fs/move tmp file {:replace-existing true :atomic-move true}))
+     (atomic-write-chat-record!
+      file
+      {:id id
+       :status "pending"
+       :created_at (iso-now)
+       :thread_id thread_id
+       :source source
+       :proposal_id proposal_id
+       :clarification_id clarification_id
+       :body text})
      id)))
 
 (defn dashboard-state [root]
-  (let [master (master-role root)]
+  (let [master (master-role root)
+        chat (list-chat root)]
     {:master_role master
      :master_display (display-name-for-role master)
      :lanes (lanes root)
@@ -1392,7 +1642,8 @@
      :approvals (approvals root)
      :resolved_approvals (resolved-approvals root)
      :work_in_flight (work-in-flight root)
-     :chat (list-chat root)
+     :chat chat
+     :clarification_attention (clarification-attention chat)
      :clarifications (list-clarifications root)}))
 
 (defn tagged [project items]
@@ -1522,7 +1773,8 @@
   ([forge name] (project-slice forge name nil))
   ([forge name reports]
    (let [root (open-project-root forge name)
-         stats (completion-stats root reports)]
+         stats (completion-stats root reports)
+         chat (list-chat root)]
      {:name name
       :open true
       :single_agent (single-agent-project? root)
@@ -1532,6 +1784,7 @@
       :lanes (lanes root)
       :tasks (tagged name (tasks root))
       :work_in_flight (tagged name (work-in-flight root))
+      :clarification_attention (clarification-attention chat)
       :completion_stats stats})))
 
 (defn forge-dashboard-state [root]
@@ -1967,12 +2220,16 @@
     (catch Exception _
       (chat-request-invalid! "Chat request body is invalid."))))
 
-(defn same-chat-content? [entry text thread-id source proposal-id]
-  (and (= (str/trimr (or (:body entry) ""))
-          (str/trimr (or text "")))
-       (= thread-id (:thread_id entry))
-       (= source (:source entry))
-       (= proposal-id (:proposal_id entry))))
+(defn same-chat-content?
+  ([entry text thread-id source proposal-id]
+   (same-chat-content? entry text thread-id source proposal-id nil))
+  ([entry text thread-id source proposal-id clarification-id]
+   (and (= (str/trimr (or (:body entry) ""))
+           (str/trimr (or text "")))
+        (= thread-id (:thread_id entry))
+        (= source (:source entry))
+        (= proposal-id (:proposal_id entry))
+        (= clarification-id (:clarification_id entry)))))
 
 (declare json-ok-data)
 
@@ -1980,7 +2237,8 @@
   (let [request (parse-chat-request-body body)
         text (or (:text request) "")
         metadata? (some #(contains? request %)
-                        [:request_id :thread_id :source :proposal_id])
+                        [:request_id :thread_id :source :proposal_id
+                         :clarification_id])
         request-id (when (contains? request :request_id)
                      (supplied-chat-id (:request_id request)
                                        "Request id"
@@ -1996,7 +2254,11 @@
         proposal-id (when (contains? request :proposal_id)
                       (supplied-chat-id (:proposal_id request)
                                         "Proposal id"
-                                        chat-proposal-id-re))]
+                                        chat-proposal-id-re))
+        clarification-id (when (contains? request :clarification_id)
+                           (supplied-chat-id (:clarification_id request)
+                                             "Clarification id"
+                                             clarification-id-re))]
     (when (and metadata? (str/blank? text))
       (chat-request-invalid! "Chat text is required when request metadata is supplied."))
     (if (str/blank? text)
@@ -2009,20 +2271,66 @@
                       existing (existing-chat-request root id)]
                   (if existing
                     (if (same-chat-content? (:entry existing) text thread-id source
-                                            proposal-id)
-                      {:id id}
+                                            proposal-id clarification-id)
+                      (do
+                        (when clarification-id
+                          (let [clarification
+                                (find-clarification-record root clarification-id)]
+                            (when (and clarification
+                                       (= "open"
+                                          (get-in clarification
+                                                  [:entry :lifecycle])))
+                              (change-open-clarification!
+                               clarification clarification-id
+                               (fn [entry now]
+                                 (assoc entry
+                                        :status "answered"
+                                        :lifecycle "answered"
+                                        :answered_at now
+                                        :answered_by id
+                                        :updated_at now))))))
+                        {:id id})
                       (throw (ex-info "Request id was reused with different content."
                                       {:http-status 409})))
-                    (let [options {:request_id id
+                    (let [clarification (when clarification-id
+                                          (find-clarification-record
+                                           root clarification-id))
+                          _ (when (and clarification-id
+                                       (not= "open"
+                                             (get-in clarification
+                                                     [:entry :lifecycle])))
+                              (throw
+                               (ex-info
+                                (if clarification
+                                  (str "Clarification is "
+                                       (get-in clarification
+                                               [:entry :lifecycle])
+                                       " and cannot be answered: "
+                                       clarification-id)
+                                  (str "Unknown clarification: "
+                                       clarification-id))
+                                {:http-status (if clarification 409 404)})))
+                          options {:request_id id
                                    :thread_id thread-id
                                    :source source
-                                   :proposal_id proposal-id}
+                                   :proposal_id proposal-id
+                                   :clarification_id clarification-id}
                           id (write-chat-request! root text options)]
                       (try
                         (when-not (single-agent-project? root)
                           (if metadata?
                             (inject-master-strict! root (chat-wake id text))
                             (inject-master! root (chat-wake id text))))
+                        (when clarification-id
+                          (change-open-clarification!
+                           clarification clarification-id
+                           (fn [entry now]
+                             (assoc entry
+                                    :status "answered"
+                                    :lifecycle "answered"
+                                    :answered_at now
+                                    :answered_by id
+                                    :updated_at now))))
                         {:id id}
                         (catch Exception error
                           (fs/delete-if-exists
@@ -2060,14 +2368,29 @@
 
 (defn clarification-route [uri]
   (let [path (first (str/split (or uri "") #"\?"))]
-    (when-let [[_ id] (re-matches #"/api/clarifications/([^/]+)/answer" path)]
+    (when-let [[_ id] (re-matches #"/api/clarifications/([^/]+)/(?:answer|seen|withdraw)"
+                                 path)]
       (java.net.URLDecoder/decode id "UTF-8"))))
+
+(defn clarification-action [uri]
+  (let [path (first (str/split (or uri "") #"\?"))]
+    (when-let [[_ _ action]
+               (re-matches #"/api/clarifications/([^/]+)/(answer|seen|withdraw)"
+                           path)]
+      action)))
 
 (defn post-clarification [root uri body]
   (if-let [id (clarification-route uri)]
-    (let [text (or (:text (json/parse-string (or body "{}") true)) "")]
-      (answer-clarification! root id text)
-      (json-ok))
+    (let [text (or (:text (json/parse-string (or body "{}") true)) "")
+          typed (find-clarification-record root id)]
+      (case (clarification-action uri)
+        "seen" (do (mark-chat-clarification-seen! root id) (json-ok))
+        "withdraw" (do (withdraw-chat-clarification! root id) (json-ok))
+        "answer"
+        (if typed
+          (throw (ex-info "Reply to this clarification through project chat."
+                          {:http-status 409}))
+          (do (answer-clarification! root id text) (json-ok)))))
     {:status 404 :body "Not found"}))
 
 (defn pending-file [root id]
@@ -2624,7 +2947,8 @@
 (defn find-clar-root [forge id]
   (or (some (fn [name]
               (let [proot (str (forge/project-dir forge name))]
-                (when (fs/regular-file? (clar-pending-file proot id))
+                (when (or (fs/regular-file? (clar-pending-file proot id))
+                          (find-clarification-record proot id))
                   proot)))
             (forge/read-open-projects forge))
       (throw (ex-info (str "Unknown clarification: " id) {:http-status 404}))))
@@ -3181,6 +3505,32 @@
                               {:method "POST"
                                :uri (str "/api/clarifications/" id "/answer")
                                :body (json/generate-string {:text (or text "")})})))
+
+(defn test-create-chat-clarification!
+  [root id body-file reference-id]
+  (when (str/blank? id)
+    (exit! 1 "Missing clarification id"))
+  (when-not (fs/regular-file? body-file)
+    (exit! 1 "Missing clarification body file"))
+  (println
+   (json/generate-string
+    (merge {:ok true}
+           (create-chat-clarification!
+            (require-root! root) id (slurp (str body-file)) reference-id)))))
+
+(defn test-mark-chat-clarification-seen! [root id]
+  (when (str/blank? id)
+    (exit! 1 "Missing clarification id"))
+  (test-http! (handle-request (require-root! root)
+                              {:method "POST"
+                               :uri (str "/api/clarifications/" id "/seen")})))
+
+(defn test-withdraw-chat-clarification! [root id]
+  (when (str/blank? id)
+    (exit! 1 "Missing clarification id"))
+  (test-http! (handle-request (require-root! root)
+                              {:method "POST"
+                               :uri (str "/api/clarifications/" id "/withdraw")})))
 
 (defn test-task! [root name]
   (when (str/blank? name)

@@ -268,12 +268,14 @@
        "request"
        "thread-a"
        "app.completed-card-report"
+       nil
        nil))
   (is (not (pack-web/same-chat-content?
             {:body "request"
              :thread_id "thread-a"}
             "different"
             "thread-a"
+            nil
             nil
             nil)))
   (is (try

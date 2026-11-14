@@ -14,6 +14,9 @@
        "                                  [--approve-route-card <proposal-id>\n"
        "                                   | --without-route-card-action]\n"
        "  pack_dashboard_request.sh clarify <question-file>\n"
+       "  pack_dashboard_request.sh clarify-chat <clarification-id> <question-file>\n"
+       "                                           [--reference <clarification-id>]\n"
+       "  pack_dashboard_request.sh withdraw-clarification <clarification-id>\n"
        "  pack_dashboard_request.sh create --root <dir> --body <text>\n"
        "  pack_dashboard_request.sh list --root <dir>\n"
        "\n"
@@ -120,8 +123,42 @@
 (def chat-thread-id-re #"[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}")
 (def chat-proposal-id-re #"proposal-[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}")
 (def chat-source-re #"[A-Za-z0-9][A-Za-z0-9._~:-]{0,127}")
+(def clarification-id-re #"clar-[A-Za-z0-9][A-Za-z0-9._~:-]{0,139}")
+(def clarification-max-chars 16384)
 (def chat-token-re
   #"\b(?:gh[pousr]_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|sk-[A-Za-z0-9_-]{10,}|xox[baprs]-[A-Za-z0-9-]{10,}|Bearer\s+[A-Za-z0-9._~+/=-]{10,})\b")
+(def clarification-path-re
+  #"(?<![\p{L}\p{N}_+.-])(?:~|/(?:Users|home|private|var|tmp|opt|Volumes|srv|Applications|Library|usr|etc|bin))/[^\s)\]},>]+|(?<![\p{L}\p{N}_])[A-Za-z]:\\[^\s)\]},>]+")
+(def clarification-control-re
+  #"[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]")
+
+(defn valid-clarification-id? [value]
+  (boolean (and (string? value)
+                (re-matches clarification-id-re value)
+                (not (re-find chat-token-re value)))))
+
+(defn clarification-invalid! [message]
+  (exit! 1 message))
+
+(defn safe-clarification-body [text]
+  (let [body (str/trimr (or text ""))]
+    (when (str/blank? body)
+      (clarification-invalid! "Clarification text is required."))
+    (when (re-find clarification-control-re body)
+      (clarification-invalid! "Clarification text contains a control character."))
+    (when (> (count body) clarification-max-chars)
+      (clarification-invalid!
+       (str "Clarification text must be at most "
+            clarification-max-chars " characters.")))
+    (-> body
+        (str/replace clarification-path-re "[redacted-path]")
+        (str/replace chat-token-re "[redacted-token]"))))
+
+(defn safe-clarification-reference [value]
+  (when (some? value)
+    (when-not (valid-clarification-id? value)
+      (clarification-invalid! "Clarification reference is invalid."))
+    value))
 
 (defn safe-thread-id [value]
   (let [value (some-> value str/trim not-empty)]
@@ -273,7 +310,8 @@
 
 (defn render-request
   [{:strs [id status body response created_at updated_at role
-           thread_id source proposal_id
+           thread_id source proposal_id author direction kind clarification_id
+           reference_id attention_state answered_at answered_by withdrawn_at seen_at
            action_type action_proposal_id action_family action_project
            action_task_name action_label action_status]}]
   (str "id: " id "\n"
@@ -282,6 +320,15 @@
        (when-not (str/blank? thread_id) (str "thread_id: " thread_id "\n"))
        (when-not (str/blank? source) (str "source: " source "\n"))
        (when-not (str/blank? proposal_id) (str "proposal_id: " proposal_id "\n"))
+       (when-not (str/blank? author) (str "author: " author "\n"))
+       (when-not (str/blank? direction) (str "direction: " direction "\n"))
+       (when-not (str/blank? kind) (str "kind: " kind "\n"))
+       (when-not (str/blank? clarification_id)
+         (str "clarification_id: " clarification_id "\n"))
+       (when-not (str/blank? reference_id)
+         (str "reference_id: " reference_id "\n"))
+       (when-not (str/blank? attention_state)
+         (str "attention_state: " attention_state "\n"))
        (when-not (str/blank? action_type) (str "action: " action_type "\n"))
        (when-not (str/blank? action_proposal_id)
          (str "action_proposal_id: " action_proposal_id "\n"))
@@ -297,6 +344,10 @@
          (str "action_status: " action_status "\n"))
        "created_at: " created_at "\n"
        (when updated_at (str "updated_at: " updated_at "\n"))
+       (when-not (str/blank? answered_at) (str "answered_at: " answered_at "\n"))
+       (when-not (str/blank? answered_by) (str "answered_by: " answered_by "\n"))
+       (when-not (str/blank? withdrawn_at) (str "withdrawn_at: " withdrawn_at "\n"))
+       (when-not (str/blank? seen_at) (str "seen_at: " seen_at "\n"))
        (when-not (str/blank? response)
          (str "response: " (str/replace response #"\n" (constantly "\\n")) "\n"))
        "\n"
@@ -333,7 +384,20 @@
 
 (defn request-entry [path]
   (let [m (parse-kv (slurp (str path)))]
-    (let [action (stored-route-action m)]
+    (let [action (stored-route-action m)
+          clarification-id (let [value (some-> (get m "clarification_id")
+                                               str/trim not-empty)]
+                             (when (valid-clarification-id? value) value))
+          reference-id (let [value (some-> (get m "reference_id")
+                                           str/trim not-empty)]
+                         (when (valid-clarification-id? value) value))
+          clarification? (and (= "project-agent" (get m "author"))
+                              (= "project-agent" (get m "direction"))
+                              (= "clarification" (get m "kind"))
+                              clarification-id
+                              (= clarification-id (get m "id"))
+                              (contains? #{"open" "answered" "withdrawn"}
+                                         (get m "status")))]
       (cond-> {:id (get m "id")
                :status (get m "status")
                :role (get m "role")
@@ -350,6 +414,32 @@
 
         (safe-proposal-id (get m "proposal_id"))
         (assoc :proposal_id (safe-proposal-id (get m "proposal_id")))
+
+        clarification?
+        (assoc :kind "clarification"
+               :author "project-agent"
+               :direction "project-agent"
+               :clarification_id clarification-id
+               :lifecycle (get m "status")
+               :attention (get m "attention_state"))
+
+        (and clarification? reference-id)
+        (assoc :reference_id reference-id)
+
+        (and clarification? (not (str/blank? (get m "answered_at"))))
+        (assoc :answered_at (get m "answered_at"))
+
+        (and clarification? (not (str/blank? (get m "answered_by"))))
+        (assoc :answered_by (get m "answered_by"))
+
+        (and clarification? (not (str/blank? (get m "withdrawn_at"))))
+        (assoc :withdrawn_at (get m "withdrawn_at"))
+
+        (and clarification? (not (str/blank? (get m "seen_at"))))
+        (assoc :seen_at (get m "seen_at"))
+
+        (and (not clarification?) clarification-id)
+        (assoc :clarification_id clarification-id)
 
         action
         (assoc :actions [action])))))
@@ -426,6 +516,94 @@
       (.lock channel)
       (f))))
 
+(defn atomic-write-request! [file headers]
+  (fs/create-dirs (fs/parent file))
+  (let [tmp (fs/create-temp-file {:dir (fs/parent file)
+                                  :prefix ".chat-record."})]
+    (spit (str tmp) (render-request headers))
+    (fs/move tmp file {:replace-existing true :atomic-move true})))
+
+(defn find-typed-clarification [root id]
+  (when (valid-clarification-id? id)
+    (some (fn [path]
+            (when (fs/regular-file? path)
+              (let [headers (parse-kv (slurp (str path)))]
+                (when (and (= "project-agent" (get headers "author"))
+                           (= "project-agent" (get headers "direction"))
+                           (= "clarification" (get headers "kind"))
+                           (= id (get headers "clarification_id")))
+                  {:path path :headers headers}))))
+          [(request-file (pending-dir root) id)
+           (request-file (done-dir root) id)])))
+
+(defn same-clarification-content?
+  [headers body reference-id]
+  (and (= "clarification" (get headers "kind"))
+       (= (str/trimr (or body ""))
+          (str/trimr (or (get headers "body") "")))
+       (= reference-id (get headers "reference_id"))))
+
+(defn create-chat-clarification! [root id text reference-id]
+  (when-not (valid-clarification-id? id)
+    (clarification-invalid! "Clarification id is invalid."))
+  (let [body (safe-clarification-body text)
+        reference-id (safe-clarification-reference reference-id)]
+    (with-request-lock
+      root
+      (fn []
+        (let [existing-path (some #(when (fs/regular-file? %) %)
+                                  [(request-file (pending-dir root) id)
+                                   (request-file (done-dir root) id)])
+              existing (when existing-path
+                         (parse-kv (slurp (str existing-path))))]
+          (when existing-path
+            (if (same-clarification-content? existing body reference-id)
+              (do
+                (println id)
+                (flush)
+                (exit! 0 nil))
+              (exit! 1 "Clarification id was reused with different content.")))
+          (when (and reference-id
+                     (nil? (find-typed-clarification root reference-id)))
+            (clarification-invalid! "Clarification reference is unknown."))
+          (let [now (timestamp)
+                file (request-file (pending-dir root) id)]
+            (atomic-write-request!
+             file
+             {"id" id
+              "status" "open"
+              "author" "project-agent"
+              "direction" "project-agent"
+              "kind" "clarification"
+              "clarification_id" id
+              "reference_id" reference-id
+              "attention_state" "unseen"
+              "created_at" now
+              "updated_at" now
+              "body" body})
+            id))))))
+
+(defn withdraw-chat-clarification! [root id]
+  (when-not (valid-clarification-id? id)
+    (clarification-invalid! "Clarification id is invalid."))
+  (with-request-lock
+    root
+    (fn []
+      (let [{:keys [path headers] :as found} (find-typed-clarification root id)]
+        (when-not found
+          (exit! 1 (str "Unknown clarification: " id)))
+        (when-not (= "open" (get headers "status"))
+          (exit! 1 (str "Clarification is " (get headers "status")
+                        " and cannot be withdrawn: " id)))
+        (let [now (timestamp)]
+          (atomic-write-request!
+           path
+           (assoc headers
+                  "status" "withdrawn"
+                  "withdrawn_at" now
+                  "updated_at" now)))
+        (println id)))))
+
 (defn response-proposal-action!
   [text proposal-id]
   (when-not (some #{proposal-id} (response-route-proposal-ids text))
@@ -469,6 +647,7 @@
    "thread_id" (:thread_id entry)
    "source" (:source entry)
    "proposal_id" (:proposal_id entry)
+   "clarification_id" (:clarification_id entry)
    "action_type" (:type action)
    "action_proposal_id" (:proposal_id action)
    "action_family" (:family action)
@@ -550,6 +729,10 @@
   (with-request-lock
     root
     (fn []
+      (let [candidate (or (find-pending root id) (find-done-request root id))
+            entry (when candidate (request-entry candidate))]
+        (when (= "clarification" (:kind entry))
+          (exit! 1 "Answer this clarification through project chat.")))
       (cond
         (find-pending root id)
         (answer-pending! root id answer-file approve-route-card
@@ -575,6 +758,19 @@
                                 approve-id
                                 (flag? args "--without-route-card-action")))
     "clarify" (clarify! (second args))
+    "clarify-chat"
+    (let [id (second args)
+          question-file (nth args 2 nil)
+          reference-id (parse-flag args "--reference")
+          root (or (parse-flag args "--root") (project-root))]
+      (when-not (fs/regular-file? (or question-file ""))
+        (exit! 1 "Clarification question file is missing."))
+      (println
+       (create-chat-clarification!
+        root id (slurp (str question-file)) reference-id)))
+    "withdraw-clarification"
+    (let [root (or (parse-flag args "--root") (project-root))]
+      (withdraw-chat-clarification! root (second args)))
     "create" (let [root (or (parse-flag args "--root") (project-root))
                    body (or (parse-flag args "--body") "")]
                (println (:id (create-request! root body))))

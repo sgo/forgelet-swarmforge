@@ -582,7 +582,8 @@ The forge side is deliberately small, because the bridge reads the forge rather
 than the other way round. A running dashboard, found through
 `<forge root>/.swarmforge/dashboard-url` and read fresh every time. The endpoints
 the bridge calls — `/api/health`, `/api/state`, `/api/chat`, `/api/approvals/<id>/<action>`,
-`/api/tasks/retry`, and `/api/clarifications/<id>/answer` — which mean a forge
+`/api/tasks/retry`, `/api/clarifications/<id>/answer`,
+`/api/clarifications/<id>/seen`, and `/api/clarifications/<id>/withdraw` — which mean a forge
 whose tooling predates one of them is refreshed first, or left out. And the
 forge's own adapter, `swarmforge/scripts/matrix-bridge.sh`, which arrives with
 the bridge's installation rather than with this fork.
@@ -603,6 +604,17 @@ idle, status and work-queue fields. Independent project slices run with a bound
 of four workers, chat records with a bound of eight, and response order is
 preserved. A failed required project scan fails the whole request rather than
 returning a partial Family snapshot.
+
+Project agents can create a typed project-chat clarification with
+`pack_dashboard_request.sh clarify-chat clar-<stable-id> <question-file>`.
+Creation writes the existing per-project request store and sends no wake. The
+dashboard projects the message's author, kind, lifecycle, attention and
+timestamps; an operator reply sent with its `clarification_id` both wakes the
+project agent and atomically marks the previous open clarification answered.
+Each project slice also carries
+`clarification_attention: {unresolved, latest_change_at}` so a Family client can
+derive attention without scanning message text. The old clarification store and
+Matrix path remain available for migration.
 
 The repeatable Saibill-scale fixture has 13 projects, 420 tasks, 450 chat
 records and a state body around 934 KB. The regression budget is health p95

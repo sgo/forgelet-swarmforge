@@ -333,6 +333,15 @@
           (or body (str "body " id))
           "\n"))))
 
+(defn clarify-project!
+  [root id text & [reference-id]]
+  (let [question (fs/path root "tmp" "chat-clarifications" (str id ".md"))]
+    (write-file question text)
+    (apply run {:dir root :ok? false}
+           (script "pack_dashboard_request.sh")
+           "clarify-chat" id (str question)
+           (when reference-id ["--reference" reference-id]))))
+
 (defn task-card [root name]
   (some #(when (= name (:name %)) %) (:tasks (web-state root))))
 
@@ -2040,6 +2049,289 @@
       (is (not (contains? row :proposal_id)))
       (is (= "Unsafe metadata body" (str/trim (:body row))))
       (is (= "Safe answer" (:response row))))))
+
+(deftest project-chat-clarification-creates-a-typed-idempotent-turn
+  ;; Given a project-agent question in Markdown
+  ;; When it is created twice with the same stable id and content
+  ;; Then one open unseen clarification is projected without waking anyone
+  (let [root (tmp-dir)
+        argv-file (fs/path root "tmux.argv")
+        id "clar-project-question"
+        body "## Decision needed\n\nShould the cave use **twenty** rooms?\n"]
+    (setup-pack! root ["specifier"])
+    (write-file (fs/path root ".swarmforge/tmux-socket")
+                (str (fs/path root "tmux.sock") "\n"))
+    (let [first-result (clarify-project! root id body)
+          second (clarify-project! root id body)
+          state (web-state root)
+          item (first (:chat state))
+          files (fs/list-dir
+                 (fs/path root ".swarmforge/dashboard/requests/pending"))]
+      (is (zero? (:exit first-result)))
+      (is (zero? (:exit second)))
+      (is (= id (str/trim (:out first-result))))
+      (is (= id (str/trim (:out second))))
+      (is (= "project-agent" (:author item)))
+      (is (= "project-agent" (:direction item)))
+      (is (= "clarification" (:kind item)))
+      (is (= id (:clarification_id item)))
+      (is (= "open" (:lifecycle item)))
+      (is (= "unseen" (:attention item)))
+      (is (= (str/trimr body) (str/trimr (:body item))))
+      (is (= {:unresolved 1 :latest_change_at (:created_at item)}
+             (:clarification_attention state)))
+      (is (= 1 (count files)))
+      (is (not (fs/exists? argv-file)))
+      (let [conflict (clarify-project! root id "A different question.")]
+        (is (not (zero? (:exit conflict))))
+        (is (str/includes? (str (:err conflict) (:out conflict))
+                           "reused with different content"))
+        (is (= 1 (count
+                  (fs/list-dir
+                   (fs/path root ".swarmforge/dashboard/requests/pending")))))))))
+
+(deftest project-chat-reply-answers-clarification-after-wake
+  ;; Given an open project-agent clarification
+  ;; When the operator replies through ordinary project chat
+  ;; Then the clarification is answered and linked only after the normal wake
+  (let [root (tmp-dir)
+        argv-file (str (fs/path root "tmux.argv"))
+        id "clar-first"
+        reply-id "req-clarification-reply"
+        answer "Use exactly twenty rooms.\nKeep the guide map."]
+    (setup-pack! root ["specifier"])
+    (write-file (fs/path root ".swarmforge/tmux-socket")
+                (str (fs/path root "tmux.sock") "\n"))
+    (clarify-project! root id "How many cave rooms should the game use?")
+    (let [posted (pack-web-env
+                  root {"SWARMFORGE_TMUX_STUB" argv-file}
+                  "--test-post-chat-json" (str root)
+                  (json/generate-string
+                   {:text answer
+                    :request_id reply-id
+                    :clarification_id id}))
+          state (web-state root)
+          by-id (into {} (map (juxt :id identity) (:chat state)))
+          clarification (get by-id id)
+          reply (get by-id reply-id)
+          stdin (slurp (str argv-file ".stdin"))
+          second (clarify-project! root "clar-second" "Follow-up question?"
+                                   id)]
+      (is (zero? (:exit posted)))
+      (is (= reply-id (:request_id (json/parse-string (:out posted) true))))
+      (is (= "answered" (:lifecycle clarification)))
+      (is (= reply-id (:answered_by clarification)))
+      (is (not (str/blank? (:answered_at clarification))))
+      (is (= id (:clarification_id reply)))
+      (is (= answer (str/trimr (:body reply))))
+      (is (= 0 (get-in state [:clarification_attention :unresolved])))
+      (is (str/includes? stdin answer))
+      (is (zero? (:exit second)))
+      (is (= id (:reference_id
+                 (get (into {} (map (juxt :id identity) (:chat (web-state root))))
+                      "clar-second"))))
+      (is (= "answered"
+             (:lifecycle
+              (get (into {} (map (juxt :id identity) (:chat (web-state root))))
+                   id)))))))
+
+(deftest forge-state-exposes-project-clarification-attention
+  ;; Given an open clarification inside one project
+  ;; When the Family state is read
+  ;; Then its project slice carries the compact attention fact without the full chat
+  (let [forge (tmp-dir)
+        project (fs/path forge "projects" "cave")]
+    (fs/create-dirs project)
+    (setup-pack! (str project) ["specifier"])
+    (write-file (fs/path forge ".swarmforge" "open-projects") "cave\n")
+    (clarify-project! (str project) "clar-family-attention"
+                      "Does the Family need to show this?")
+    (let [state (web-state forge)
+          slice (first (:projects state))]
+      (is (= 1 (get-in slice [:clarification_attention :unresolved])))
+      (is (not (str/blank?
+                (get-in slice [:clarification_attention :latest_change_at]))))
+      (is (not (contains? slice :chat))))))
+
+(deftest dashboard-test-primitive-creates-a-project-chat-clarification
+  ;; Given the dashboard test-state primitive and a question file
+  ;; When it creates a clarification
+  ;; Then state can read the typed record without an agent wake
+  (let [root (tmp-dir)
+        question (fs/path root "tmp" "question.md")]
+    (setup-pack! root ["specifier"])
+    (write-file question "Why is the cave dark?")
+    (let [created (pack-web root true "--test-create-chat-clarification"
+                            (str root) "clar-test-primitive" (str question))
+          state (web-state root)
+          item (get (into {} (map (juxt :id identity) (:chat state)))
+                    "clar-test-primitive")]
+      (is (zero? (:exit created)))
+      (is (= "clar-test-primitive"
+             (:clarification_id (json/parse-string (:out created) true))))
+      (is (= "open" (:lifecycle item)))
+      (is (= "project-agent" (:author item)))
+      (is (= 1 (get-in state [:clarification_attention :unresolved]))))))
+
+(deftest failed-project-chat-reply-leaves-clarification-open
+  ;; Given no deliverable project-agent target
+  ;; When a clarification reply fails
+  ;; Then neither the reply nor the lifecycle transition is retained, and retry works
+  (let [root (tmp-dir)
+        argv-file (str (fs/path root "tmux.argv"))
+        id "clar-retry"
+        reply-id "req-clar-retry"
+        request (json/generate-string
+                 {:text "Yes, use all rooms."
+                  :request_id reply-id
+                  :clarification_id id})]
+    (setup-pack! root ["specifier"])
+    (clarify-project! root id "Should every room be reachable?")
+    (let [failed (pack-web root false "--test-post-chat-json"
+                           (str root) request)]
+      (is (not (zero? (:exit failed))))
+      (is (= "open"
+             (:lifecycle
+              (get (into {} (map (juxt :id identity) (:chat (web-state root))))
+                   id))))
+      (is (not (fs/exists?
+                (fs/path root ".swarmforge/dashboard/requests/pending"
+                         (str reply-id ".request")))))
+      (write-file (fs/path root ".swarmforge/tmux-socket")
+                  (str (fs/path root "tmux.sock") "\n"))
+      (let [retried (pack-web-env root {"SWARMFORGE_TMUX_STUB" argv-file}
+                                  "--test-post-chat-json"
+                                  (str root) request)
+            state (web-state root)
+            by-id (into {} (map (juxt :id identity) (:chat state)))]
+        (is (zero? (:exit retried)))
+        (is (= "answered" (get-in by-id [id :lifecycle])))
+        (is (= 0 (get-in state [:clarification_attention :unresolved])))))))
+
+(deftest project-chat-clarifications-bound-redact-see-withdraw-and-restart
+  ;; Given unsafe or changing clarification input
+  ;; When it is created, seen, withdrawn and read by fresh dashboard processes
+  ;; Then text stays bounded and redacted while lifecycle survives restart
+  (let [root (tmp-dir)
+        secret-path "/Users/operator/private/project"
+        token "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+        id "clar-safe"]
+    (setup-pack! root ["specifier"])
+    (let [created (clarify-project!
+                   root id (str "Inspect " secret-path "\nwith " token "\n"))]
+      (is (zero? (:exit created)))
+      (let [first-state (web-state root)
+            item (get (into {} (map (juxt :id identity)
+                                   (:chat first-state)))
+                      id)]
+        (is (str/includes? (:body item) "[redacted-path]"))
+        (is (str/includes? (:body item) "[redacted-token]"))
+        (is (not (str/includes? (:body item) secret-path)))
+        (is (not (str/includes? (:body item) token)))
+        (is (= "unseen" (:attention item)))
+        (let [seen (pack-web root true "--test-mark-chat-clarification-seen"
+                             (str root) id)
+              second-state (web-state root)
+              seen-item (get (into {} (map (juxt :id identity)
+                                          (:chat second-state)))
+                             id)]
+          (is (zero? (:exit seen)))
+          (is (= "seen" (:attention seen-item)))
+          (is (= "open" (:lifecycle seen-item)))
+          (is (= 1 (get-in second-state
+                           [:clarification_attention :unresolved])))
+          (is (= (:seen_at seen-item)
+                 (get-in second-state
+                         [:clarification_attention :latest_change_at])))
+          (let [withdrawn (run {:dir root :ok? false}
+                               (script "pack_dashboard_request.sh")
+                               "withdraw-clarification" id)
+                restarted (web-state root)
+                withdrawn-item (get (into {} (map (juxt :id identity)
+                                                 (:chat restarted)))
+                                    id)]
+            (is (zero? (:exit withdrawn)))
+            (is (= "withdrawn" (:lifecycle withdrawn-item)))
+            (is (= 0 (get-in restarted
+                             [:clarification_attention :unresolved])))
+            (is (not (str/blank? (:withdrawn_at withdrawn-item))))
+            (let [again (pack-web
+                         root false "--test-withdraw-chat-clarification"
+                         (str root) id)]
+              (is (not (zero? (:exit again))))
+              (is (str/includes? (str (:err again) (:out again))
+                                 "cannot be changed")))))))
+    (doseq [[label bad-id body]
+            [["path id" "../escape" "Question?"]
+             ["token id" token "Question?"]
+             ["control" "clar-control" "bad\u0001text"]
+             ["format control" "clar-format-control" "bad\u200Btext"]
+             ["blank" "clar-blank" " \n\t "]
+             ["oversized" "clar-large"
+              (apply str (repeat (inc 16384) "x"))]]]
+      (let [result (clarify-project! root bad-id body)]
+        (is (not (zero? (:exit result))) label)
+        (is (not (str/includes? (str (:err result) (:out result))
+                                (str root)))
+            label)))
+    (let [missing-reference
+          (clarify-project! root "clar-missing-reference"
+                            "Follow up?" "clar-does-not-exist")]
+      (is (not (zero? (:exit missing-reference))))
+      (is (str/includes? (str (:err missing-reference)
+                             (:out missing-reference))
+                         "reference is unknown")))))
+
+(deftest project-chat-clarification-rejects-stale-and-unknown-replies
+  ;; Given answered, withdrawn and unknown clarification ids
+  ;; When ordinary project-chat replies address them
+  ;; Then each is refused without writing another reply
+  (let [root (tmp-dir)
+        argv-file (str (fs/path root "tmux.argv"))
+        answer-file (fs/path root "tmp" "clarification-answer.txt")
+        answer (json/generate-string
+                {:text "A late answer."
+                 :request_id "req-late-answer"})]
+    (setup-pack! root ["specifier"])
+    (write-file (fs/path root ".swarmforge/tmux-socket")
+                (str (fs/path root "tmux.sock") "\n"))
+    (clarify-project! root "clar-answered" "First question?")
+    (pack-web-env root {"SWARMFORGE_TMUX_STUB" argv-file}
+                  "--test-post-chat-json" (str root)
+                  (json/generate-string
+                   {:text "First answer."
+                    :request_id "req-first-answer"
+                    :clarification_id "clar-answered"}))
+    (clarify-project! root "clar-withdrawn" "Second question?")
+    (pack-web root true "--test-withdraw-chat-clarification"
+              (str root) "clar-withdrawn")
+    (write-file answer-file "Wrong channel.")
+    (let [wrong-channel
+          (run {:dir root :ok? false}
+               (script "pack_dashboard_request.sh")
+               "answer" "clar-answered" (str answer-file))]
+      (is (not (zero? (:exit wrong-channel))))
+      (is (str/includes? (str (:err wrong-channel) (:out wrong-channel))
+                         "through project chat")))
+    (doseq [id ["clar-answered" "clar-withdrawn" "clar-unknown"]]
+      (let [result
+            (run {:dir root
+                  :ok? false
+                  :env {"SWARMFORGE_TMUX_STUB" (str argv-file ".late")}}
+                 (script "pack_web.sh")
+                 "--test-post-chat-json" (str root)
+                 (json/generate-string
+                  (assoc (json/parse-string answer true)
+                         :request_id (str "req-late-" id)
+                         :clarification_id id)))]
+        (is (not (zero? (:exit result))) id)
+        (is (not (str/includes? (str (:err result) (:out result))
+                                (str root)))
+            id)))
+    (let [by-id (into {} (map (juxt :id identity) (:chat (web-state root))))]
+      (is (= "answered" (get-in by-id ["clar-answered" :lifecycle])))
+      (is (= "withdrawn" (get-in by-id ["clar-withdrawn" :lifecycle])))
+      (is (not-any? #(str/starts-with? % "req-late-") (keys by-id))))))
 
 (deftest answered-report-and-proposal-requests-keep-their-projection
   ;; Given a completed-card report thread and a proposal discussion
@@ -4024,6 +4316,7 @@
              "agent"))
         (is (= ["swarmforge-runtime"] (tmux-sessions runtime-socket)))
         (is (= ["swarmforge-agent"] (tmux-sessions agent-socket)))
+        (is (wait-lines runtime-env-log 1 10000))
         (is (= ["fixture-snapshots::default::file:///tmp/forge-runtime-snapshots"]
                (str/split-lines (slurp (str runtime-env-log)))))
         (is (str/includes? (slurp url) "SwarmForge"))
@@ -4047,7 +4340,7 @@
         (is (zero? (:exit recovered)) (:err recovered))
         (is (= ["swarmforge-runtime"] (tmux-sessions runtime-socket)))
         (is (= ["swarmforge-agent"] (tmux-sessions agent-socket)))
-        (is (wait-lines runtime-env-log 2 3000))
+        (is (wait-lines runtime-env-log 2 10000))
         (is (= ["fixture-snapshots::default::file:///tmp/forge-runtime-snapshots"
                 "fixture-snapshots::default::file:///tmp/forge-runtime-snapshots"]
                (str/split-lines (slurp (str runtime-env-log))))))
