@@ -5073,6 +5073,49 @@
         (is (= expected (:state activity))
             (str agent " marker: " text))))))
 
+(deftest forge-lieutenant-runtime-activity-recognizes-current-claude-footer
+  ;; Given the current Claude composer and permissions footer
+  ;; When Claude is idle or actively working
+  ;; Then the footer proves idle only when no working marker is present
+  (let [root (tmp-dir)
+        footer
+        (str "────────────────────────────────────────────\n"
+             "❯ \n"
+             "────────────────────────────────────────────\n"
+             "  Sonnet 5.5 | Context: 18% used | 7d: 1%\n"
+             "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+        with-transcript
+        (str "✻ Crunched for 5s · done 9:11 AM\n\n"
+             "I answered the project chat request.\n\n"
+             footer)
+        working
+        (str "✻ Crunching… (esc to interrupt)\n\n"
+             footer)
+        blank-prompt "❯ \n"]
+    (seed-mini-forge! root)
+    (write-file (fs/path root ".swarmforge/roles.tsv")
+                (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tclaude\ttask\tforward-only\n"
+                        root))
+    (let [bare (:activity
+                (lieutenant-activity-state
+                 root "alive" "claude" footer))
+          surrounding (:activity
+                       (lieutenant-activity-state
+                        root "alive" "claude" with-transcript))
+          active (:activity
+                  (lieutenant-activity-state
+                   root "alive" "claude" working))
+          unrecognized (:activity
+                        (lieutenant-activity-state
+                         root "alive" "claude" blank-prompt))]
+      (is (= {:alive true :state "idle" :heat 0}
+             (select-keys bare [:alive :state :heat])))
+      (is (= "idle" (:state surrounding)))
+      (is (= "working" (:state active)))
+      (is (= "unknown" (:state unrecognized)))
+      (is (str/includes? (:status_line bare)
+                         "bypass permissions on")))))
+
 (deftest forge-lieutenant-runtime-activity-does-not-guess-from-transcript
   ;; Given queries, a non-empty prompt, token counters and unrelated transcript output
   ;; When no current activity marker exists

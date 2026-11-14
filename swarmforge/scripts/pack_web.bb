@@ -868,7 +868,7 @@
   #"(?im)^\s*(?:[•*]\s*working(?:\s*\([^)\r\n]*\))?|[✻✽✶✳]\s*.*\(esc\s+to\s+interrupt[^)\r\n]*\)|esc\s+to\s+interrupt(?:\s*[·.)-].*)?|waiting\s+for\s+response(?:\s+\d+(?:\.\d+)?s)?)\s*$")
 
 (def activity-idle-pattern
-  #"(?im)^\s*(?:[›❯]\s+ask (?:codex|claude|copilot) to do anything|\? for shortcuts|enter:send\s+esc:cancel|ready(?: for (?:the )?next (?:task|card))?[.!]?|idle[.!]?|(?:done|completed|finished)(?: successfully)?[.!]?)\s*$")
+  #"(?im)^\s*(?:[›❯]\s+ask (?:codex|claude|copilot) to do anything|\? for shortcuts|enter:send\s+esc:cancel|⏵⏵\s+bypass permissions on(?:\s+\([^\r\n]*\))?|ready(?: for (?:the )?next (?:task|card))?[.!]?|idle[.!]?|(?:done|completed|finished)(?: successfully)?[.!]?)\s*$")
 
 (def activity-token-pattern
   #"(?i)\b(?:gh[pousr]_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|sk-[A-Za-z0-9_-]{10,}|xox[baprs]-[A-Za-z0-9-]{10,}|Bearer\s+[A-Za-z0-9._~+/=-]{10,})\b")
@@ -921,9 +921,13 @@
         tail (str/join "\n" lines)
         working (last-pattern-match activity-working-pattern tail)
         idle (last-pattern-match activity-idle-pattern tail)
+        claude-footer-idle? (and idle
+                                 (re-find #"(?i)^⏵⏵\s+bypass permissions on"
+                                          (:line idle)))
         marker (cond
                  (nil? working) idle
                  (nil? idle) working
+                 claude-footer-idle? working
                  (>= (:start idle) (:start working)) idle
                  :else working)
         line-number (when marker
@@ -937,7 +941,9 @@
                             (re-find #"(?i)ask codex to do anything"
                                      (:line marker)))
                      :codex-idle-prompt
-                     :generic)))))
+                     (if (and (= marker idle) claude-footer-idle?)
+                       :claude-permissions-footer
+                       :generic))))))
 
 (defn activity-output-state [text]
   (or (:state (activity-marker text)) "unknown"))
