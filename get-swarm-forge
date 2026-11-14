@@ -475,6 +475,16 @@ install_forgelet_bridge() {
     "$adapter" install-rules
 }
 
+restore_layer_route_gate() {
+  local src="$1/swarmforge/scripts"
+  local file
+  for file in route_card.sh route_card.bb; do
+    [[ -f "$src/$file" ]] || fail_missing "$file from the shared layer"
+    cp "$src/$file" "swarmforge/scripts/$file"
+    chmod +x "swarmforge/scripts/$file"
+  done
+}
+
 host_dir="${SWARMFORGE_BASE_DIR:-$tmp_dir/host}"
 host_from="$product"
 packs_src="${SWARMFORGE_PACKS_DIR:-}"
@@ -521,6 +531,9 @@ if [[ -z "${SWARMFORGE_BASE_DIR:-}" ]]; then
   download_branch "$product" "$host_dir"
   download_branch "$base_ref" "$main_dir"
 fi
+
+layer_dir="$main_dir"
+[[ -n "${SWARMFORGE_BASE_DIR:-}" ]] && layer_dir="$host_dir"
 
 maybe-update-self "$main_dir"
 
@@ -579,5 +592,6 @@ fi
 require_files "${required_files[@]}"
 
 install_forgelet_bridge
+restore_layer_route_gate "$layer_dir"
 
 echo "SwarmForge forge installed from $host_from. Run ./swarm to start the dashboard."
