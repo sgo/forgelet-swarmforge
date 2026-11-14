@@ -204,6 +204,10 @@
                  :else "invalid")
         status (some-> status str/lower-case)]
     (cond
+      (or (not (str/blank? (str (or (:invalidated-at proposal) ""))))
+          (not (str/blank? (str (or (:invalidated-reason proposal) "")))))
+      "invalidated"
+
       (or (not (str/blank? (str (or (:consumed-at proposal) ""))))
           (= status "consumed"))
       "consumed"

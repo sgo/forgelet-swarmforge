@@ -62,8 +62,9 @@ is rung again. Read what arrives rather than remembering what this file used to 
 - Never create a board card directly. Route every new card through the gate:
   `route_card.sh propose <project-root> <task-name> <note-file>` records the
   proposal and prints the question, and `route_card.sh commit <proposal-id>`
-  creates the card only when the operator's own words are affirmative. If you catch
-  yourself reaching for `create-task!`, `pack_board.sh create`, or the
+  creates the card only after that proposal was presented and the operator
+  approved that exact proposal. Propose never accepts approval evidence. If you
+  catch yourself reaching for `create-task!`, `pack_board.sh create`, or the
   dashboard's New Task button, stop and propose first.
 - Ask the question yourself — in the pane, or on the phone where the reply arrives
   as a chat request — and never through a clarification request: that channel
@@ -79,6 +80,10 @@ is rung again. Read what arrives rather than remembering what this file used to 
   unspecified proposal rather than inferring approval from prose.
 - Never paraphrase into consent: the operator's words are the answer, and a flag
   records where they said them, not what you would have liked them to say.
+  Direct-pane approval must name the exact proposal id or card name; generic
+  phrases such as "start", "go ahead with that" or "sounds good" are not
+  approval. A bare approval is valid only from a dashboard answer tied to that
+  proposal.
 - The note still has to be the operator-observed problem or desired behavior,
   and the plan it implements has to be recorded in `backlog.md` first.
 

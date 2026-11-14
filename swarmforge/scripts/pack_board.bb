@@ -25,6 +25,7 @@
        "  pack_board.sh increment-audit --task-id <task-id> [--root <dir>]\n"
        "  pack_board.sh route --name <name> --task-id <task-id> --text <text> [--root <dir>]\n"
        "  pack_board.sh complete-promote --name <name> [--root <dir>]\n"
+       "  pack_board.sh remove --name <name> [--root <dir>]\n"
        "  pack_board.sh delete --name <name> [--root <dir>]\n"
        "  pack_board.sh delete <name>"))
 
@@ -392,6 +393,21 @@
                                     rows))
           (fs/delete-if-exists (task-body-file root name)))))))
 
+(defn remove! [opts]
+  (let [name (task-name opts)
+        root (resolve-root opts)
+        file (tasks-file root)]
+    (require-value! name "task name")
+    (with-board-lock
+      root
+      (fn []
+        (let [rows (read-rows file)]
+          (when-not (find-task rows name)
+            (exit! 1 (str "Unknown task name: " name)))
+          (write-rows file (filterv #(not= (str/lower-case name)
+                                           (str/lower-case (or (row-name %) "")))
+                                    rows)))))))
+
 (defn project-task-name [root]
   (let [file (fs/path root "stages.edn")]
     (when (fs/regular-file? file)
@@ -669,6 +685,7 @@
    "archive" archive!
    "archive-all" archive-all!
    "increment-audit" increment-audit!
+   "remove" remove!
    "delete" delete!})
 
 (defn -main [& args]

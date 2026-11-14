@@ -13,14 +13,19 @@
        "Usage:\n"
        "  route_card.sh propose <project-root> <task-name> <note-file>\n"
        "                         [--depends-on <proposal-id>]\n"
+       "  route_card.sh invalidate <proposal-id> --reason <text>\n"
+       "                           [--forge-root <root>]\n"
        "  route_card.sh commit <proposal-id> [--approval <record-id>]\n"
+       "                         [--operator-said <words>]\n"
        "  route_card.sh list [--project <project>] [--forge-root <root>] [--json]\n"
        "  route_card.sh detail <proposal-id> [--forge-root <root>] [--json]\n"
        "  route_card.sh approve <proposal-id> [--approval <record-id>]\n"
        "                           [--operator-said <words>] [--forge-root <root>] [--json]\n"
        "\n"
-       "propose records the proposal; commit creates the card only when the\n"
-       "operator's own words are affirmative. Each approval is single-use.\n"
+       "propose records and presents a pending proposal. It never accepts\n"
+       "approval evidence and never creates a card. commit creates the card only\n"
+       "after the proposal was presented and the operator approved that exact\n"
+       "proposal. Each approval is single-use.\n"
        "list, detail and approve emit one JSON document on stdout. They are the\n"
        "machine interface used by Forgelet Host; propose and commit retain their\n"
        "existing human-readable output.\n"
@@ -32,17 +37,17 @@
        "commit reports the lane read back from the created board row and records\n"
        "it as created-lane; the proposal's original lane remains in the record.\n"
        "\n"
-       "Run both commands with the forge root as the working directory. The\n"
+       "Run route-card commands with the forge root as the working directory. The\n"
        "forge root defaults to $PWD and can be overridden with --forge-root.\n"
        "\n"
-       "Approval forms: answering \"approve\" (or yes/ok/go ahead) is enough,\n"
-       "because the answer is tied to this one proposal; replying with the\n"
-       "card's name works too, and a negation anywhere in the answer refuses.\n"
-       "Any other answer declines. --approval names the dashboard request that\n"
-       "recorded their answer, which is what a reply on the phone leaves;\n"
-       "--operator-said records words from a channel that leaves no file (this\n"
-       "pane). Either one passed to propose records the proposal without\n"
-       "asking again.\n"
+       "Approval must identify this proposal by its exact proposal id or card\n"
+       "name. A bare \"approve\" is accepted only through a structured dashboard\n"
+       "action or an answer record tied to this proposal id. Generic discussion\n"
+       "such as \"start\", \"go ahead with that\", \"sounds good\" or \"let's do\n"
+       "that\" is not approval. A negation anywhere in the answer refuses.\n"
+       "--approval names the dashboard request that recorded their answer;\n"
+       "--operator-said records exact words from a channel that leaves no file.\n"
+       "Both belong on commit/approve, never propose.\n"
        "\n"
        "A dependent proposal remains blocked while its prerequisite is pending,\n"
        "approved/in progress, or awaiting verified completed-card cleanup. Only the\n"
@@ -50,9 +55,10 @@
 
 (def ^:dynamic *machine-output* false)
 
-(def affirmative-re #"(?i)\b(approve|approved|yes|ok|okay|go ahead|go|start|started)\b")
+(def affirmative-re #"(?i)\b(approve|approved|yes|ok|okay)\b")
 
-(def negative-re #"(?i)\b(no|not|dont|don't|won't|wont|wait|hold|reject|never)\b")
+(def negative-re
+  #"(?i)\b(no|not|cannot|can't|dont|don't|won't|wont|wait|hold|reject|decline|never)\b")
 
 (def proposal-id-re #"proposal-[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}")
 (def report-id-re #"[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}")
@@ -90,13 +96,16 @@
 (defn flag-value [args flag]
   (second (drop-while #(not= flag %) args)))
 
+(defn flag? [args flag]
+  (boolean (some #{flag} args)))
+
 (defn positional-args [args]
   (loop [remaining args
          positional []]
     (if-let [argument (first remaining)]
       (cond
         (contains? #{"--forge-root" "--project" "--approval"
-                     "--operator-said"}
+                     "--operator-said" "--reason"}
                    argument)
         (recur (nnext remaining) positional)
 
@@ -218,15 +227,18 @@
     (cond
       (fs/regular-file? answered)
       (let [r (parse-request answered)]
-        {:kind "clarification" :path (str answered) :text (:response r)})
+        {:kind "clarification" :path (str answered) :id id
+         :headers (:headers r) :text (:response r)})
 
       (fs/regular-file? chat-pending)
       (let [r (parse-request chat-pending)]
-        {:kind "chat request" :path (str chat-pending) :text (:body r)})
+        {:kind "chat request" :path (str chat-pending) :id id
+         :headers (:headers r) :text (:body r) :pending true})
 
       (fs/regular-file? chat-done)
       (let [r (parse-request chat-done)]
-        {:kind "chat request" :path (str chat-done) :text (:body r)})
+        {:kind "chat request" :path (str chat-done) :id id
+         :headers (:headers r) :text (:response r)})
 
       (fs/regular-file? pending)
       {:kind "clarification" :path (str pending) :pending true :text ""}
@@ -239,10 +251,21 @@
 (defn approval-record [roots id]
   (some #(record-in-root % id) roots))
 
+(def proposal-mention-re
+  #"(?<![A-Za-z0-9._~:/-])proposal-[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}(?![A-Za-z0-9._~:/-])")
+
+(defn proposal-mentions [text]
+  (vec (distinct (re-seq proposal-mention-re (or text "")))))
+
+(defn record-tied-to-proposal? [record proposal-id]
+  (let [headers (:headers record)]
+    (or (= proposal-id (get headers "proposal_id"))
+        (= proposal-id (get headers "action_proposal_id")))))
+
 (defn approval-from
-  "Resolve the operator's words for a proposal: an explicit record id, words
-  transcribed from a channel that leaves no file, a source recorded at propose
-  time, or the proposal's own dashboard question."
+  "Resolve the operator's words for one already-presented proposal. Stored
+  proposal-source fields are deliberately ignored: approval evidence must be
+  supplied after presentation."
   [roots proposal explicit-approval explicit-said]
   (let [from-record (fn [id]
                       (let [record (approval-record roots id)]
@@ -254,30 +277,51 @@
                           (:pending record)
                           (exit! 1 (str "Approval '" id "' is still unanswered ("
                                         (:path record) "). The operator has not replied yet."))
-                          :else (assoc record :via (str (:kind record) " " id)))))]
+                          :else (assoc record
+                                       :record-id id
+                                       :via (str (:kind record) " " id)))))]
     (cond
       (not (str/blank? (or explicit-approval ""))) (from-record explicit-approval)
       (not (str/blank? (or explicit-said "")))
       {:kind "chat transcription" :text explicit-said :via "operator words in chat"}
-      (not (str/blank? (or (:approval-id proposal) ""))) (from-record (:approval-id proposal))
-      (not (str/blank? (or (:operator-said proposal) "")))
-      {:kind "chat transcription" :text (:operator-said proposal) :via "operator words in chat"}
       :else (from-record (:id proposal)))))
 
+(defn exact-name-mentioned? [text card-name]
+  (let [text (str/lower-case (or text ""))
+        name (str/lower-case (or card-name ""))]
+    (and (not (str/blank? name))
+         (boolean
+          (re-find
+           (re-pattern
+            (str "(?<![A-Za-z0-9_-])"
+                 (java.util.regex.Pattern/quote name)
+                 "(?![A-Za-z0-9_-])"))
+           text)))))
+
 (defn affirmative?
-  "Consent from the operator's own words. A negation anywhere refuses, so
-  \"no, not yet\" and \"don't approve\" cannot slip through on a stray \"ok\"."
-  [text card-name]
-  (let [text (or text "")]
+  "Consent for one specific, already-presented proposal. Dashboard answers may
+  be tied by proposal metadata and then use a bare approval word. Words from a
+  pane must name the exact proposal id or card name. Negation always dominates."
+  [text card-name proposal-id tied?]
+  (let [text (or text "")
+        mentions (proposal-mentions text)
+        conflicting (some #(not= proposal-id %) mentions)
+        named? (or (and (seq mentions) (= [proposal-id] mentions))
+                   (exact-name-mentioned? text card-name))
+        approval-word? (boolean (re-find affirmative-re text))]
     (cond
       (str/blank? text) false
       (re-find negative-re text) false
-      (re-find affirmative-re text) true
-      :else (and (not (str/blank? card-name))
-                 (str/includes? (str/lower-case text) (str/lower-case card-name))))))
+      conflicting false
+      approval-word? (or named? tied?)
+      :else false)))
 
 (defn proposal-file [forge id]
   (fs/path forge ".swarmforge" "route-proposals" (str id ".edn")))
+
+(defn invalidated? [proposal]
+  (or (not (str/blank? (str (or (:invalidated-at proposal) ""))))
+      (not (str/blank? (str (or (:invalidated-reason proposal) ""))))))
 
 (defn proposal-status [proposal]
   (let [raw (:status proposal)
@@ -290,6 +334,9 @@
                                 "Proposal status is malformed."))
         declared (some-> declared str/lower-case)]
     (cond
+      (invalidated? proposal)
+      "invalidated"
+
       (or (not (str/blank? (or (:consumed-at proposal) "")))
           (= declared "consumed"))
       "consumed"
@@ -364,12 +411,14 @@
                     {:status "malformed"
                      :reason "proposal project is not owned by this forge"}
                     {:status
-                     (if (or (not (str/blank?
-                                   (str (or (:superseded-at proposal) ""))))
-                             (not (str/blank?
-                                   (str (or (:superseded-by proposal) "")))))
+                     (cond
+                       (invalidated? proposal) "invalidated"
+                       (or (not (str/blank?
+                                 (str (or (:superseded-at proposal) ""))))
+                           (not (str/blank?
+                                 (str (or (:superseded-by proposal) "")))))
                        "superseded"
-                       (proposal-status proposal))
+                       :else (proposal-status proposal))
                      :proposal proposal
                      :project project}))
                 (catch Exception _
@@ -472,6 +521,7 @@
        (cond
          (= status "missing") reason
          (= status "malformed") reason
+         (= status "invalidated") "prerequisite was invalidated"
          (= status "superseded") "prerequisite was superseded"
          (malformed-completion-marker? proposal) "completion marker is malformed"
          (and staged? (not marker?)) "verified card cleanup is still pending"
@@ -506,7 +556,7 @@
   (let [status (proposal-status proposal)
         proposed-lane (str (:lane proposal))
         created-lane (some-> (:created-lane proposal) str not-empty)
-        actual-lane (if (= status "consumed")
+        actual-lane (if (#{"consumed" "invalidated"} status)
                       (or created-lane proposed-lane)
                       proposed-lane)
         project (some-> (:resolved-project proposal) fs/file-name str)
@@ -559,11 +609,48 @@
                       (:completion-report-id proposal)
                       (assoc :completion_report_id
                              (redact-output
-                              (str (:completion-report-id proposal)))))]
+                              (str (:completion-report-id proposal))))
+
+                      (:presented-at proposal)
+                      (assoc :presented_at
+                             (redact-output (str (:presented-at proposal))))
+
+                      (:approved-at proposal)
+                      (assoc :approved_at
+                             (redact-output (str (:approved-at proposal))))
+
+                      (:approval-source proposal)
+                      (assoc :approval_source
+                             (into {}
+                                   (map (fn [[key value]]
+                                          [(name key)
+                                           (redact-output (str value))]))
+                                   (:approval-source proposal)))
+
+                      (:invalidated-at proposal)
+                      (assoc :invalidated_at
+                             (redact-output (str (:invalidated-at proposal))))
+
+                      (:invalidated-reason proposal)
+                      (assoc :invalidated_reason
+                             (redact-output
+                              (str (:invalidated-reason proposal))))
+
+                      (:invalidated-task-id proposal)
+                      (assoc :invalidated_task_id
+                             (redact-output
+                              (str (:invalidated-task-id proposal))))
+
+                      (:invalidated-board-removed proposal)
+                      (assoc :invalidated_board_removed
+                             (boolean (:invalidated-board-removed proposal))))]
     (merge base task-fields)))
 
 (defn ensure-pending! [proposal]
   (case (proposal-status proposal)
+    "invalidated" (fail! "proposal_invalidated" 1
+                         (str "Proposal " (:id proposal)
+                              " was invalidated — nothing created."))
     "consumed" (fail! "proposal_consumed" 1
                       (str "Approval " (:id proposal)
                            " was already used to create " (:task-id proposal)
@@ -646,8 +733,6 @@
         project (project-root (first args))
         name (second args)
         note-file (nth args 2 nil)
-        approval-id (flag-value args "--approval")
-        operator-said (flag-value args "--operator-said")
         depends-on (some-> (flag-value args "--depends-on") str str/trim not-empty)
         _ (when depends-on
             (let [{:keys [status reason]}
@@ -659,18 +744,16 @@
                 (exit! 1 (str "Prerequisite " depends-on
                               " was superseded and cannot be depended on.")))
               (when (dependency-cycle? forge depends-on)
-                (exit! 1 "Dependency cycle detected; proposal was not recorded."))))
-        pre-approved (or (not (str/blank? (or approval-id "")))
-                         (not (str/blank? (or operator-said ""))))]
+                (exit! 1 "Dependency cycle detected; proposal was not recorded."))))]
+    (when (or (flag? args "--approval")
+              (flag? args "--operator-said"))
+      (exit! 1 (str "Approval evidence is not accepted by propose. Record and "
+                    "present the pending proposal first, then pass the operator's "
+                    "exact words or a tied dashboard record to commit/approve.")))
     (when (str/blank? name)
       (exit! 1 "Missing card name"))
     (when-not (and note-file (fs/regular-file? note-file))
       (exit! 1 (str "Note file not found: " note-file)))
-    (when pre-approved
-      (let [words (:text (approval-from [project forge] {} approval-id operator-said))]
-        (when-not (affirmative? words name)
-          (exit! 1 (str "Not approved: \"" (str/trim (first (str/split-lines (str/trim (or words "")))))
-                        "\" — nothing recorded.")))))
     (let [note (str/trimr (slurp (str note-file)))
           lane (initial-lane project)
           ;; The proposal is only ever a record here. The clarification store
@@ -679,22 +762,89 @@
           ;; asked in the chat channel (this pane) or on the phone, never by
           ;; borrowing the agents' channel.
           id (str "proposal-" (str/replace (now) #"[^0-9A-Za-z]" ""))
+          presented-at (now)
           record {:id id :project (str project) :name name :note note
-                  :lane lane :created-at (now)
-                  :approval-id approval-id
-                  :operator-said operator-said}
+                  :lane lane :created-at presented-at
+                  :presented-at presented-at
+                  :presentation "route-card proposal printed"}
           record (cond-> record
                    depends-on (assoc :depends-on depends-on))]
       (fs/create-dirs (fs/parent (proposal-file forge id)))
       (spit (str (proposal-file forge id)) (pr-str record))
       (println "PROPOSED:" id "card" name "in" (str project) "lane" lane)
-      (if pre-approved
-        (println "Approval already in hand; run: route_card.sh commit" id)
-        (do (println "Ask the operator directly — in this chat, or on the phone where")
-            (println "their message arrives as a chat request. Nothing was written to")
-            (println "the clarification store, which is the agents' channel.")
-            (println "Then run: route_card.sh commit" id "--operator-said \"<their exact words>\"")
-            (println "or, when their answer left a record: route_card.sh commit" id "--approval <request-id>")))
+      (println "Ask the operator directly — in this chat, or on the phone where")
+      (println "their message arrives as a chat request. Nothing was written to")
+      (println "the clarification store, which is the agents' channel.")
+      (println (str "Approval must name `" id "` or `" name
+                    "`, or be tied to this proposal in a dashboard answer."))
+      (println "Then run: route_card.sh commit" id "--operator-said \"<their exact words>\"")
+      (println "or, when their answer left a record: route_card.sh commit" id "--approval <request-id>")
+      id)))
+
+(defn invalidate-reason [args]
+  (let [reason (some-> (flag-value args "--reason")
+                       (str/replace #"[\p{Cc}\p{Cf}]" " ")
+                       (str/replace #"\s+" " ")
+                       str/trim)]
+    (when (str/blank? (or reason ""))
+      (exit! 1 "Invalidation requires --reason <text>."))
+    (when (> (count reason) 500)
+      (exit! 1 "Invalidation reason must be at most 500 characters."))
+    reason))
+
+(defn remove-invalidated-card! [project-root task-id]
+  (when-let [row (board-task project-root task-id)]
+    (if (= "done" (:lane row))
+      {:present true :removed false :name (:name row) :lane (:lane row)}
+      (let [result (sh/sh (str (fs/path (script-dir) "pack_board.sh"))
+                          "remove" "--name" (:name row)
+                          "--root" (str project-root))]
+        (when-not (zero? (:exit result))
+          (exit! 1 (str "Proposal was invalidated, but its active card could not"
+                        " be removed:\n" (:err result) (:out result))))
+        {:present true :removed true :name (:name row) :lane (:lane row)}))))
+
+(defn invalidate! [args]
+  (let [forge (forge-root args)
+        id (proposition-id! (first args))
+        reason (invalidate-reason args)
+        proposal (read-proposal! forge id)
+        project-root (:resolved-project proposal)
+        invalidated-at (or (not-empty (str (:invalidated-at proposal)))
+                           (now))]
+    (when (and (invalidated? proposal)
+               (not= reason (str (:invalidated-reason proposal))))
+      (exit! 1 (str "Proposal " id " was already invalidated for a different reason.")))
+    (let [marked (assoc proposal
+                        :invalidated-at invalidated-at
+                        :invalidated-reason reason)
+          _ (spit (str (proposal-file forge id))
+                  (pr-str (dissoc marked :resolved-project)))
+          card (remove-invalidated-card!
+                project-root (some-> (:task-id proposal) str not-empty))
+          updated (cond-> marked
+                    (:name card)
+                    (assoc :invalidated-card-name (:name card))
+
+                    (:lane card)
+                    (assoc :invalidated-card-lane (:lane card))
+
+                    true
+                    (assoc :invalidated-board-removed
+                           (boolean (:removed card))))]
+      (spit (str (proposal-file forge id))
+            (pr-str (dissoc updated :resolved-project)))
+      (println "INVALIDATED:" id)
+      (println "Reason:" reason)
+      (cond
+        (:removed card)
+        (println "Removed active board row; task note and recoverable worktree were preserved.")
+
+        (= "done" (:lane card))
+        (println "Preserved the completed board and audit row.")
+
+        :else
+        (println "No active board row needed removal."))
       id)))
 
 (defn commit-proposal!
@@ -707,21 +857,31 @@
     (let [proposal (read-proposal! forge id)
           {:keys [name note lane]} proposal
           project-root (:resolved-project proposal)
-          _ (when (every? str/blank?
-                          [explicit said
-                           (:approval-id proposal)
-                           (:operator-said proposal)])
+          _ (ensure-pending! proposal)
+          presented-at (parse-instant (:presented-at proposal))
+          _ (when-not (and presented-at
+                           (let [created (parse-instant (:created-at proposal))]
+                             (and created (not (.isBefore presented-at created)))))
+              (fail! "proposal_not_presented" 1
+                     (str "Proposal " id
+                          " has no valid presentation record. Re-propose it before approval.")))
+          _ (when (and (not (str/blank? (or explicit "")))
+                       (not (str/blank? (or said ""))))
+              (exit! 1 "Choose either --approval or --operator-said, not both."))
+          _ (when (every? str/blank? [explicit said])
               (exit! 1 (str "No approval source. Pass --operator-said \"<their exact words>\""
                             " for approval given in this chat, or --approval <request-id>"
                             " for one that left a record. A card proposal is never"
                             " answered through the clarification store.")))
           record (approval-from [project-root forge] proposal explicit said)]
-      (ensure-pending! proposal)
-      (when-not (affirmative? (:text record) name)
+      (when-not (affirmative? (:text record) name id
+                              (record-tied-to-proposal? record id))
         (exit! 1 (str "Not approved: " (:via record) " reads \""
                       (str/trim (first (str/split-lines
                                         (str/trim (or (:text record) "")))))
-                      "\" — nothing created. Re-propose with route_card.sh propose.")))
+                      "\" — that does not approve " id
+                      ". Name the exact proposal id or card name; a generic"
+                      " discussion phrase is not approval.")))
       (dependency-gate! forge proposal)
       (let [current-lane (initial-lane project-root)
             _ (when (not= current-lane lane)
@@ -741,10 +901,19 @@
                             (catch Exception e
                               (exit! 1 (.getMessage e))))
               created-lane (:lane created-row)
+              approved-at (now)
               updated (assoc proposal
-                             :consumed-at (now)
+                             :consumed-at approved-at
+                             :approved-at approved-at
                              :approved-by (:via record)
                              :approved-text (str/trim (or (:text record) ""))
+                             :approval-source
+                             (cond-> {:kind (or (:kind record) "operator words")
+                                      :via (:via record)}
+                               (:record-id record)
+                               (assoc :record_id (:record-id record))
+                               (record-tied-to-proposal? record id)
+                               (assoc :proposal_id id))
                              :task-id created-id
                              :created-lane created-lane)]
           (spit (str file) (pr-str (dissoc updated :resolved-project)))
@@ -778,6 +947,8 @@
         messages {"invalid_proposal_id" "proposal id is invalid"
                   "proposal_not_found" "proposal was not found"
                   "proposal_consumed" "proposal was already consumed"
+                  "proposal_invalidated" "proposal was invalidated"
+                  "proposal_not_presented" "proposal has no valid presentation record"
                   "proposal_superseded" "proposal was superseded"
                   "dependency_blocked" "proposal is blocked by a prerequisite"
                   "dependency_invalid" "proposal dependency is invalid"
@@ -845,6 +1016,7 @@
     (System/exit 0))
   (case (first args)
     "propose" (propose! (rest args))
+    "invalidate" (invalidate! (rest args))
     "commit" (commit! (rest args))
     "list" (machine-main "list" (rest args))
     "detail" (machine-main "detail" (rest args))

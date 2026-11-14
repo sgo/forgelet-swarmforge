@@ -1163,6 +1163,10 @@
 (defn route-proposal-status [proposal]
   (let [status (some-> (:status proposal) name str/lower-case)]
     (cond
+      (or (not (str/blank? (str (or (:invalidated-at proposal) ""))))
+          (not (str/blank? (str (or (:invalidated-reason proposal) "")))))
+      "invalidated"
+
       (or (not (str/blank? (str (or (:consumed-at proposal) ""))))
           (= status "consumed"))
       "consumed"
@@ -1234,8 +1238,8 @@
 (defn chat-action [root headers]
   (let [stored-status (some-> (get headers "action_status")
                               str/trim str/lower-case)
-        stored-status (when (contains? #{"pending" "consumed" "superseded"
-                                          "unavailable"}
+        stored-status (when (contains? #{"pending" "consumed" "invalidated"
+                                          "superseded" "unavailable"}
                                        stored-status)
                         stored-status)
         proposal-id (chat-proposal-id {"proposal_id" (get headers "action_proposal_id")})

@@ -98,14 +98,15 @@
           (process/shell
            env "bb" (str route-helper)
            "propose" (str project) card-name (str note)
-           "--forge-root" (str forge) "--operator-said" "yes")
+           "--forge-root" (str forge))
           proposal-id (second (re-find #"PROPOSED:\s+(\S+)" (:out proposed)))]
       (is (zero? (:exit proposed)) (str (:err proposed) (:out proposed)))
       (is proposal-id)
       (let [committed
             (process/shell
              env "bb" (str route-helper)
-             "commit" proposal-id "--forge-root" (str forge))]
+             "commit" proposal-id "--operator-said" (str "approve " proposal-id)
+             "--forge-root" (str forge))]
         (is (zero? (:exit committed)) (str (:err committed) (:out committed)))
         proposal-id))))
 

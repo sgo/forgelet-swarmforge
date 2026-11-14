@@ -494,8 +494,9 @@ Cross-forge issues pass through `forge_request.sh` in the receiving forge.
 `intake` validates the repository and `forge-requesters`, records the issue
 digest under `.swarmforge/forge-requests/`, and creates no work. Only local
 operator words can `approve` that record. A local route-card proposal is then
-`bind`-ed, its consumed card is `link-card`-ed, and `guard` must pass immediately
-before execution. Pending, changed, reused or unlinked requests fail closed.
+recorded and presented before its own operator approval, `bind`-ed, its consumed
+card is `link-card`-ed, and `guard` must pass immediately before execution.
+Pending, changed, reused or unlinked requests fail closed.
 
 Composition also creates repo-scoped `.agents/skills/<name>` symlinks in the forge root, pointing at
 `swarmforge/skills/<name>`. A lieutenant launched in the forge therefore discovers the shared skills
@@ -672,8 +673,8 @@ exactly one; the tool does not choose from prose or attach an action silently.
 
 For a response that only discusses a proposal and must not offer approval,
 `--without-route-card-action` records that text-only intent explicitly. Unknown,
-malformed, consumed, superseded and other-Family proposal ids do not trigger the
-guard. A refused answer leaves its pending request unchanged.
+malformed, consumed, invalidated, superseded and other-Family proposal ids do
+not trigger the guard. A refused answer leaves its pending request unchanged.
 
 The proposal must be pending and owned by the current Family/project. The done
 record stores only a bounded descriptor containing the proposal id, Family,
@@ -685,6 +686,21 @@ once by rerunning the identical answer with `--approve-route-card`; that
 backfill preserves its response, timestamps and conversation metadata. The
 answer tool records metadata only; it never approves or executes the action.
 
+`route_card.sh propose` always writes a pending proposal and records when it was
+presented. It rejects `--approval` and `--operator-said`; approval evidence is
+accepted only by a later `commit` or machine `approve`. Words from the pane must
+name that proposal's exact id or card name. A bare `approve` is accepted only
+when a dashboard answer record is tied to the same proposal id. Generic phrases
+such as `start`, `go ahead with that`, `sounds good` and `let's do that` are
+discussion, not consent, and a negation always wins.
+
+A proposal record retains its presentation, approval source, card identity and
+audit fields. `route_card.sh invalidate <proposal-id> --reason <text>` marks a
+proposal invalid without deleting it and removes an active or queued board row
+while preserving the task note, source and recoverable worktree. Completed board
+rows and audit records are not removed. Machine `detail` exposes the invalidation
+timestamp, reason and whether an active row was removed.
+
 ### Dependent route proposals
 
 A route proposal may name one stable prerequisite:
@@ -694,10 +710,10 @@ route_card.sh propose <project-root> <task-name> <note-file> \
   --depends-on <proposal-id>
 ```
 
-The prerequisite must exist in the same forge, must not be superseded and must
-not form a cycle. `commit` and machine `approve` refuse while it is pending,
-approved, or in progress. Approval creates the prerequisite card but does not
-release its dependents.
+The prerequisite must exist in the same forge and must not be invalidated,
+superseded or form a cycle. `commit` and machine `approve` refuse while it is
+pending, approved, or in progress. Approval creates the prerequisite card but
+does not release its dependents.
 
 Only `completed_card_report.sh remove`, after validating the report's exact
 verified done snapshots, records prerequisite completion. It writes a verified

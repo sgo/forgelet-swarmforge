@@ -2379,8 +2379,7 @@
     (let [result (run {:dir forge}
                       (script "route_card.sh")
                       "propose" (str project-root) name (str note)
-                      "--forge-root" (str forge)
-                      "--operator-said" "yes")]
+                      "--forge-root" (str forge))]
       (is (zero? (:exit result)) (:err result))
       (second (re-find #"PROPOSED: (\S+)" (:out result))))))
 
@@ -2503,7 +2502,7 @@
         (is (= first-id (get-in row [:actions 0 :proposal_id])))))))
 
 (deftest answering-ignores-non-pending-malformed-and-foreign-proposal-tokens
-  ;; Given tokens for consumed, superseded, malformed, unknown and other-Family proposals
+  ;; Given tokens for consumed, invalidated, superseded, malformed, unknown and foreign proposals
   ;; When none is a pending local route-card proposal
   ;; Then the response answers normally without attaching an action
   (let [forge (tmp-dir)
@@ -2515,13 +2514,17 @@
     (doseq [root [forge other-forge]]
       (fs/create-dirs (fs/path root "projects" "alpha-app")))
     (let [consumed-id (route-proposal! forge "alpha-app" "consumed-card")
+          invalidated-id (route-proposal! forge "alpha-app" "invalidated-card")
           superseded-id (route-proposal! forge "alpha-app" "superseded-card")
           foreign-id (route-proposal! other-forge "alpha-app" "foreign-card")
           consumed-file (fs/path forge ".swarmforge/route-proposals"
                                  (str consumed-id ".edn"))
+          invalidated-file (fs/path forge ".swarmforge/route-proposals"
+                                    (str invalidated-id ".edn"))
           superseded-file (fs/path forge ".swarmforge/route-proposals"
                                    (str superseded-id ".edn"))
           consumed (edn/read-string (slurp (str consumed-file)))
+          invalidated (edn/read-string (slurp (str invalidated-file)))
           superseded (edn/read-string (slurp (str superseded-file)))]
       (write-file consumed-file
                   (pr-str (assoc consumed :status :consumed
@@ -2529,12 +2532,16 @@
       (write-file superseded-file
                   (pr-str (assoc superseded :status :superseded
                                  :superseded-at "2026-11-10T20:35:02Z")))
+      (write-file invalidated-file
+                  (pr-str (assoc invalidated
+                                 :invalidated-at "2026-11-10T20:35:03Z"
+                                 :invalidated-reason "not approved for this proposal")))
       (write-file (fs/path forge ".swarmforge/route-proposals"
                             (str malformed-id ".edn"))
                   "not an edn map\n")
       (write-file
        answer
-       (str "Earlier " consumed-id ", " superseded-id ", " foreign-id
+       (str "Earlier " consumed-id ", " invalidated-id ", " superseded-id ", " foreign-id
             ", " malformed-id ", and proposal-20261110T203599Z.\n"
             "Malformed proposal-../escape is only prose.\n"))
       (write-pending-chat! forge {:id "req-ignore-route-tokens"})
@@ -2714,7 +2721,7 @@
         (is (zero? (:exit retry)) (:err retry))))))
 
 (deftest answering-rejects-invalid-route-card-approval-actions
-  ;; Given missing, malformed, consumed and cross-Family proposals
+  ;; Given missing, malformed, consumed, invalidated and cross-Family proposals
   ;; When an action is attached
   ;; Then every refusal leaves the pending chat request untouched
   (let [forge (tmp-dir)
@@ -2742,6 +2749,10 @@
           consumed-file (fs/path forge ".swarmforge/route-proposals"
                                  (str consumed-id ".edn"))
           consumed (edn/read-string (slurp (str consumed-file)))
+          invalidated-id (route-proposal! forge "alpha-app" "invalidated-card")
+          invalidated-file (fs/path forge ".swarmforge/route-proposals"
+                                    (str invalidated-id ".edn"))
+          invalidated (edn/read-string (slurp (str invalidated-file)))
           malformed-id "proposal-20261110T103001Z"
           malformed-file (fs/path forge ".swarmforge/route-proposals"
                                   (str malformed-id ".edn"))
@@ -2752,12 +2763,17 @@
                          "--approve-route-card" proposal-id))]
       (write-file consumed-file
                   (pr-str (assoc consumed :consumed-at "2026-11-10T10:31:00Z")))
+      (write-file invalidated-file
+                  (pr-str (assoc invalidated
+                                 :invalidated-at "2026-11-10T10:32:00Z"
+                                 :invalidated-reason "approval was not specific")))
       (write-file malformed-file "not an edn map\n")
       (doseq [[proposal-id expected]
               [["proposal-20261110T103999Z" "not found"]
                ["../not-a-proposal" "invalid"]
                [cross-id "not found"]
                [consumed-id "consumed"]
+               [invalidated-id "invalidated"]
                [malformed-id "malformed"]]]
         (let [result (answer! proposal-id)]
           (is (not (zero? (:exit result))))

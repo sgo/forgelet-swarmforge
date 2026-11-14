@@ -66,8 +66,7 @@
   (let [file (fs/path forge (str name ".md"))]
     (write-file file note)
     (let [result (route-result "propose" (str project) name (str file)
-                               "--forge-root" (str forge)
-                               "--operator-said" "yes")]
+                               "--forge-root" (str forge))]
       (is (zero? (:exit result)) (:err result))
       (second (re-find #"PROPOSED: (\S+)" (:out result))))))
 
@@ -76,13 +75,12 @@
     (write-file file note)
     (let [result (route-result "propose" (str project) name (str file)
                                "--depends-on" prerequisite
-                               "--forge-root" (str forge)
-                               "--operator-said" "yes")]
+                               "--forge-root" (str forge))]
       (is (zero? (:exit result)) (:err result))
       (second (re-find #"PROPOSED: (\S+)" (:out result))))))
 
 (defn approve-proposal! [forge id]
-  (route-json "approve" id "--operator-said" "approve"
+  (route-json "approve" id "--operator-said" (str "approve " id)
               "--forge-root" (str forge) "--json"))
 
 (defn completed-report [& args]
@@ -138,6 +136,196 @@
            sort
            vec)
       [])))
+
+(defn proposal-record [forge id]
+  (edn/read-string
+   (slurp (str (fs/path forge ".swarmforge" "route-proposals"
+                       (str id ".edn"))))))
+
+(deftest proposals-are-presented-before-their-specific-approval
+  (let [forge (tmp-forge)
+        project (init-project! (fs/path forge "projects" "approval-app"))
+        note (fs/path forge "approval-note.md")]
+    (try
+      (write-file note "# Approval card\n\nRequire exact approval.\n")
+      (doseq [flag ["--operator-said" "--approval"]]
+        (let [preapproved
+              (route-result "propose" (str project) "preapproved-card"
+                            (str note) "--forge-root" (str forge)
+                            flag "approve proposal-20261114T000000Z")]
+          (is (not (zero? (:exit preapproved))) flag)
+          (is (str/includes? (str (:err preapproved) (:out preapproved))
+                             "not accepted by propose")
+              flag)))
+      (is (not (fs/directory?
+                (fs/path forge ".swarmforge" "route-proposals"))))
+
+      (let [id (propose! forge project "approval-card"
+                         "# Approval card\n\nRequire exact approval.\n")
+            pending (route-json "detail" id
+                                "--forge-root" (str forge) "--json")
+            record (proposal-record forge id)]
+        (is (= "pending" (:status pending)))
+        (is (= (:presented_at pending) (:presented-at record)))
+        (is (.isBefore (java.time.Instant/parse (:presented-at record))
+                       (java.time.Instant/now)))
+        (is (empty? (rows project)))
+        (let [no-source (route-result "commit" id
+                                      "--forge-root" (str forge))]
+          (is (not (zero? (:exit no-source))))
+          (is (str/includes? (str (:err no-source) (:out no-source))
+                             "No approval source"))
+          (is (empty? (rows project))))
+
+        (doseq [words ["sounds good let's start with that"
+                       "start"
+                       "go ahead with that"
+                       "let's do that"
+                       "approval-card"
+                       (str "approve " id ", no wait")]]
+          (let [refused (route-result "commit" id
+                                      "--operator-said" words
+                                      "--forge-root" (str forge))]
+            (is (not (zero? (:exit refused))) words)
+            (is (empty? (rows project)) words)
+            (is (= "pending"
+                   (route-card/proposal-status
+                    (proposal-record forge id)))
+                words)))
+
+        (let [approved (route-result "commit" id
+                                     "--operator-said" (str "approve " id)
+                                     "--forge-root" (str forge))
+              stored (proposal-record forge id)
+              detail (route-json "detail" id
+                                 "--forge-root" (str forge) "--json")]
+          (is (zero? (:exit approved)) (str (:err approved) (:out approved)))
+          (is (= "consumed" (:status detail)))
+          (is (= (:presented-at stored) (:presented_at detail)))
+          (is (not (str/blank? (:approved-at stored))))
+          (is (= "chat transcription"
+                 (get-in stored [:approval-source :kind])))
+          (is (= "operator words in chat"
+                 (get-in stored [:approval-source :via])))
+          (is (= "chat transcription"
+                 (get-in detail [:approval_source :kind])))
+          (is (= 1 (count (rows project))))))
+      (finally
+        (fs/delete-tree forge)))))
+
+(deftest dashboard-approval-must-be-tied-to-the-addressed-proposal
+  (let [forge (tmp-forge)
+        project (init-project! (fs/path forge "projects" "tied-app"))
+        done-dir (fs/path project ".swarmforge/dashboard/requests/done")]
+    (try
+      (let [first-id (propose! forge project "first-card" "# First\n")
+            second-id (propose! forge project "second-card" "# Second\n")
+            tied-file (fs/path done-dir "req-tied-first.request")
+            _ (write-file
+               tied-file
+               (str "id: req-tied-first\n"
+                    "status: done\n"
+                    "proposal_id: " first-id "\n"
+                    "created_at: 2026-11-14T00:00:00Z\n"
+                    "response: approve\n\n"
+                    "Approve this proposal?\n"))
+            tied (route-result "commit" first-id
+                               "--approval" "req-tied-first"
+                               "--forge-root" (str forge))]
+        (is (zero? (:exit tied)) (str (:err tied) (:out tied)))
+        (is (= "consumed"
+               (route-card/proposal-status (proposal-record forge first-id))))
+        (is (= "pending"
+               (route-card/proposal-status (proposal-record forge second-id))))
+
+        (let [_ (write-file
+                 (fs/path done-dir "req-conflicting.request")
+                 (str "id: req-conflicting\n"
+                      "status: done\n"
+                      "proposal_id: " second-id "\n"
+                      "created_at: 2026-11-14T00:00:01Z\n"
+                      "response: approve " first-id "\n\n"
+                      "Approve the wrong proposal.\n"))
+              refused (route-result "commit" second-id
+                                    "--approval" "req-conflicting"
+                                    "--forge-root" (str forge))]
+          (is (not (zero? (:exit refused))))
+          (is (= "pending"
+                 (route-card/proposal-status
+                  (proposal-record forge second-id))))
+          (is (= 1 (count (rows project)))))
+
+        (let [untied-file (fs/path done-dir "req-untied.request")
+              _ (write-file
+                 untied-file
+                 (str "id: req-untied\n"
+                      "status: done\n"
+                      "created_at: 2026-11-14T00:00:02Z\n"
+                      "response: approve\n\n"
+                      "A bare approval with no proposal tie.\n"))
+              refused (route-result "commit" second-id
+                                    "--approval" "req-untied"
+                                    "--forge-root" (str forge))]
+          (is (not (zero? (:exit refused))))
+          (is (= "pending"
+                 (route-card/proposal-status
+                  (proposal-record forge second-id)))))
+
+        (let [named (route-result "commit" second-id
+                                  "--operator-said" "yes second-card"
+                                  "--forge-root" (str forge))]
+          (is (zero? (:exit named)) (str (:err named) (:out named)))
+          (is (= 2 (count (rows project))))))
+      (finally
+        (fs/delete-tree forge)))))
+
+(deftest invalidated-approval-removes-only-the-active-board-row
+  (let [forge (tmp-forge)
+        project (init-project! (fs/path forge "projects" "invalid-app"))
+        source (fs/path project "src" "work.txt")
+        task-note (fs/path project "tasks" "withdrawn-card.md")]
+    (try
+      (write-file source "recoverable work\n")
+      (let [id (propose! forge project "withdrawn-card"
+                         "# Withdrawn card\n\nUnauthorized approval.\n")
+            approved (route-result "commit" id
+                                   "--operator-said" (str "approve " id)
+                                   "--forge-root" (str forge))]
+        (is (zero? (:exit approved)) (str (:err approved) (:out approved)))
+        (is (= 1 (count (rows project))))
+        (is (fs/regular-file? task-note))
+        (let [invalidated
+              (route-result "invalidate" id
+                            "--reason" "approval did not identify this proposal"
+                            "--forge-root" (str forge))
+              stored (proposal-record forge id)
+              detail (route-json "detail" id
+                                 "--forge-root" (str forge) "--json")]
+          (is (zero? (:exit invalidated)) (str (:err invalidated) (:out invalidated)))
+          (is (= "invalidated" (:status detail)))
+          (is (= "approval did not identify this proposal"
+                 (:invalidated_reason detail)))
+          (is (true? (:invalidated_board_removed detail)))
+          (is (= "invalidated" (route-card/proposal-status stored)))
+          (is (not (str/blank? (:invalidated-at stored))))
+          (is (empty? (rows project)))
+          (is (= "recoverable work\n" (slurp (str source))))
+          (is (fs/regular-file? task-note))
+          (let [again
+                (route-result "invalidate" id
+                              "--reason" "approval did not identify this proposal"
+                              "--forge-root" (str forge))
+                refused
+                (route-result "commit" id
+                              "--operator-said" (str "approve " id)
+                              "--forge-root" (str forge))]
+            (is (zero? (:exit again)) (str (:err again) (:out again)))
+            (is (not (zero? (:exit refused))))
+            (is (str/includes? (str (:err refused) (:out refused))
+                               "invalidated"))
+            (is (empty? (rows project))))))
+      (finally
+        (fs/delete-tree forge)))))
 
 (deftest single-agent-cards-activate-queue-and-promote-atomically
   (let [root (tmp-project)
@@ -386,15 +574,15 @@
                       (let [proposed
                             (sh/sh "bb" (str (fs/path scripts "route_card.bb"))
                                    "propose" (str root) name (str note)
-                                   "--forge-root" (str forge)
-                                   "--operator-said" "yes")
+                                   "--forge-root" (str forge))
                             id (second (re-find #"PROPOSED: (\S+)"
                                                 (:out proposed)))]
                         (is (zero? (:exit proposed)) (:err proposed))
                         {:id id
                          :result
                          (sh/sh "bb" (str (fs/path scripts "route_card.bb"))
-                                "commit" id "--forge-root" (str forge))})))]
+                                "commit" id "--operator-said" (str "approve " id)
+                                "--forge-root" (str forge))})))]
         (let [first (route "first")]
           (is (zero? (:exit (:result first))) (:err (:result first)))
           (is (str/includes? (:out (:result first)) "in lane spec"))
@@ -468,11 +656,12 @@
       (let [proposal
             (sh/sh "bb" (str (fs/path scripts "route_card.bb"))
                    "propose" (str project) "pack-card" (str note)
-                   "--forge-root" (str forge) "--operator-said" "yes")
+                   "--forge-root" (str forge))
             id (second (re-find #"PROPOSED: (\S+)" (:out proposal)))
             committed
             (sh/sh "bb" (str (fs/path scripts "route_card.bb"))
-                   "commit" id "--forge-root" (str forge))
+                   "commit" id "--operator-said" (str "approve " id)
+                   "--forge-root" (str forge))
             record (edn/read-string
                     (slurp (str (fs/path forge ".swarmforge" "route-proposals"
                                         (str id ".edn")))))]
@@ -526,14 +715,14 @@
       (let [spec-id (propose! forge project "first-card" "# First\n\nFirst note.\n")
             queued-id (propose! forge project "second-card" "# Second\n\nSecond note.\n")
             spec-approved (route-json "approve" spec-id
-                                      "--operator-said" "approve"
+                                      "--operator-said" (str "approve " spec-id)
                                       "--forge-root" (str forge) "--json")
             queued-approved (route-json "approve" queued-id
-                                        "--operator-said" "approve"
+                                        "--operator-said" (str "approve " queued-id)
                                         "--forge-root" (str forge) "--json")
             pending (route-json "list" "--forge-root" (str forge) "--json")
             duplicate (route-result "approve" spec-id
-                                    "--operator-said" "approve"
+                                    "--operator-said" (str "approve " spec-id)
                                     "--forge-root" (str forge) "--json")
             duplicate-json (json/parse-string (:out duplicate) true)]
         (is (= ["spec" "consumed"]
@@ -581,10 +770,10 @@
               in-progress (route-json "detail" dependent-id
                                       "--forge-root" (str forge) "--json")
               shell-blocked (route-result "commit" dependent-id
-                                          "--operator-said" "approve"
+                                          "--operator-said" (str "approve " dependent-id)
                                           "--forge-root" (str forge))
               machine-blocked (route-result "approve" dependent-id
-                                            "--operator-said" "approve"
+                                            "--operator-said" (str "approve " dependent-id)
                                             "--forge-root" (str forge)
                                             "--json")
               machine-error (json/parse-string (:out machine-blocked) true)]
@@ -658,8 +847,7 @@
               missing (route-result "propose" (str beta) "missing-dependent"
                                     (str note)
                                     "--depends-on" "proposal-20261111T000000Z"
-                                    "--forge-root" (str forge)
-                                    "--operator-said" "yes")
+                                    "--forge-root" (str forge))
               malformed-id "proposal-20261111T000001Z"
               malformed-file (fs/path forge ".swarmforge" "route-proposals"
                                      (str malformed-id ".edn"))
@@ -667,8 +855,7 @@
               malformed (route-result "propose" (str beta) "malformed-dependent"
                                       (str note)
                                       "--depends-on" malformed-id
-                                      "--forge-root" (str forge)
-                                      "--operator-said" "yes")
+                                      "--forge-root" (str forge))
               prerequisite (propose! forge alpha "superseded-card"
                                      "# Superseded\n")
               file (fs/path forge ".swarmforge" "route-proposals"
@@ -684,8 +871,7 @@
           (let [superseded (route-result "propose" (str beta) "superseded-dependent"
                                          (str note)
                                          "--depends-on" prerequisite
-                                         "--forge-root" (str forge)
-                                         "--operator-said" "yes")]
+                                         "--forge-root" (str forge))]
             (is (not (zero? (:exit superseded))))
             (is (str/includes? (str (:err superseded) (:out superseded))
                                "superseded")))))
@@ -703,8 +889,7 @@
           (let [cycle (route-result "propose" (str beta) "cycle-third"
                                     (str note)
                                     "--depends-on" first-id
-                                    "--forge-root" (str forge)
-                                    "--operator-said" "yes")]
+                                    "--forge-root" (str forge))]
             (is (not (zero? (:exit cycle))))
             (is (str/includes? (str (:err cycle) (:out cycle))
                                "Dependency cycle")))))
@@ -735,7 +920,7 @@
           (let [detail (route-json "detail" dependent-id
                                    "--forge-root" (str forge) "--json")
                 commit (route-result "commit" dependent-id
-                                     "--operator-said" "approve"
+                                     "--operator-said" (str "approve " dependent-id)
                                      "--forge-root" (str forge))]
             (is (= "consumed" (:status approved)))
             (is (false? (get-in detail [:dependency :completion_recorded])))
