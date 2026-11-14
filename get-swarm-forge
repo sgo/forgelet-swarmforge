@@ -558,6 +558,8 @@ required_files=(
   swarmforge/scripts/swarmforge.sh
   swarmforge/scripts/handoffd.bb
   swarmforge/scripts/done_with_current.sh
+  swarmforge/scripts/route_card.sh
+  swarmforge/scripts/route_card.bb
   swarmforge/constitution/articles/handoffs.prompt
   swarmforge/constitution/articles/workflow.prompt
   swarmforge/constitution/articles/engineering.prompt

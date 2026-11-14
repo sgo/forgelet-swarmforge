@@ -2072,7 +2072,8 @@
         bridge (tmp-dir)
         marker "get-swarm-forge: failed, and left its scratch at "]
     (try
-      (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"]]
+      (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"
+                    "route_card.sh" "route_card.bb"]]
         (write-file (fs/path base "swarmforge/scripts" name) (str name "\n")))
       (write-file (fs/path base "swarmforge/roles/lieutenant.prompt") "LIEUTENANT\n")
       (write-file (fs/path base "swarmforge/constitution/articles/engineering.prompt") "ENG\n")
@@ -2158,7 +2159,8 @@
         packs (tmp-dir)
         local-file (fs/path host "swarmforge/roles/local-lieutenant.prompt")]
     (try
-      (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"]]
+      (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"
+                    "route_card.sh" "route_card.bb"]]
         (write-file (fs/path base "swarmforge/scripts" name) (str name "\n")))
       (write-file (fs/path base "swarmforge/roles/lieutenant.prompt") "LAYER-LIEUTENANT\n")
       (write-file (fs/path base "swarmforge/roles/local-lieutenant.prompt") "LAYER-DEFAULT-LOCAL\n")
@@ -2235,7 +2237,8 @@
         bridge (tmp-dir)]
     (try
       (write-file (fs/path host "README.md") "host-readme\n")
-      (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"]]
+      (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"
+                    "route_card.sh" "route_card.bb"]]
         (write-file (fs/path base "swarmforge/scripts" name) (str name "\n")))
       (write-file (fs/path base "swarmforge/constitution.prompt") "MAIN\n")
       (write-file (fs/path base "swarmforge/roles/lieutenant.prompt") "LIEUTENANT\n")
@@ -2322,7 +2325,8 @@
       ;; layer's files are replaced, and a skill the layer does not carry is not.
       (write-file (fs/path host "swarmforge/skills/a-forges-own/SKILL.md") "OWN\n")
       (write-file (fs/path host "swarmforge/skills/forge-requests-by-issue/SKILL.md") "STALE\n")
-      (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"]]
+      (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"
+                    "route_card.sh" "route_card.bb"]]
         (write-file (fs/path base "swarmforge/scripts" name) (str name "\n")))
       (write-file (fs/path base "swarmforge/skills/forge-requests-by-issue/SKILL.md") "LAYER-SKILL\n")
       (write-file
@@ -2416,6 +2420,12 @@
                (str/trim (:out (sh/sh "readlink"
                                       (str (fs/path host ".agents/skills/convert-pack-project-to-single-agent")))))))
         (is (not (fs/exists? (fs/path host ".agents/skills/a-forges-own"))))
+        (is (= "route_card.sh\n"
+               (slurp (str (fs/path host
+                                    "swarmforge/scripts/route_card.sh")))))
+        (is (= "route_card.bb\n"
+               (slurp (str (fs/path host
+                                    "swarmforge/scripts/route_card.bb")))))
         (is (fs/exists? (fs/path host "swarm"))))
       (finally
         (fs/delete-tree host)

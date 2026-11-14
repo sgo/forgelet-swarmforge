@@ -181,6 +181,7 @@
                        "start"
                        "go ahead with that"
                        "let's do that"
+                       "approve"
                        "approval-card"
                        (str "approve " id ", no wait")]]
           (let [refused (route-result "commit" id
@@ -277,6 +278,207 @@
           (is (zero? (:exit named)) (str (:err named) (:out named)))
           (is (= 2 (count (rows project))))))
       (finally
+        (fs/delete-tree forge)))))
+
+(deftest machine-approve-ties-the-exact-proposal-it-addresses
+  (let [forge (tmp-forge)
+        project (init-project! (fs/path forge "projects" "machine-app"))]
+    (try
+      (let [id (propose! forge project "machine-card" "# Machine card\n")
+            listed (route-json "list" "--forge-root" (str forge) "--json")
+            pending (route-json "detail" id
+                                "--forge-root" (str forge) "--json")
+            approved
+            (route-result "approve" id
+                          "--operator-said" "approve"
+                          "--json"
+                          "--forge-root" (str forge))
+            consumed (route-json "detail" id
+                                 "--forge-root" (str forge) "--json")
+            duplicate
+            (route-result "approve" id
+                          "--operator-said" "approve"
+                          "--json"
+                          "--forge-root" (str forge))]
+        (is (= [id] (mapv :id (:proposals listed))))
+        (is (= "pending" (:status pending)))
+        (is (zero? (:exit approved)) (str (:err approved) (:out approved)))
+        (is (= id (:id (json/parse-string (:out approved) true))))
+        (is (= "consumed" (:status consumed)))
+        (is (= "spec" (:created_lane consumed)))
+        (is (= 1 (count (rows project))))
+        (is (not (zero? (:exit duplicate))))
+        (is (= "proposal_consumed"
+               (get-in (json/parse-string (:out duplicate) true)
+                       [:error :code])))
+        (is (= 1 (count (rows project)))))
+      (finally
+        (fs/delete-tree forge)))))
+
+(deftest legacy-presentation-migration-is-narrow-idempotent-and-dry-runnable
+  (let [forge (tmp-forge)
+        project (init-project! (fs/path forge "projects" "migration-app"))
+        dir (fs/path forge ".swarmforge/route-proposals")
+        legacy-id "proposal-20261114T090000000000Z"
+        second-id "proposal-20261114T090001000000Z"
+        legacy {:id legacy-id
+                :project (str project)
+                :name "legacy-card"
+                :note "# Legacy card\n\nOld proposal.\n"
+                :lane "spec"
+                :created-at "2026-11-14T09:00:00Z"
+                :approval-id nil
+                :operator-said nil}
+        second {:id second-id
+                :project (str project)
+                :name "second-card"
+                :note "# Second\n"
+                :lane "spec"
+                :created-at "2026-11-14T09:00:01Z"
+                :approval-id nil
+                :operator-said nil
+                :depends-on legacy-id}]
+    (try
+      (fs/create-dirs dir)
+      (doseq [[id proposal]
+              {legacy-id legacy
+               second-id second
+               "proposal-20261114T090002000000Z"
+               (assoc legacy
+                      :id "proposal-20261114T090002000000Z"
+                      :consumed-at "2026-11-14T09:01:00Z")
+               "proposal-20261114T090003000000Z"
+               (assoc legacy
+                      :id "proposal-20261114T090003000000Z"
+                      :invalidated-at "2026-11-14T09:02:00Z"
+                      :invalidated-reason "old approval was ambiguous")
+               "proposal-20261114T090004000000Z"
+               (assoc legacy
+                      :id "proposal-20261114T090004000000Z"
+                      :superseded-at "2026-11-14T09:03:00Z")
+               "proposal-20261114T090005000000Z"
+               (dissoc (assoc legacy
+                              :id "proposal-20261114T090005000000Z")
+                       :created-at)
+               "proposal-20261114T090006000000Z"
+               (assoc legacy
+                      :id "proposal-20261114T090006000000Z"
+                      :unrecognised true)
+               "proposal-20261114T090007000000Z"
+               (assoc legacy
+                      :id "proposal-20261114T090007000000Z"
+                      :presentation "partial presentation")}]
+        (write-file (fs/path dir (str id ".edn")) (pr-str proposal)))
+      (write-file (fs/path dir "proposal-malformed.edn") "not an edn map\n")
+      (let [current-id (propose! forge project "current-card" "# Current\n")
+            route-dir (str dir)
+            before (into {}
+                         (map (fn [path]
+                                [(fs/file-name path) (slurp (str path))]))
+                         (fs/list-dir dir))
+            dry (route-json "migrate-presentations"
+                            "--forge-root" (str forge)
+                            "--dry-run" "--json")
+            after-dry (into {}
+                            (map (fn [path]
+                                   [(fs/file-name path) (slurp (str path))]))
+                            (fs/list-dir dir))]
+        (is (= 2 (:migrated dry)))
+        (is (= 1 (:already_current dry)))
+        (is (= 3 (:skipped_terminal dry)))
+        (is (= 4 (:refused_invalid dry)))
+        (is (true? (:dry_run dry)))
+        (is (= #{legacy-id second-id} (set (:migrated_ids dry))))
+        (is (= before after-dry))
+
+        (let [migrated
+              (route-json "migrate-presentations"
+                          "--forge-root" (str forge) "--json")
+              legacy-file (fs/path route-dir (str legacy-id ".edn"))
+              legacy-record (edn/read-string (slurp (str legacy-file)))
+              detail (route-json "detail" legacy-id
+                                 "--forge-root" (str forge) "--json")
+              post (into {}
+                         (map (fn [path]
+                                [(fs/file-name path) (slurp (str path))]))
+                         (fs/list-dir route-dir))]
+          (is (= 2 (:migrated migrated)))
+          (is (= 1 (:already_current migrated)))
+          (is (= 3 (:skipped_terminal migrated)))
+          (is (= 4 (:refused_invalid migrated)))
+          (is (= (:created-at legacy) (:presented-at legacy-record)))
+          (is (= "legacy proposal was printed immediately after its created-at timestamp"
+                 (:presentation legacy-record)))
+          (is (= "route_card.sh migrate-presentations (legacy schema)"
+                 (:presentation-migration-source legacy-record)))
+          (is (not (str/blank? (:presentation-migrated-at legacy-record))))
+          (is (= legacy
+                 (dissoc legacy-record
+                         :presented-at :presentation :presentation-migrated-at
+                         :presentation-migration-source)))
+          (is (= legacy-id (:depends-on
+                            (edn/read-string
+                             (slurp (str (fs/path route-dir
+                                                 (str second-id ".edn"))))))))
+          (is (= "legacy proposal was printed immediately after its created-at timestamp"
+                 (:presentation detail)))
+          (is (= "route_card.sh migrate-presentations (legacy schema)"
+                 (:presentation_migration_source detail)))
+          (doseq [[name content] before
+                  :when (not (contains? #{(str legacy-id ".edn")
+                                          (str second-id ".edn")}
+                                        name))]
+            (is (= content (get post name)) name)))
+
+        (let [second-run
+              (route-json "migrate-presentations"
+                          "--forge-root" (str forge) "--json")]
+          (is (= 0 (:migrated second-run)))
+          (is (= 3 (:already_current second-run)))
+          (is (= 3 (:skipped_terminal second-run)))
+          (is (= 4 (:refused_invalid second-run))))
+
+        (let [no-source (route-result "commit" legacy-id
+                                      "--forge-root" (str forge))
+              bare (route-result "commit" legacy-id
+                                 "--operator-said" "approve"
+                                 "--forge-root" (str forge))
+              approved (route-result "approve" legacy-id
+                                     "--operator-said" "approve"
+                                     "--json"
+                                     "--forge-root" (str forge))]
+          (is (not (zero? (:exit no-source))))
+          (is (not (zero? (:exit bare))))
+          (is (zero? (:exit approved)) (str (:err approved) (:out approved)))
+          (is (= 1 (count (rows project))))))
+      (finally
+        (fs/delete-tree forge)))))
+
+(deftest failed-presentation-migration-write-keeps-the-original
+  (let [forge (tmp-forge)
+        project (init-project! (fs/path forge "projects" "write-failure-app"))
+        dir (fs/path forge ".swarmforge/route-proposals")
+        id "proposal-20261114T091000000000Z"
+        original {:id id
+                  :project (str project)
+                  :name "write-failure"
+                  :note "# Write failure\n"
+                  :lane "spec"
+                  :created-at "2026-11-14T09:10:00Z"
+                  :approval-id nil
+                  :operator-said nil}
+        file (fs/path dir (str id ".edn"))]
+    (try
+      (write-file file (pr-str original))
+      (fs/set-posix-file-permissions dir "r-xr-xr-x")
+      (let [result (route-result "migrate-presentations"
+                                 "--forge-root" (str forge) "--json")
+            report (json/parse-string (:out result) true)]
+        (is (not (zero? (:exit result))))
+        (is (= [id] (:write_failed_ids report)))
+        (is (= (pr-str original) (slurp (str file)))))
+      (finally
+        (fs/set-posix-file-permissions dir "rwxr-xr-x")
         (fs/delete-tree forge)))))
 
 (deftest invalidated-approval-removes-only-the-active-board-row

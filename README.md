@@ -694,12 +694,34 @@ when a dashboard answer record is tied to the same proposal id. Generic phrases
 such as `start`, `go ahead with that`, `sounds good` and `let's do that` are
 discussion, not consent, and a negation always wins.
 
+The machine `approve <proposal-id>` operation is itself a structured tie to that
+exact proposal, so Forgelet Host can pass the operator's bare `approve` after
+selecting the proposal from machine detail. Human `commit` still requires an
+exact proposal name or a dashboard record tied to the proposal. This distinction
+does not bypass presentation: machine approval still refuses an unpresented
+proposal.
+
 A proposal record retains its presentation, approval source, card identity and
 audit fields. `route_card.sh invalidate <proposal-id> --reason <text>` marks a
 proposal invalid without deleting it and removes an active or queued board row
 while preserving the task note, source and recoverable worktree. Completed board
 rows and audit records are not removed. Machine `detail` exposes the invalidation
 timestamp, reason and whether an active row was removed.
+
+For pending proposals written before `presented-at` existed, the exact legacy
+schema can be repaired once without treating creation as approval:
+
+```sh
+route_card.sh migrate-presentations --forge-root <forge-root> \
+  [--dry-run] [--json]
+```
+
+The migration stamps `presented-at` from the legacy `created-at`, records its
+source and migration time, and preserves every approval, dependency and audit
+field. It never consumes a proposal or creates a card. New-format proposals are
+already current; terminal, malformed and unrecognised records are left untouched.
+Composition requires both `route_card.sh` and `route_card.bb`, so a forge cannot
+be composed with the old incompatible pair.
 
 ### Dependent route proposals
 

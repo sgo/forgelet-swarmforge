@@ -15,6 +15,8 @@
        "                         [--depends-on <proposal-id>]\n"
        "  route_card.sh invalidate <proposal-id> --reason <text>\n"
        "                           [--forge-root <root>]\n"
+       "  route_card.sh migrate-presentations --forge-root <root>\n"
+       "                                      [--dry-run] [--json]\n"
        "  route_card.sh commit <proposal-id> [--approval <record-id>]\n"
        "                         [--operator-said <words>]\n"
        "  route_card.sh list [--project <project>] [--forge-root <root>] [--json]\n"
@@ -48,6 +50,10 @@
        "--approval names the dashboard request that recorded their answer;\n"
        "--operator-said records exact words from a channel that leaves no file.\n"
        "Both belong on commit/approve, never propose.\n"
+       "\n"
+       "migrate-presentations repairs only the exact pre-presentation legacy\n"
+       "proposal schema whose creation timestamp was also its presentation. It\n"
+       "never approves, consumes or creates a card.\n"
        "\n"
        "A dependent proposal remains blocked while its prerequisite is pending,\n"
        "approved/in progress, or awaiting verified completed-card cleanup. Only the\n"
@@ -615,6 +621,20 @@
                       (assoc :presented_at
                              (redact-output (str (:presented-at proposal))))
 
+                      (:presentation proposal)
+                      (assoc :presentation
+                             (redact-output (str (:presentation proposal))))
+
+                      (:presentation-migrated-at proposal)
+                      (assoc :presentation_migrated_at
+                             (redact-output
+                              (str (:presentation-migrated-at proposal))))
+
+                      (:presentation-migration-source proposal)
+                      (assoc :presentation_migration_source
+                             (redact-output
+                              (str (:presentation-migration-source proposal))))
+
                       (:approved-at proposal)
                       (assoc :approved_at
                              (redact-output (str (:approved-at proposal))))
@@ -659,6 +679,170 @@
                         (str "Proposal " (:id proposal)
                              " was superseded — nothing created."))
     proposal))
+
+(def legacy-presentation-migration-source
+  "route_card.sh migrate-presentations (legacy schema)")
+
+(def legacy-presentation-text
+  "legacy proposal was printed immediately after its created-at timestamp")
+
+(def legacy-proposal-required-keys
+  #{:id :project :name :note :lane :created-at :approval-id :operator-said})
+
+(def legacy-proposal-optional-keys
+  #{:depends-on :status})
+
+(defn no-follow-regular-file? [path]
+  (and (fs/regular-file? path)
+       (not (java.nio.file.Files/isSymbolicLink (fs/path path)))))
+
+(defn proposal-files-for-migration [forge]
+  (let [dir (fs/path forge ".swarmforge" "route-proposals")]
+    (if (fs/directory? dir)
+      (->> (fs/list-dir dir)
+           (filter #(str/ends-with? (fs/file-name %) ".edn"))
+           (sort-by #(str (fs/file-name %)))
+           vec)
+      [])))
+
+(defn legacy-presentation-schema? [id proposal]
+  (let [keys (set (keys proposal))
+        created-at (parse-instant (:created-at proposal))]
+    (and (= id (:id proposal))
+         created-at
+         (= "pending" (proposal-status proposal))
+         (every? #(contains? keys %) legacy-proposal-required-keys)
+         (every? #(contains? (into legacy-proposal-required-keys
+                                   legacy-proposal-optional-keys)
+                             %)
+                 keys)
+         (string? (:project proposal))
+         (string? (:name proposal))
+         (string? (:lane proposal))
+         (string? (:note proposal)))))
+
+(defn current-presentation? [proposal]
+  (and (parse-instant (:presented-at proposal))
+       (not (str/blank? (str (:presentation proposal))))))
+
+(defn atomic-write-proposal! [file proposal]
+  (let [tmp (fs/create-temp-file {:dir (fs/parent file)
+                                  :prefix ".route-proposal."})]
+    (try
+      (spit (str tmp) (pr-str proposal))
+      (fs/move tmp file {:replace-existing true :atomic-move true})
+      (catch Throwable error
+        (fs/delete-if-exists tmp)
+        (throw error)))))
+
+(defn classify-presentation-migration [path]
+  (let [filename (str (fs/file-name path))
+        id (str/replace filename #"\.edn$" "")]
+    (cond
+      (not (no-follow-regular-file? path))
+      {:outcome :refused-invalid :id id}
+
+      (not (re-matches proposal-id-re id))
+      {:outcome :refused-invalid :id id}
+
+      :else
+      (let [proposal
+            (try
+              (edn/read-string (slurp (str path)))
+              (catch Exception _ nil))]
+        (if-not (map? proposal)
+          {:outcome :refused-invalid :id id}
+          (try
+            (let [status (proposal-status proposal)]
+              (cond
+                (not= "pending" status)
+                {:outcome :skipped-terminal :id id}
+
+                (current-presentation? proposal)
+                {:outcome :already-current :id id}
+
+                (or (contains? proposal :presented-at)
+                    (contains? proposal :presentation))
+                {:outcome :refused-invalid :id id}
+
+                (legacy-presentation-schema? id proposal)
+                {:outcome :migrate :id id :proposal proposal :path path}
+
+                :else
+                {:outcome :refused-invalid :id id}))
+            (catch Exception _
+              {:outcome :refused-invalid :id id})))))))
+
+(defn migrate-presentation-record! [entry migrated-at]
+  (let [proposal (:proposal entry)
+        migrated (assoc proposal
+                        :presented-at (:created-at proposal)
+                        :presentation legacy-presentation-text
+                        :presentation-migrated-at migrated-at
+                        :presentation-migration-source
+                        legacy-presentation-migration-source)]
+    (atomic-write-proposal! (:path entry) migrated)
+    entry))
+
+(defn migrate-presentations! [args]
+  (let [forge (forge-root args)
+        dry-run? (flag? args "--dry-run")
+        json? (flag? args "--json")
+        entries (mapv classify-presentation-migration
+                      (proposal-files-for-migration forge))
+        migrated-at (now)
+        results
+        (mapv (fn [entry]
+                (if (and (= :migrate (:outcome entry))
+                         (not dry-run?))
+                  (try
+                    (migrate-presentation-record! entry migrated-at)
+                    (assoc entry :outcome :migrated)
+                    (catch Exception _
+                      (assoc entry :outcome :write-failed)))
+                  (assoc entry :outcome
+                         (if (= :migrate (:outcome entry))
+                           :migrate
+                           (:outcome entry)))))
+              entries)
+        outcomes (frequencies (map :outcome results))
+        report {:dry_run (boolean dry-run?)
+                :migrated (+ (get outcomes :migrated 0)
+                             (get outcomes :migrate 0))
+                :already_current (get outcomes :already-current 0)
+                :skipped_terminal (get outcomes :skipped-terminal 0)
+                :refused_invalid (+ (get outcomes :refused-invalid 0)
+                                    (get outcomes :write-failed 0))
+                :migrated_ids
+                (mapv :id
+                      (filter #(contains? #{:migrate :migrated}
+                                          (:outcome %))
+                              results))
+                :already_current_ids
+                (mapv :id
+                      (filter #(= :already-current (:outcome %)) results))
+                :refused_invalid_ids
+                (mapv :id
+                      (filter #(contains? #{:refused-invalid :write-failed}
+                                          (:outcome %))
+                              results))
+                :write_failed_ids
+                (mapv :id
+                      (filter #(= :write-failed (:outcome %)) results))}]
+    (if json?
+      (println (json/generate-string report))
+      (do
+        (println (str (if dry-run? "WOULD MIGRATE: " "MIGRATED: ")
+                      (:migrated report)))
+        (println (str "ALREADY CURRENT: " (:already_current report)))
+        (println (str "SKIPPED TERMINAL: " (:skipped_terminal report)))
+        (println (str "REFUSED INVALID: " (:refused_invalid report)))
+        (when (seq (:migrated_ids report))
+          (println (str "Proposal ids: "
+                        (str/join ", " (:migrated_ids report)))))))
+    (when (seq (:write_failed_ids report))
+      (System/exit 1))
+    report))
 
 (defn require-package [file ns-sym]
   (load-file (str (fs/path (script-dir) file)))
@@ -848,7 +1032,7 @@
       id)))
 
 (defn commit-proposal!
-  [{:keys [forge id explicit said]}]
+  [{:keys [forge id explicit said structured-tie?]}]
   (let [id (proposition-id! id)
         file (proposal-file forge id)]
     (when-not (fs/regular-file? file)
@@ -875,7 +1059,8 @@
                             " answered through the clarification store.")))
           record (approval-from [project-root forge] proposal explicit said)]
       (when-not (affirmative? (:text record) name id
-                              (record-tied-to-proposal? record id))
+                              (or structured-tie?
+                                  (record-tied-to-proposal? record id)))
         (exit! 1 (str "Not approved: " (:via record) " reads \""
                       (str/trim (first (str/split-lines
                                         (str/trim (or (:text record) "")))))
@@ -982,7 +1167,11 @@
         explicit (flag-value args "--approval")
         said (flag-value args "--operator-said")
         {:keys [proposal]} (commit-proposal!
-                            {:forge forge :id id :explicit explicit :said said})]
+                            {:forge forge
+                             :id id
+                             :explicit explicit
+                             :said said
+                             :structured-tie? true})]
     (proposal-json forge proposal)))
 
 (defn machine-main [operation args]
@@ -1017,6 +1206,7 @@
   (case (first args)
     "propose" (propose! (rest args))
     "invalidate" (invalidate! (rest args))
+    "migrate-presentations" (migrate-presentations! (rest args))
     "commit" (commit! (rest args))
     "list" (machine-main "list" (rest args))
     "detail" (machine-main "detail" (rest args))

@@ -59,6 +59,14 @@
   (fs/create-dirs (fs/parent path))
   (spit (str path) text))
 
+(defn delete-tree-best-effort [path]
+  (try
+    (fs/delete-tree path)
+    (catch Exception _
+      ;; A process-owned temporary object can disappear between listing and
+      ;; visiting it. Test teardown must not turn that race into a gate failure.
+      nil)))
+
 (defn run-script [script root & args]
   (apply sh/sh
          (concat ["bb" (str script)]
@@ -622,7 +630,7 @@
             (format "status took %.0f ms with an unrelated generated tree"
                     elapsed-ms)))
       (finally
-        (fs/delete-tree root)))))
+        (delete-tree-best-effort root)))))
 
 (deftest stage-freshness-follows-exact-stamped-inputs-and-deletions
   (let [root (scoped-fixture)
