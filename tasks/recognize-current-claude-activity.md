@@ -85,6 +85,15 @@ tests remain in the suite.
 `bb test` passed 446 tests with 3,047 assertions plus all 17 dashboard browser
 tests. `bb crap` passed the complete coverage/CRAP gate.
 
+The normal `get-swarm-forge` rollout was composed into the Saibill forge, and
+all 13 open project copies were refreshed and committed through managed-runtime
+sync. The forge root and every project copy carry the same `pack_web.bb` hash as
+the source.
+
+After restarting only the Saibill dashboard, its live `/api/state` reported
+`alive: true`, `state: idle`, `heat: 0`, and the current permissions footer as
+the bounded status line. The Claude Lieutenant session was left running.
+
 ## Operator acceptance
 
 - owner: operator | environment: Forgelet app with live Saibill Family | checks: confirm Idle while the Claude Lieutenant is idle and Working during a report turn | status: pending
