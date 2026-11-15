@@ -766,6 +766,16 @@ and conversation metadata. `/api/state` exposes the validated reply as
 `actions` array. Host action projection and app button behavior remain later
 cards.
 
+When a response names a pending local proposal and explicitly invites approval
+with wording such as `Send "approve proposal-<id>"`,
+`Approve proposal-<id> if you want`, or `reply approve` in the same paragraph,
+completion requires the one matching `--approve-route-card` action.
+`--without-route-card-action` is refused for that invitation; the agent must
+attach the action or rewrite the response as genuinely discussion-only.
+Multiple live invitations are ambiguous and refused. Invitations to consumed,
+malformed or foreign proposals are not candidates. Detection is advisory and
+bounded; it never approves from prose.
+
 `route_card.sh propose` always writes a pending proposal and records when it was
 presented. It rejects `--approval` and `--operator-said`; approval evidence is
 accepted only by a later `commit` or machine `approve`. Words from the pane must

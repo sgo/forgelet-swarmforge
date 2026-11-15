@@ -3066,6 +3066,190 @@
         (is (not (zero? (:exit literal))))
         (is (= after (slurp (str done))))))))
 
+(deftest explicit-approval-invitations-require-the-matching-action
+  ;; Given a response that explicitly invites approval for one live proposal
+  ;; When the matching action is absent, including on the no-action override
+  ;; Then completion is refused with bounded repair context
+  (let [forge (tmp-dir)
+        answer (fs/path forge "tmp" "answer.txt")
+        request-id "req-approval-invitation"
+        command (script "pack_dashboard_request.sh")
+        secret-path "/Users/operator/private/proposal-note.md"
+        token "ghp_1234567890abcdefghijklmnopqrstuvwxyz"]
+    (setup-pack! forge ["specifier"])
+    (fs/create-dirs (fs/path forge "projects" "alpha-app"))
+    (let [proposal-id (route-proposal! forge "alpha-app" "invited-card")
+          pending (write-pending-chat!
+                   forge {:id request-id :body "PRIVATE_REQUEST_BODY\n"})]
+      (write-file answer
+                  (str "SeNd “Approve " proposal-id "” if you want.\n"
+                       "Debug " secret-path " " token "\n"))
+      (doseq [arguments [[] ["--without-route-card-action"]]]
+        (let [refused (apply run {:dir forge :ok? false}
+                             command "answer" request-id (str answer)
+                             arguments)
+              diagnostic (str (:err refused) (:out refused))]
+          (is (not (zero? (:exit refused))))
+          (is (str/includes? diagnostic proposal-id))
+          (is (str/includes? diagnostic "--approve-route-card"))
+          (is (str/includes? diagnostic
+                             "--without-route-card-action is not allowed"))
+          (is (< (count diagnostic) 2000))
+          (is (not (str/includes? diagnostic secret-path)))
+          (is (not (str/includes? diagnostic token)))
+          (is (not (str/includes? diagnostic "PRIVATE_REQUEST_BODY")))
+          (is (fs/regular-file? pending))))
+      (let [answered (run {:dir forge}
+                          command "answer" request-id (str answer)
+                          "--approve-route-card" proposal-id
+                          "--without-quick-reply")
+            row (get (into {} (map (juxt :id identity)
+                                   (:chat (web-state forge))))
+                     request-id)]
+        (is (zero? (:exit answered)) (:err answered))
+        (is (= {:type "approve-route-card"
+                :proposal_id proposal-id
+                :family (str (fs/file-name forge))
+                :project "alpha-app"
+                :task_name "invited-card"
+                :label "Approve invited-card"
+                :status "pending"
+                :available true}
+               (first (:actions row))))))))
+
+(deftest approval-invitation-variants-and-discussion-only-overrides
+  ;; Given invitation wording across quoting and paragraph forms
+  ;; When metadata is omitted or the text is genuinely discussion-only
+  ;; Then invitations challenge while the discussion-only override succeeds
+  (let [forge (tmp-dir)
+        answer (fs/path forge "tmp" "answer.txt")
+        command (script "pack_dashboard_request.sh")]
+    (setup-pack! forge ["specifier"])
+    (fs/create-dirs (fs/path forge "projects" "alpha-app"))
+    (let [proposal-id (route-proposal! forge "alpha-app" "paragraph-card")]
+      (doseq [[request-id text]
+              [["req-send-invitation"
+                (str "Send \"approve " proposal-id "\".\n")]
+               ["req-if-want-invitation"
+                (str "Approve " proposal-id ", if you want.\n")]
+               ["req-reply-approve-paragraph"
+                (str "Proposal " proposal-id ".\n"
+                     "Have the operator\nreply approve when ready.\n")]]]
+        (write-file answer text)
+        (write-pending-chat! forge {:id request-id})
+        (let [refused (run {:dir forge :ok? false}
+                           command "answer" request-id (str answer)
+                           "--without-route-card-action")]
+          (is (not (zero? (:exit refused))) request-id)
+          (is (str/includes? (str (:err refused) (:out refused))
+                             proposal-id))))
+      (write-file answer
+                  (str "We discussed `" proposal-id
+                       "`, but the operator made no choice.\n"))
+      (let [discussion-id "req-discussion-only"
+            pending (write-pending-chat! forge {:id discussion-id})
+            discussion (run {:dir forge}
+                            command "answer" discussion-id (str answer)
+                            "--without-route-card-action")
+            row (get (into {} (map (juxt :id identity)
+                                   (:chat (web-state forge))))
+                     discussion-id)]
+        (is (zero? (:exit discussion)) (:err discussion))
+        (is (not (fs/exists? pending)))
+        (is (not (contains? row :actions))))
+      (write-file answer
+                  (str "Do not send \"approve " proposal-id "\"; "
+                       "the decision remains open.\n"))
+      (let [negated-id "req-negated-invitation"
+            _ (write-pending-chat! forge {:id negated-id})
+            negated (run {:dir forge}
+                         command "answer" negated-id (str answer)
+                         "--without-route-card-action")]
+        (is (zero? (:exit negated)) (:err negated))))))
+
+(deftest invitations-for-non-live-and-foreign-proposals-do-not-challenge
+  ;; Given invitation wording for consumed, superseded, malformed and foreign IDs
+  ;; When the local answer supplies the discussion-only override
+  ;; Then no live local invitation is inferred and the answer completes
+  (let [forge (tmp-dir)
+        other-forge (tmp-dir)
+        answer (fs/path forge "tmp" "answer.txt")
+        request-id "req-non-live-invitations"
+        command (script "pack_dashboard_request.sh")
+        malformed-id "proposal-20261115T140001Z"]
+    (setup-pack! forge ["specifier"])
+    (setup-pack! other-forge ["specifier"])
+    (fs/create-dirs (fs/path forge "projects" "alpha-app"))
+    (fs/create-dirs (fs/path other-forge "projects" "alpha-app"))
+    (let [consumed-id (route-proposal! forge "alpha-app" "consumed")
+          superseded-id (route-proposal! forge "alpha-app" "superseded")
+          foreign-id (route-proposal! other-forge "alpha-app" "foreign")
+          consumed-file (fs/path forge ".swarmforge" "route-proposals"
+                                 (str consumed-id ".edn"))
+          superseded-file (fs/path forge ".swarmforge" "route-proposals"
+                                   (str superseded-id ".edn"))
+          consumed (edn/read-string (slurp (str consumed-file)))
+          superseded (edn/read-string (slurp (str superseded-file)))]
+      (write-file consumed-file
+                  (pr-str (assoc consumed :consumed-at "2026-11-15T14:01:00Z")))
+      (write-file superseded-file
+                  (pr-str (assoc superseded :superseded-at
+                                 "2026-11-15T14:01:01Z")))
+      (write-file (fs/path forge ".swarmforge" "route-proposals"
+                            (str malformed-id ".edn"))
+                  "not an edn proposal\n")
+      (write-file answer
+                  (str "Send \"approve " consumed-id "\".\n"
+                       "Approve " superseded-id " if you want.\n"
+                       "Reply \"approve " malformed-id "\".\n"
+                       "Reply \"approve " foreign-id "\".\n"))
+      (write-pending-chat! forge {:id request-id})
+      (let [answered (run {:dir forge}
+                          command "answer" request-id (str answer)
+                          "--without-route-card-action")
+            row (get (into {} (map (juxt :id identity)
+                                   (:chat (web-state forge))))
+                     request-id)]
+        (is (zero? (:exit answered)) (:err answered))
+        (is (not (contains? row :actions)))))))
+
+(deftest multiple-live-approval-invitations-require-one-rewritten-invitation
+  ;; Given one answer that invites approval for two live local proposals
+  ;; When any action is attempted
+  ;; Then ambiguity is refused and one rewritten invitation can attach one action
+  (let [forge (tmp-dir)
+        answer (fs/path forge "tmp" "answer.txt")
+        request-id "req-multiple-invitations"
+        command (script "pack_dashboard_request.sh")]
+    (setup-pack! forge ["specifier"])
+    (fs/create-dirs (fs/path forge "projects" "alpha-app"))
+    (let [first-id (route-proposal! forge "alpha-app" "first-invite")
+          second-id (route-proposal! forge "alpha-app" "second-invite")
+          pending (write-pending-chat! forge {:id request-id})]
+      (write-file answer
+                  (str "Send \"approve " first-id "\".\n"
+                       "Approve " second-id " if you want.\n"))
+      (doseq [arguments [[] ["--approve-route-card" first-id]]]
+        (let [refused (apply run {:dir forge :ok? false}
+                             command "answer" request-id (str answer)
+                             arguments)
+              diagnostic (str (:err refused) (:out refused))]
+          (is (not (zero? (:exit refused))))
+          (is (str/includes? diagnostic first-id))
+          (is (str/includes? diagnostic second-id))
+          (is (str/includes? diagnostic "explicitly invites approval"))
+          (is (fs/regular-file? pending))))
+      (write-file answer (str "Send \"approve " first-id "\".\n"))
+      (let [answered (run {:dir forge}
+                          command "answer" request-id (str answer)
+                          "--approve-route-card" first-id
+                          "--without-quick-reply")
+            row (get (into {} (map (juxt :id identity)
+                                   (:chat (web-state forge))))
+                     request-id)]
+        (is (zero? (:exit answered)) (:err answered))
+        (is (= first-id (get-in row [:actions 0 :proposal_id])))))))
+
 (deftest answering-challenges-an-unspecified-pending-route-proposal
   ;; Given a response that names one pending local route-card proposal
   ;; When it omits the structured action
@@ -3266,7 +3450,7 @@
     (setup-pack! forge ["specifier"])
     (fs/create-dirs (fs/path forge "projects" "alpha-app"))
     (let [proposal-id (route-proposal! forge "alpha-app" "next-card")
-          text (str "Proposed `" proposal-id "`; reply approve.\n")
+          text (str "Proposed `" proposal-id "`; the decision remains open.\n")
           _ (write-file answer text)
           request-id "req-legacy-text-only"]
       (write-pending-chat!

@@ -320,8 +320,17 @@
 
 (def max-route-candidates 20)
 
+(defn proposal-token-value [value]
+  (some-> value
+          str/trim
+          (str/replace #"[.,;!?]+$" "")
+          not-empty))
+
 (defn response-route-proposal-ids [text]
-  (vec (distinct (re-seq standalone-route-proposal-id-re (or text "")))))
+  (->> (re-seq standalone-route-proposal-id-re (or text ""))
+       (keep proposal-token-value)
+       distinct
+       vec))
 
 (defn route-proposal-descriptor [forge proposal-id proposal]
   (try
@@ -392,6 +401,63 @@
                             :task_name (action-text (:task_name action) 120)})))))))
          vec)
     []))
+
+(def explicit-send-approve-invitation-re
+  #"(?i)(?<!not )(?<!never )(?<!don't )(?<!don’t )(?<!do not )\b(?:send|reply)\s+[\"“”']?\s*approve\s+(proposal-[A-Za-z0-9][A-Za-z0-9._~:-]{0,150})")
+
+(def explicit-approve-if-want-invitation-re
+  #"(?i)\bapprove\s+(proposal-[A-Za-z0-9][A-Za-z0-9._~:-]{0,150})\s*[,.!]?\s+if\s+you\s+want\b")
+
+(def reply-approve-invitation-re
+  #"(?i)(?<!not )(?<!never )(?<!don't )(?<!don’t )(?<!do not )\breply\s+approve\b")
+
+(defn explicit-approval-invitation-ids [text]
+  (let [direct (mapcat
+                (fn [pattern]
+                  (keep (comp proposal-token-value second)
+                        (re-seq pattern (or text ""))))
+                [explicit-send-approve-invitation-re
+                 explicit-approve-if-want-invitation-re])
+        paragraph (mapcat
+                   (fn [block]
+                     (when (re-find reply-approve-invitation-re block)
+                       (keep proposal-token-value
+                             (response-route-proposal-ids block))))
+                   (str/split (or text "") #"(?:\r?\n[ \t]*){2,}"))]
+    (->> (concat direct paragraph)
+         distinct
+         sort
+         vec)))
+
+(defn pending-approval-invitation-candidates [root text]
+  (let [all (pending-route-proposal-candidates root text)
+        invited (set (explicit-approval-invitation-ids text))]
+    (->> all
+         (filter #(contains? invited (:proposal_id %)))
+         vec)))
+
+(defn approval-invitation-challenge! [id candidates]
+  (let [shown (take max-route-candidates candidates)
+        choices (str/join
+                 "\n"
+                 (map (fn [{:keys [proposal_id task_name]}]
+                        (str "  --approve-route-card " proposal_id
+                             "  ; " task_name))
+                      shown))
+        omitted (- (count candidates) (count shown))]
+    (exit!
+     1
+     (str "Approval action required before answering " id ".\n"
+          "The response explicitly invites approval for "
+          (count candidates) " pending local proposal(s):\n"
+          choices
+          (when (pos? omitted)
+            (str "\n  ... and " omitted
+                 " more; reduce the response to one invited proposal."))
+          "\nAttach exactly one matching action with --approve-route-card "
+          "<proposal-id>.\n"
+          "--without-route-card-action is not allowed for an approval "
+          "invitation; rewrite genuinely discussion-only text instead."))))
 
 (defn render-request
   [{:strs [id status body response created_at updated_at role
@@ -803,10 +869,18 @@
    reply-with without-quick-reply]
   (let [src (find-pending root id)
         text (str/trim (slurp (str answer-file)))
+        route-candidates (pending-route-proposal-candidates root text)
+        invited-candidates (pending-approval-invitation-candidates root text)
         route-action (when-not (str/blank? approve-route-card)
                        (safe-route-proposal! root approve-route-card))
         reply-descriptor (when reply-with (reply-action reply-with))
         action (or route-action reply-descriptor)
+        _ (when (seq invited-candidates)
+            (when-not (and (= 1 (count invited-candidates))
+                           route-action
+                           (= (:proposal_id (first invited-candidates))
+                              (:proposal_id route-action)))
+              (approval-invitation-challenge! id invited-candidates)))
         _ (when route-action
             (response-proposal-action! text (:proposal_id route-action)))
         _ (when (and (nil? action) (not without-quick-reply))
@@ -814,8 +888,9 @@
               (quick-reply-challenge! id instruction)))
         candidates (when (and (nil? action)
                               (not without-route-card-action)
-                              (nil? reply-descriptor))
-                     (pending-route-proposal-candidates root text))]
+                              (nil? reply-descriptor)
+                              (empty? invited-candidates))
+                     route-candidates)]
     (when (seq candidates)
       (route-action-challenge! id candidates))
     (complete-pending-request! root id src answer-file action)))
