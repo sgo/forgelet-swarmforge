@@ -1,6 +1,6 @@
 {:paths ["test" "swarmforge/scripts"]
  :tasks
- {test {:doc "Run helper tests and dashboard Playwright tests"
+ {test {:doc "Run helper tests, dashboard Playwright tests, and required projection E2E"
         :task (do
                 (require 'clojure.test)
                 (require 'swarmforge.layer-gate-test)
@@ -45,6 +45,14 @@
                       (binding [*out* *err*]
                         (println "Dashboard tests failed. If Chromium is missing, install it with:")
                         (println "  cd test/dashboard && npx playwright install chromium"))
+                      (System/exit (or (:exit result) 1))))
+                  (let [result (babashka.process/shell
+                                {:continue true}
+                                "bash"
+                                "qa/serve-bounded-dashboard-state-projections.sh")]
+                    (when-not (zero? (:exit result))
+                      (binding [*out* *err*]
+                        (println "Required dashboard projection E2E failed."))
                       (System/exit (or (:exit result) 1)))))
                 (System/exit 0))}
   coverage:discover {:doc "Verify Cloverage resolves every Babashka helper source"

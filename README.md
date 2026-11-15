@@ -648,6 +648,30 @@ generation latency must not decide Family reachability: a slow snapshot can
 leave the previous good state in place while health remains independently
 available.
 
+### Dashboard state reuse and automation projection
+
+`GET /api/state` keeps its existing response shape. The dashboard builds one
+authoritative snapshot per root and reuses it, plus the rendered state body, for
+750 ms. Concurrent misses join one promise-backed build. A successful dashboard
+write invalidates that root synchronously before its success response, while
+direct workspace changes expire through the same freshness bound. Cache keys
+are process-local and root-isolated; no state crosses dashboard processes.
+
+`GET /api/automation-state` returns the bounded `automation-v1` projection used
+by automation consumers. It carries Family/project identity, approvals,
+resolved approvals, legacy and typed clarification lifecycle facts, lanes,
+cards and bounded activity facts. Approval review bodies, chat/clarification
+bodies, pane status text, dashboard URLs, workspace paths and unrelated project
+state are excluded. Every collection has a fixed maximum plus `count` and
+`truncated`; project and card order follows the authoritative board order.
+
+State responses report `X-SwarmForge-Projection`, `X-SwarmForge-Cache`
+(`hit`, `miss` or `coalesced`) and `X-SwarmForge-Build-Ms`. Process metrics hold
+safe aggregate request/hit/miss/coalesced/build/failure counts, latest build
+duration and response bytes, and counts keyed only by bounded invalidation
+reason. A failed refresh removes the old entry and returns a bounded 502 instead
+of serving stale success.
+
 ### Lieutenant activity markers
 
 Lieutenant activity is classified from explicit markers in the bounded pane

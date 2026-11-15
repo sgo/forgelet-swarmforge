@@ -2,8 +2,8 @@
  :stages
  [{:name "spec"
    :approval :operator
-   :spec ["tasks/*.md"]
-   :stamp ["tasks"]}
+   :spec ["tasks/*.md" "features/*.feature"]
+   :stamp ["tasks" "features"]}
   {:name "code"
    :runs [["bb" "test"]]
    :evidence []
@@ -19,6 +19,8 @@
            "close-swarm"
            "devbox"
            "swarmforge"
+           "features"
+           "qa"
            "test/layer_coverage.clj"
            "test/swarmforge"
            "test/dashboard/dashboard.spec.js"

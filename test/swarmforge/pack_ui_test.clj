@@ -5,7 +5,8 @@
             [clojure.java.shell :as sh]
             [clojure.set :as set]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is run-tests use-fixtures]]))
+            [clojure.test :refer [deftest is run-tests use-fixtures]]
+            [pack-web :as web]))
 
 (def six-pack-roles ["specifier" "coder" "cleaner" "architect" "hardender" "QA"])
 
@@ -304,6 +305,14 @@
 
 (defn web-state [root]
   (json/parse-string (:out (pack-web root true "--test-state" (str root))) true))
+
+(defn direct-response
+  [root method uri body]
+  (web/handle-request root {:method method :uri uri :body body}))
+
+(defn direct-json
+  [root uri]
+  (json/parse-string (:body (direct-response root "GET" uri nil)) true))
 
 (defn paged-web-state [root query]
   (json/parse-string
@@ -794,6 +803,362 @@
 
 
 
+
+(deftest dashboard-automation-projection-reuses-a-bounded-cached-build
+  ;; Given a project dashboard with a card
+  ;; When the automation projection is read twice in the freshness window
+  ;; Then one snapshot and projection are built and both responses are equal
+  (let [root (doto (tmp-dir) setup-pack!)
+        _ (create-task root "cached-card" "specifier")
+        _ (write-file
+           (fs/path root ".swarmforge" "handoffs" "pending_approval"
+                    "approval-one.handoff")
+           (str "from: specifier\n"
+                "to: architect\n"
+                "task_id: task-cached\n"
+                "task: cached-card\n"
+                "kind: stage-review\n"
+                "artifacts: features/cached.feature\n"
+                "\n"
+                "approval body must not escape\n"))
+        _ (web/record-resolution! root "approval-resolved"
+                                  "resolved-card" "approved")
+        _ (web/create-chat-clarification!
+           root "clar-typed-cached" "typed clarification body" nil)
+        _ (write-file
+           (fs/path root ".swarmforge" "dashboard" "clarifications" "pending"
+                    "clar-legacy-cached.request")
+           (str "id: clar-legacy-cached\n"
+                "status: pending\n"
+                "role: specifier\n"
+                "created_at: 2026-01-01T00:00:00Z\n"
+                "\n"
+                "legacy clarification body\n"))]
+    (try
+      (web/reset-dashboard-cache!)
+      (binding [web/*dashboard-cache-now-ms* 1000]
+        (let [first-response (direct-response root "GET" "/api/automation-state" nil)
+              second-response (direct-response root "GET" "/api/automation-state" nil)
+              state (json/parse-string (:body first-response) true)
+              metrics @web/dashboard-cache-metrics]
+          (is (= 200 (:status first-response)))
+          (is (= 200 (:status second-response)))
+          (is (= (:body first-response) (:body second-response)))
+          (is (= "miss"
+                 (get-in first-response [:headers "X-SwarmForge-Cache"])))
+          (is (= "hit"
+                 (get-in second-response [:headers "X-SwarmForge-Cache"])))
+          (is (= web/dashboard-automation-projection
+                 (:projection state)))
+          (is (= "project" (get-in state [:identity :kind])))
+          (is (= [(str (fs/file-name root))]
+                 (get-in state [:identity :all_projects :items])))
+          (is (= 1 (get-in state [:projects :count])))
+          (is (= ["cached-card"]
+                 (mapv :name
+                       (get-in state [:projects :items 0 :cards :items]))))
+          (is (= {:count 1
+                  :truncated false
+                  :items [{:id "approval-one"
+                           :gate "spec → architect"
+                           :task_id "task-cached"
+                           :task "cached-card"
+                           :kind "stage-review"
+                           :has_reviews false}]}
+                 (:approvals state)))
+          (is (= ["approval-resolved"]
+                 (mapv :id (get-in state [:resolved_approvals :items]))))
+          (is (= ["clar-legacy-cached"]
+                 (mapv :id (get-in state [:clarifications :legacy :items]))))
+          (is (= "clar-typed-cached"
+                 (get-in state [:clarifications :typed :items 0
+                                :clarification_id])))
+          (is (= "specifier"
+                 (get-in state [:projects :items 0 :activity :items 0 :role])))
+          (is (not (contains? (get-in state [:clarifications :typed :items 0])
+                              :body)))
+          (is (not (contains? (get-in state [:clarifications :legacy :items 0])
+                              :response)))
+          (is (not (contains? state :chat)))
+          (is (not (str/includes? (:body first-response)
+                                  "Integrate HTW stories")))
+          (is (not (str/includes? (:body first-response)
+                                  "clarification body")))
+          (is (not (str/includes? (:body first-response)
+                                  "features/cached.feature")))
+          (is (>= (:hits metrics) 1))
+          (is (>= (:builds metrics) 2))
+          (is (= (count (.getBytes (:body second-response) "UTF-8"))
+                 (:last_response_bytes metrics))))))))
+
+(deftest dashboard-cache-coalesces-concurrent-snapshot-builds
+  ;; Given one slow authoritative snapshot build
+  ;; When two callers miss in the same freshness window
+  ;; Then one builds and the other waits for and receives that same result
+  (let [root (doto (tmp-dir) setup-pack!)
+        started (promise)
+        release (promise)
+        builds (atom 0)
+        first-call (atom nil)
+        second-call (atom nil)]
+    (try
+      (web/reset-dashboard-cache!)
+      (binding [web/*dashboard-cache-now-ms* 1000]
+        (with-redefs [web/build-authoritative-dashboard-state
+                      (fn [_]
+                        (swap! builds inc)
+                        (deliver started true)
+                        @release
+                        {:coalesced true})]
+          (reset! first-call
+                  (future (web/cached-dashboard-snapshot root)))
+          (is (deref started 2000 false))
+          (reset! second-call
+                  (future (web/cached-dashboard-snapshot root)))
+          (loop [waited 0]
+            (when (and (zero? (:coalesced @web/dashboard-cache-metrics))
+                       (< waited 2000))
+              (Thread/sleep 20)
+              (recur (+ waited 20))))
+          (deliver release true)
+          (let [first-result @(deref first-call)
+                second-result @(deref second-call)
+                metrics @web/dashboard-cache-metrics]
+            (is (= 1 @builds))
+            (is (= "miss" (:cache_status first-result)))
+            (is (= "coalesced" (:cache_status second-result)))
+            (is (= (:value first-result) (:value second-result)))
+            (is (= 1 (:misses metrics)))
+            (is (= 1 (:coalesced metrics)))
+            (is (= 1 (:builds metrics))))))
+      (finally
+        (deliver release true)
+        (when-let [job @first-call]
+          (future-cancel job))
+        (when-let [job @second-call]
+          (future-cancel job))
+        (web/reset-dashboard-cache!)))))
+
+(deftest dashboard-cache-invalidates-successful-writes-before-return
+  ;; Given a warm automation projection
+  ;; When a dashboard task write succeeds or a malformed write fails
+  ;; Then only success invalidates synchronously and the next read reflects it
+  (let [root (doto (tmp-dir) setup-pack!)]
+    (try
+      (web/reset-dashboard-cache!)
+      (binding [web/*dashboard-cache-now-ms* 1000]
+        (direct-json root "/api/automation-state")
+        (let [failed (direct-response
+                      root "POST" "/api/tasks"
+                      (json/generate-string {:project "agent"}))]
+          (is (= 400 (:status failed)))
+          (is (= {} (:invalidations @web/dashboard-cache-metrics))))
+        (let [written (direct-response
+                       root "POST" "/api/tasks"
+                       (json/generate-string
+                        {:name "mutation-card" :text "write it"}))]
+          (is (= 200 (:status written)))
+          (is (= 1 (get-in @web/dashboard-cache-metrics
+                           [:invalidations "task-write"])))
+          (let [response (direct-response root "GET" "/api/automation-state" nil)
+                state (json/parse-string (:body response) true)]
+            (is (= "miss"
+                   (get-in response [:headers "X-SwarmForge-Cache"])))
+            (is (some #(= "mutation-card" (:name %))
+                      (get-in state [:projects :items 0 :cards :items]))))))
+      (finally
+        (web/reset-dashboard-cache!)))))
+
+(deftest dashboard-cache-expires-for-external-changes-and-isolates-roots
+  ;; Given two warm roots and a direct workspace-file change in one
+  ;; When their freshness windows advance
+  ;; Then the changed root refreshes after the bound and the other stays cached
+  (let [first-root (doto (tmp-dir) setup-pack!)
+        second-root (doto (tmp-dir) setup-pack!)]
+    (try
+      (web/reset-dashboard-cache!)
+      (binding [web/*dashboard-cache-now-ms* 1000]
+        (direct-json first-root "/api/automation-state")
+        (direct-json second-root "/api/automation-state"))
+      (create-task first-root "external-card" "specifier")
+      (binding [web/*dashboard-cache-now-ms* 1200]
+        (is (empty?
+             (get-in (direct-json first-root "/api/automation-state")
+                     [:projects :items 0 :cards :items]))))
+      (binding [web/*dashboard-cache-now-ms* 1700]
+        (web/invalidate-dashboard-state! second-root "test-refresh")
+        (direct-json second-root "/api/automation-state"))
+      (binding [web/*dashboard-cache-now-ms* 1800]
+        (let [refreshed (direct-response first-root "GET"
+                                         "/api/automation-state" nil)
+              untouched (direct-response second-root "GET"
+                                         "/api/automation-state" nil)]
+          (is (= "miss" (get-in refreshed [:headers "X-SwarmForge-Cache"])))
+          (is (= ["external-card"]
+                 (mapv :name
+                       (get-in (json/parse-string (:body refreshed) true)
+                               [:projects :items 0 :cards :items]))))
+          (is (= "hit" (get-in untouched [:headers "X-SwarmForge-Cache"])))))
+      (finally
+        (web/reset-dashboard-cache!)))))
+
+(deftest dashboard-projection-age-cannot-outlive-its-source-snapshot
+  ;; Given a snapshot built before its rendered projection
+  ;; When the source snapshot reaches the freshness bound
+  ;; Then the projection expires at the same point instead of extending it
+  (let [root (doto (tmp-dir) setup-pack!)]
+    (try
+      (web/reset-dashboard-cache!)
+      (binding [web/*dashboard-cache-now-ms* 1000]
+        (web/cached-dashboard-snapshot root))
+      (binding [web/*dashboard-cache-now-ms* 1100]
+        (direct-json root "/api/automation-state"))
+      (binding [web/*dashboard-cache-now-ms* 1751]
+        (let [response (direct-response root "GET"
+                                        "/api/automation-state" nil)]
+          (is (= "miss" (get-in response [:headers "X-SwarmForge-Cache"])))))
+      (finally
+        (web/reset-dashboard-cache!)))))
+
+(deftest dashboard-cache-invalidates-one-family-without-crossing-roots
+  ;; Given two warm Family roots and one changed project in the first Family
+  ;; When the change succeeds through the dashboard
+  ;; Then the first Family rebuilds and the second Family remains a cache hit
+  (let [first-family (doto (tmp-dir) (setup-pack! ["lieutenant"]))
+        second-family (doto (tmp-dir) (setup-pack! ["lieutenant"]))]
+    (doseq [family [first-family second-family]]
+      (let [project (fs/path family "projects" "alpha")]
+        (fs/create-dirs (fs/path project ".swarmforge" "board"))
+        (write-file (fs/path project ".swarmforge" "roles.tsv")
+                    (format "agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n"
+                            project)))
+      (write-file (fs/path family ".swarmforge" "open-projects") "alpha\n")
+      (write-file (fs/path family "projects" "alpha" ".swarmforge" "board"
+                           "tasks.tsv") ""))
+    (try
+      (web/reset-dashboard-cache!)
+      (binding [web/*dashboard-cache-now-ms* 1000]
+        (direct-json first-family "/api/automation-state")
+        (direct-json second-family "/api/automation-state")
+        (let [written (direct-response
+                       first-family "POST" "/api/tasks"
+                       (json/generate-string
+                        {:project "alpha"
+                         :name "family-card"
+                         :text "family mutation"}))
+              first-read (direct-response first-family "GET"
+                                          "/api/automation-state" nil)
+              second-read (direct-response second-family "GET"
+                                           "/api/automation-state" nil)
+              first-state (json/parse-string (:body first-read) true)]
+          (is (= 200 (:status written)))
+          (is (= "miss" (get-in first-read [:headers "X-SwarmForge-Cache"])))
+          (is (= "hit" (get-in second-read [:headers "X-SwarmForge-Cache"])))
+          (is (= ["family-card"]
+                 (mapv :name
+                       (get-in first-state
+                               [:projects :items 0 :cards :items]))))))
+      (finally
+        (web/reset-dashboard-cache!)))))
+
+(deftest dashboard-automation-projection-enforces-fixed-collection-bounds
+  ;; Given a project board larger than the card projection limit
+  ;; When its automation projection is built
+  ;; Then the projection reports the full count and returns only the bound
+  (let [root (doto (tmp-dir) setup-pack!)
+        board (fs/path root ".swarmforge" "board" "tasks.tsv")
+        rows (mapv (fn [index]
+                     (str "card-" index "\tspecifier\t"
+                          "2026-01-01T00:00:00Z\t2026-01-01T00:00:00Z\t"
+                          "task-" index "\t0"))
+                   (range 250))]
+    (write-file board (str (str/join "\n" rows) "\n"))
+    (try
+      (web/reset-dashboard-cache!)
+      (binding [web/*dashboard-cache-now-ms* 1000]
+        (let [state (direct-json root "/api/automation-state")
+              cards (get-in state [:projects :items 0 :cards])]
+          (is (= 250 (:count cards)))
+          (is (true? (:truncated cards)))
+          (is (= 200 (count (:items cards))))
+          (is (= "card-0" (get-in cards [:items 0 :name])))))
+      (finally
+        (web/reset-dashboard-cache!)))))
+
+(deftest dashboard-cache-never-serves-a-stale-success-after-failed-refresh
+  ;; Given a warm projection
+  ;; When its authoritative files become malformed after expiry
+  ;; Then the next read fails closed and a repaired read builds fresh success
+  (let [root (doto (tmp-dir) setup-pack!)
+        roles (fs/path root ".swarmforge" "roles.tsv")]
+    (try
+      (web/reset-dashboard-cache!)
+      (binding [web/*dashboard-cache-now-ms* 1000]
+        (direct-json root "/api/automation-state"))
+      (write-file roles
+                  (format "agent\tworker\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n"
+                          root))
+      (binding [web/*dashboard-cache-now-ms* 1800]
+        (let [failed (direct-response root "GET" "/api/automation-state" nil)]
+          (is (= 502 (:status failed)))
+          (is (< (count (:body failed)) 300))
+          (is (not (str/includes? (:body failed) ":projects")))
+          (is (pos? (:failures @web/dashboard-cache-metrics)))))
+      (write-file roles
+                  (format "agent\tmaster\t%s\tswarmforge-agent\tAgent\tcodex\ttask\n"
+                          root))
+      (binding [web/*dashboard-cache-now-ms* 1900]
+        (let [recovered (direct-response root "GET"
+                                         "/api/automation-state" nil)]
+          (is (= 200 (:status recovered)))
+          (is (= "miss" (get-in recovered [:headers "X-SwarmForge-Cache"])))))
+      (finally
+        (web/reset-dashboard-cache!)))))
+
+(deftest dashboard-automation-projection-is-bounded-on-a-large-family
+  ;; Given the Saibill-scale Family fixture
+  ;; When the automation projection is built and the full state is still read
+  ;; Then the projection is bounded and the existing state contract remains
+  (let [forge (doto (tmp-dir) seed-dashboard-scale-fixture!)]
+    (try
+      (web/reset-dashboard-cache!)
+      (binding [web/*dashboard-cache-now-ms* 1000]
+        (let [started (System/nanoTime)
+              response (direct-response forge "GET" "/api/automation-state" nil)
+              elapsed-ms (long (/ (- (System/nanoTime) started) 1000000.0))
+              state (json/parse-string (:body response) true)
+              projects (get-in state [:projects :items])
+              cards (reduce + 0 (map #(get-in % [:cards :count]) projects))
+              builds-before (:builds @web/dashboard-cache-metrics)
+              hits-before (:hits @web/dashboard-cache-metrics)
+              repeat-started (System/nanoTime)
+              repeated (vec (repeatedly
+                             20 #(direct-response forge "GET"
+                                                  "/api/automation-state" nil)))
+              repeat-elapsed (long (/ (- (System/nanoTime) repeat-started)
+                                      1000000.0))
+              repeated-metrics @web/dashboard-cache-metrics
+              full (direct-json forge "/api/state")]
+          (is (= 200 (:status response)))
+          (is (< elapsed-ms 1500))
+          (is (< (count (.getBytes (:body response) "UTF-8")) 500000))
+          (is (= 13 (get-in state [:identity :open_projects :count])))
+          (is (= 13 (count projects)))
+          (is (= 420 cards))
+          (is (every? #(<= 0 (get-in % [:cards :count]) 200) projects))
+          (is (not (str/includes? (:body response) "Scale fixture chat record")))
+          (is (not (str/includes? (:body response) "dashboard_url")))
+          (is (not (str/includes? (:body response) "status_line")))
+          (is (not (str/includes? (:body response) (str forge))))
+          (is (< repeat-elapsed 500))
+          (is (= builds-before (:builds repeated-metrics)))
+          (is (= (+ hits-before 20) (:hits repeated-metrics)))
+          (is (every? #(= (:body response) (:body %)) repeated))
+          (is (= 13 (count (:projects full))))
+          (is (= 450 (count (:chat full))))
+          (is (not (contains? full :projection)))))
+      (finally
+        (web/reset-dashboard-cache!)))))
 
 (deftest pack-web-post-task-creates-a-card-in-the-master-lane
   ;; Given a pack whose master role is coder

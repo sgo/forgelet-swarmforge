@@ -23,7 +23,7 @@ The stage list is in `stages.edn`.
 
 - `spec` records the task note under `tasks/`.
 - `code` runs `bb test`, the complete layer suite including dashboard
-  Playwright tests.
+  Playwright tests and the required bounded-projection E2E procedure.
 - `clean` runs `bb crap`, the in-process coverage suite and CRAP measurement
   for the Babashka helpers. The gates stay separate because CRAP instruments
   only `swarmforge.coverage-in-process-test`; it does not run the full suite.

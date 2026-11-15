@@ -1,0 +1,5 @@
+{:version 1
+ :cards
+ {"serve-bounded-dashboard-state-projections"
+  {:procedure "qa/serve-bounded-dashboard-state-projections.md"
+   :script "qa/serve-bounded-dashboard-state-projections.sh"}}}

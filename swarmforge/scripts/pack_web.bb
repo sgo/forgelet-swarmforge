@@ -66,6 +66,7 @@
 (def ^:dynamic *sync-teardown?* false)
 (def ^:dynamic *state-cache* nil)
 (def ^:dynamic *state-metrics* nil)
+(def ^:dynamic *dashboard-cache-now-ms* nil)
 (def teardown-delay-ms 250)
 (def pane-capture-lines 2000)
 (def pane-heat (atom {}))
@@ -73,6 +74,22 @@
 (def pane-status-lines (atom {}))
 (def lieutenant-activity-history (atom {}))
 (def ^:dynamic *lieutenant-activity-context* nil)
+(def dashboard-cache-ttl-ms 750)
+(def dashboard-automation-projection "automation-v1")
+(defonce dashboard-state-cache (atom {}))
+(defonce dashboard-state-epochs (atom {}))
+(defonce dashboard-cache-metrics
+  (atom {:projection dashboard-automation-projection
+         :hits 0
+         :misses 0
+         :coalesced 0
+         :requests 0
+         :builds 0
+         :failures 0
+         :last_build_ms 0
+         :last_response_bytes 0
+         :last_invalidation_reason nil
+         :invalidations {}}))
 
 (defn state-metric! [kind]
   (when *state-metrics*
@@ -1856,15 +1873,308 @@
      :tasks []
      :work_in_flight (vec (mapcat :work_in_flight projects))}))
 
-(defn api-state [root]
-  (if *state-cache*
+(defn dashboard-cache-root [root]
+  (str (fs/absolutize root)))
+
+(defn dashboard-cache-now []
+  (or *dashboard-cache-now-ms* (System/currentTimeMillis)))
+
+(defn dashboard-cache-metric! [key]
+  (swap! dashboard-cache-metrics
+         #(-> %
+              (update :requests (fnil inc 0))
+              (update key (fnil inc 0)))))
+
+(defn reset-dashboard-cache!
+  []
+  (reset! dashboard-state-cache {})
+  (reset! dashboard-state-epochs {})
+  (reset! dashboard-cache-metrics
+          {:projection dashboard-automation-projection
+           :hits 0
+           :misses 0
+           :coalesced 0
+           :requests 0
+           :builds 0
+           :failures 0
+           :last_build_ms 0
+           :last_response_bytes 0
+           :last_invalidation_reason nil
+           :invalidations {}}))
+
+(defn invalidate-dashboard-state! [root reason]
+  (let [root-key (dashboard-cache-root root)
+        safe-reason (or (not-empty (str reason)) "dashboard-write")]
+    (swap! dashboard-state-epochs update root-key (fnil inc 0))
+    (swap! dashboard-state-cache
+           (fn [cache]
+             (into {}
+                   (remove (fn [[[cached-root _ _] _]]
+                             (= cached-root root-key)))
+                   cache)))
+    (swap! dashboard-cache-metrics
+           #(-> %
+                (assoc :last_invalidation_reason safe-reason)
+                (update-in [:invalidations safe-reason] (fnil inc 0))))
+    true))
+
+(defn dashboard-cache-fresh? [entry epoch now]
+  (and entry
+       (not (:building entry))
+       (= epoch (:epoch entry))
+       (contains? entry :built-at)
+       (<= 0 (- now (:built-at entry)))
+       (< (- now (:built-at entry)) dashboard-cache-ttl-ms)))
+
+(defn bounded-dashboard-build-error [kind]
+  (ex-info (str "Authoritative dashboard " (name kind) " build failed.")
+           {:http-status 502}))
+
+(defn cached-dashboard-task
+  [root kind id builder]
+  (loop []
+    (let [root-key (dashboard-cache-root root)
+          epoch (get @dashboard-state-epochs root-key 0)
+          now (dashboard-cache-now)
+          cache-key [root-key kind id]
+          decision (volatile! nil)]
+      (swap! dashboard-state-cache
+             (fn [cache]
+               (let [entry (get cache cache-key)]
+                 (cond
+                   (dashboard-cache-fresh? entry epoch now)
+                   (do
+                     (vreset! decision [:hit entry])
+                     cache)
+
+                   (and (:building entry)
+                        (= epoch (:epoch entry)))
+                   (do
+                     (vreset! decision [:coalesced (:building entry)])
+                     cache)
+
+                   :else
+                   (let [promise (promise)]
+                     (vreset! decision [:miss epoch promise])
+                     (assoc cache cache-key
+                            {:epoch epoch :building promise}))))))
+      (let [[mode first second] @decision]
+        (case mode
+          :hit
+          (do
+            (dashboard-cache-metric! :hits)
+            (assoc first :cache_status "hit"))
+
+          :coalesced
+          (do
+            (dashboard-cache-metric! :coalesced)
+            (let [built @first]
+              (if (:error built)
+                (throw (:error built))
+                (if (= epoch (get @dashboard-state-epochs root-key 0))
+                  (assoc built :cache_status "coalesced")
+                  (recur)))))
+
+          :miss
+          (let [epoch first
+                promise second
+                started (System/nanoTime)]
+            (dashboard-cache-metric! :misses)
+            (let [result
+                  (try
+                    (let [value (builder)
+                          elapsed (long (/ (- (System/nanoTime) started) 1000000.0))
+                          built (assoc value
+                                       :epoch epoch
+                                       :built-at (or (:built_at value)
+                                                     (dashboard-cache-now))
+                                       :build_ms elapsed)
+                          current-epoch (get @dashboard-state-epochs root-key 0)]
+                      (swap! dashboard-cache-metrics
+                             #(-> %
+                                  (update :builds (fnil inc 0))
+                                  (assoc :last_build_ms elapsed)))
+                      (if (= epoch current-epoch)
+                        (swap! dashboard-state-cache assoc cache-key built)
+                        (swap! dashboard-state-cache
+                               (fn [cache]
+                                 (if (= promise
+                                        (get-in cache [cache-key :building]))
+                                   (dissoc cache cache-key)
+                                   cache))))
+                      (deliver promise built)
+                      (if (= epoch current-epoch)
+                        (assoc built :cache_status "miss")
+                        ::retry))
+                    (catch Throwable error
+                      (let [failure (bounded-dashboard-build-error id)]
+                        (swap! dashboard-cache-metrics
+                               update :failures (fnil inc 0))
+                        (swap! dashboard-state-cache
+                               (fn [cache]
+                                 (if (= promise
+                                        (get-in cache [cache-key :building]))
+                                   (dissoc cache cache-key)
+                                   cache)))
+                        (deliver promise {:epoch epoch :error failure})
+                        (throw failure))))]
+              (if (= result ::retry)
+                (recur)
+                result))))))))
+
+(defn build-authoritative-dashboard-state [root]
+  (binding [*state-cache* (atom {})]
     (if (forge/forge? root)
       (forge-dashboard-state root)
-      (dashboard-state root))
-    (binding [*state-cache* (atom {})]
-      (if (forge/forge? root)
-        (forge-dashboard-state root)
-        (dashboard-state root)))))
+      (dashboard-state root))))
+
+(defn cached-dashboard-snapshot [root]
+  (cached-dashboard-task
+   root :snapshot :authoritative
+   #(hash-map :value (build-authoritative-dashboard-state root))))
+
+(defn bounded-automation-section [items limit transform]
+  (let [items (vec items)]
+    {:count (count items)
+     :truncated (> (count items) limit)
+     :items (mapv transform (take limit items))}))
+
+(def automation-approval-limit 200)
+(def automation-clarification-limit 200)
+(def automation-project-limit 64)
+(def automation-card-limit 200)
+(def automation-activity-limit 64)
+(def automation-lane-limit 64)
+(def automation-identity-limit 512)
+
+(defn automation-approval [item]
+  (cond-> (select-keys item [:id :gate :task_id :task :kind :project])
+    (contains? item :reviews)
+    (assoc :has_reviews (boolean (seq (:reviews item))))))
+
+(defn automation-card [item]
+  (select-keys item [:name :id :lane :updated_at :audit_count :batch :merging]))
+
+(defn automation-work-row [item]
+  (select-keys item [:task :tasks :batch_tasks :role :state :updated_at :activity]))
+
+(defn automation-activity [item]
+  (select-keys item [:alive :state :heat :last_changed_at]))
+
+(defn automation-clarification [item]
+  (select-keys item
+               [:id :status :role :created_at :project :author :direction :kind
+                :clarification_id :reference_id :attention :answered_at
+                :answered_by :withdrawn_at :seen_at :updated_at]))
+
+(defn typed-project-clarifications [root project]
+  (->> (list-chat root)
+       (filter #(= "clarification" (:kind %)))
+       (map #(assoc (automation-clarification %) :project project))
+       (sort-by (juxt #(str (:created_at %)) #(str (:id %))))
+       vec))
+
+(defn automation-project [item]
+  {:name (:name item)
+   :single_agent (boolean (:single_agent item))
+   :active_card (some-> (:active_card item) automation-card)
+   :idle (boolean (:idle item))
+   :lanes (bounded-automation-section (:lanes item) automation-lane-limit identity)
+   :cards (bounded-automation-section (:tasks item) automation-card-limit automation-card)
+   :activity (bounded-automation-section
+              (:work_in_flight item) automation-activity-limit automation-work-row)
+   :clarification_attention (:clarification_attention item)})
+
+(defn automation-projection [root snapshot]
+  (let [family? (forge/forge? root)
+        family-identity {:kind (if family? "family" "project")
+                         :name (str (fs/file-name root))}
+        projects (if family?
+                   (:projects snapshot)
+                   [{:name (:name family-identity)
+                     :single_agent (single-agent-project? root)
+                     :active_card (:active_card snapshot)
+                     :idle (:idle snapshot)
+                     :lanes (:lanes snapshot)
+                     :tasks (:tasks snapshot)
+                     :work_in_flight (:work_in_flight snapshot)
+                     :clarification_attention (:clarification_attention snapshot)}])
+        typed (mapcat
+               (fn [project]
+                 (typed-project-clarifications
+                  (if family?
+                    (open-project-root root (:name project))
+                    root)
+                  (:name project)))
+               projects)]
+    {:projection dashboard-automation-projection
+     :identity (assoc family-identity
+                      :all_projects
+                      (bounded-automation-section
+                       (if family?
+                         (:all_projects snapshot)
+                         [(:name family-identity)])
+                       automation-identity-limit
+                       identity)
+                      :open_projects
+                      (bounded-automation-section
+                       (if family?
+                         (:open_projects snapshot)
+                         [(:name family-identity)])
+                       automation-project-limit
+                       identity))
+     :approvals
+     (bounded-automation-section
+      (:approvals snapshot) automation-approval-limit automation-approval)
+     :resolved_approvals
+     (bounded-automation-section
+      (:resolved_approvals snapshot) automation-approval-limit automation-approval)
+     :clarifications
+     {:legacy
+      (bounded-automation-section
+       (:clarifications snapshot) automation-clarification-limit
+       automation-clarification)
+      :typed
+      (bounded-automation-section
+       typed automation-clarification-limit automation-clarification)}
+     :projects
+     (bounded-automation-section
+      projects automation-project-limit automation-project)
+     :lieutenant_activity (some-> (:lieutenant_activity snapshot) automation-activity)}))
+
+(defn cached-dashboard-state [root]
+  (cached-dashboard-task
+   root :projection "dashboard-state-v1"
+   #(let [snapshot-result (cached-dashboard-snapshot root)
+          snapshot (:value snapshot-result)]
+      {:value snapshot
+       :body (json/generate-string snapshot)
+       :built_at (:built-at snapshot-result)})))
+
+(defn cached-automation-state [root]
+  (cached-dashboard-task
+   root :projection dashboard-automation-projection
+   #(let [snapshot-result (cached-dashboard-snapshot root)
+          snapshot (:value snapshot-result)
+          value (automation-projection root snapshot)]
+      {:value value
+       :body (json/generate-string value)
+       :built_at (:built-at snapshot-result)})))
+
+(defn record-dashboard-response-bytes! [body]
+  (swap! dashboard-cache-metrics
+         assoc :last_response_bytes
+         (count (.getBytes (str body) "UTF-8"))))
+
+(defn dashboard-cache-headers [projection result]
+  {"Content-Type" "application/json"
+   "Cache-Control" "no-store"
+   "X-SwarmForge-Projection" projection
+   "X-SwarmForge-Cache" (or (:cache_status result) "miss")
+   "X-SwarmForge-Build-Ms" (str (or (:build_ms result) 0))})
+
+(defn api-state [root]
+  (:value (cached-dashboard-snapshot root)))
 
 (defn health-response []
   {:status 200
@@ -1999,44 +2309,68 @@
        (sort-by :thread_id)
        vec))
 
-(defn paged-chat-state [root pagination]
-  (let [thread-id (:thread_id pagination)
-        limit (:limit pagination)
-        boundary (when-let [cursor (:cursor pagination)]
-                   (decode-chat-cursor thread-id cursor))
-        all-general (vec (ordered-general-chat root))
-        thread-turns (filter #(= thread-id (:thread_id %)) all-general)
-        eligible (if boundary
-                   (filter #(neg? (compare (chat-order %)
-                                           (chat-order boundary)))
-                           thread-turns)
-                   thread-turns)
-        page (vec (take-last limit eligible))
-        has-more (> (count eligible) limit)
-        next-cursor (when has-more
-                      (encode-chat-cursor thread-id (first page)))
-        page-ids (set (map :id page))
-        pending (->> thread-turns
-                     (filter #(= "pending" (:status %)))
-                     (remove #(contains? page-ids (:id %)))
-                     (sort-by chat-order)
-                     vec)
-        summary (chat-conversation-summary thread-id thread-turns)
-        base (api-state root)]
-    (assoc base
-           :chat page
-           :chat_conversations (chat-conversation-summaries all-general)
-           :chat_page {:thread_id thread-id
-                       :limit limit
-                       :has_more has-more
-                       :next_cursor next-cursor
-                       :conversation summary
-                       :pending_turns pending})))
+(defn paged-chat-state
+  ([root pagination]
+   (paged-chat-state root pagination (api-state root)))
+  ([root pagination base]
+   (let [thread-id (:thread_id pagination)
+         limit (:limit pagination)
+         boundary (when-let [cursor (:cursor pagination)]
+                    (decode-chat-cursor thread-id cursor))
+         all-general (vec (ordered-general-chat root))
+         thread-turns (filter #(= thread-id (:thread_id %)) all-general)
+         eligible (if boundary
+                    (filter #(neg? (compare (chat-order %)
+                                            (chat-order boundary)))
+                            thread-turns)
+                    thread-turns)
+         page (vec (take-last limit eligible))
+         has-more (> (count eligible) limit)
+         next-cursor (when has-more
+                       (encode-chat-cursor thread-id (first page)))
+         page-ids (set (map :id page))
+         pending (->> thread-turns
+                      (filter #(= "pending" (:status %)))
+                      (remove #(contains? page-ids (:id %)))
+                      (sort-by chat-order)
+                      vec)
+         summary (chat-conversation-summary thread-id thread-turns)]
+     (assoc base
+            :chat page
+            :chat_conversations (chat-conversation-summaries all-general)
+            :chat_page {:thread_id thread-id
+                        :limit limit
+                        :has_more has-more
+                        :next_cursor next-cursor
+                        :conversation summary
+                        :pending_turns pending}))))
 
 (defn api-state-with-chat-page [root uri]
   (if-let [pagination (chat-page-parameters uri)]
     (paged-chat-state root pagination)
     (api-state root)))
+
+(defn dashboard-state-response [root uri]
+  (if-let [pagination (chat-page-parameters uri)]
+    (let [snapshot (cached-dashboard-snapshot root)
+          body (json/generate-string
+                (paged-chat-state root pagination (:value snapshot)))]
+      (record-dashboard-response-bytes! body)
+      {:status 200
+       :headers (dashboard-cache-headers "dashboard-state-page-v1" snapshot)
+       :body body})
+    (let [result (cached-dashboard-state root)]
+      (record-dashboard-response-bytes! (:body result))
+      {:status 200
+       :headers (dashboard-cache-headers "dashboard-state-v1" result)
+       :body (:body result)})))
+
+(defn automation-state-response [root]
+  (let [result (cached-automation-state root)]
+    (record-dashboard-response-bytes! (:body result))
+    {:status 200
+     :headers (dashboard-cache-headers dashboard-automation-projection result)
+     :body (:body result)}))
 
 (defn require-root! [root]
   (when (str/blank? root)
@@ -2995,9 +3329,10 @@
     (health-response)
 
     (= "/api/state" (first (str/split (or uri "") #"\?")))
-    {:status 200
-     :headers {"Content-Type" "application/json"}
-     :body (json/generate-string (api-state-with-chat-page root uri))}
+    (dashboard-state-response root uri)
+
+    (= "/api/automation-state" (first (str/split (or uri "") #"\?")))
+    (automation-state-response root)
 
     (agent-pane-role uri)
     (get-agent-pane (request-project-root root uri) uri)
@@ -3173,12 +3508,30 @@
     (post-clarification (scoped-clar-root root uri) uri body)
     :else {:status 404 :body "Not found"}))
 
+(defn dashboard-success-response? [response]
+  (<= 200 (long (or (:status response) 500)) 299))
+
+(defn dashboard-write-reason [uri]
+  (let [path (first (str/split (or uri "") #"\?"))]
+    (cond
+      (= path "/api/teardown") "teardown"
+      (str/starts-with? (or path "") "/api/projects") "project-write"
+      (str/starts-with? (or path "") "/api/tasks") "task-write"
+      (= path "/api/chat") "chat-write"
+      (str/starts-with? (or path "") "/api/approvals") "approval-write"
+      (str/starts-with? (or path "") "/api/clarifications") "clarification-write"
+      :else "dashboard-write")))
+
 (defn handle-request [root {:keys [method uri body]}]
   (try
-    (case method
-      "GET" (handle-get root uri)
-      "POST" (handle-post root uri body)
-      {:status 404 :body "Not found"})
+    (let [response (case method
+                     "GET" (handle-get root uri)
+                     "POST" (handle-post root uri body)
+                     {:status 404 :body "Not found"})]
+      (when (and (= method "POST")
+                 (dashboard-success-response? response))
+        (invalidate-dashboard-state! root (dashboard-write-reason uri)))
+      response)
     (catch Exception e
       (http-error (or (:http-status (ex-data e)) 500) (.getMessage e)))))
 
@@ -3392,6 +3745,7 @@
 
 (defn test-status-pane! [root text alive command]
   (require-root! root)
+  (invalidate-dashboard-state! root "test-pane-change")
   (binding [*pane-text* (or text "")
             *lieutenant-activity-context*
             (when (= "alive" alive)
@@ -3400,12 +3754,14 @@
 
 (defn test-status-persist! [root first-text second-text]
   (require-root! root)
+  (invalidate-dashboard-state! root "test-pane-change")
   (reset! pane-status {})
   (reset! pane-status-lines {})
   (binding [*pane-text* (or first-text "")]
     (let [first-status (:status (first (:tasks (json/parse-string
                                                 (:body (handle-request root {:method "GET" :uri "/api/state"}))
                                                 true))))]
+      (invalidate-dashboard-state! root "test-pane-change")
       (binding [*pane-text* (or second-text "")]
         (let [second-status (:status (first (:tasks (json/parse-string
                                                      (:body (handle-request root {:method "GET" :uri "/api/state"}))
@@ -3482,9 +3838,10 @@
 (defn test-health-during-slow-state! [root]
   (require-root! root)
   (let [metrics (atom {})]
-    (with-redefs [api-state (fn [_]
-                              (Thread/sleep 650)
-                              {:slow_state true})]
+    (with-redefs [build-authoritative-dashboard-state
+                  (fn [_]
+                    (Thread/sleep 650)
+                    {:slow_state true})]
       (binding [*state-metrics* metrics]
         (let [state-job (future
                           (handle-request root {:method "GET" :uri "/api/state"}))
@@ -3511,6 +3868,7 @@
         health-ms (atom [])]
     (binding [*state-metrics* metrics]
       (dotimes [_ iterations]
+        (reset-dashboard-cache!)
         (reset! metrics {})
         (let [started (System/nanoTime)
               response (handle-request root {:method "GET" :uri "/api/state"})]
