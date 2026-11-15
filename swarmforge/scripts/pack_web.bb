@@ -865,10 +865,13 @@
   #{"zsh" "bash" "sh" "dash" "ksh" "fish" "tcsh" "csh" "login" "-zsh" "-bash"})
 
 (def activity-working-pattern
-  #"(?im)^\s*(?:[•*]\s*working(?:\s*\([^)\r\n]*\))?|[✻✽✶✳]\s*.*\(esc\s+to\s+interrupt[^)\r\n]*\)|esc\s+to\s+interrupt(?:\s*[·.)-].*)?|waiting\s+for\s+response(?:\s+\d+(?:\.\d+)?s)?)\s*$")
+  #"(?im)^\s*(?:[•*]\s*working(?:\s*\([^)\r\n]*\))?|[✢✻✽✶✳]\s*.*\((?:[^)\r\n]*\bthinking\b[^)\r\n]*|esc\s+to\s+interrupt[^)\r\n]*)\)|esc\s+to\s+interrupt(?:\s*[·.)-].*)?|waiting\s+for\s+response(?:\s+\d+(?:\.\d+)?s)?)\s*$")
 
 (def activity-idle-pattern
   #"(?im)^\s*(?:[›❯]\s+ask (?:codex|claude|copilot) to do anything|\? for shortcuts|enter:send\s+esc:cancel|⏵⏵\s+bypass permissions on[^\r\n]*|ready(?: for (?:the )?next (?:task|card))?[.!]?|idle[.!]?|(?:done|completed|finished)(?: successfully)?[.!]?)\s*$")
+
+(def activity-static-idle-pattern
+  #"(?im)^\s*(?:[›❯]\s+ask (?:codex|claude|copilot) to do anything|\? for shortcuts|enter:send\s+esc:cancel|⏵⏵\s+bypass permissions on[^\r\n]*)\s*$")
 
 (def activity-token-pattern
   #"(?i)\b(?:gh[pousr]_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|sk-[A-Za-z0-9_-]{10,}|xox[baprs]-[A-Za-z0-9-]{10,}|Bearer\s+[A-Za-z0-9._~+/=-]{10,})\b")
@@ -905,45 +908,61 @@
           str/trim
           not-empty))
 
-(defn last-pattern-match [pattern text]
+(defn pattern-matches [pattern text]
   (let [matcher (re-matcher pattern text)]
-    (loop [found nil]
+    (loop [found []]
       (if (.find matcher)
-        (recur {:start (.start matcher)
-                :line (str/trim (.group matcher))})
+        (recur (conj found
+                     {:start (.start matcher)
+                      :line (str/trim (.group matcher))}))
         found))))
+
+(defn last-pattern-match [pattern text]
+  (last (pattern-matches pattern text)))
 
 (defn activity-tail-lines-for [text]
   (last-n-lines (pane-sample text nil) activity-tail-lines))
+
+(defn static-idle-marker? [line]
+  (boolean (re-find activity-static-idle-pattern (or line ""))))
 
 (defn activity-marker [text]
   (let [lines (activity-tail-lines-for text)
         tail (str/join "\n" lines)
         working (last-pattern-match activity-working-pattern tail)
         idle (last-pattern-match activity-idle-pattern tail)
-        claude-footer-idle? (and idle
+        decisive-idle (->> (pattern-matches activity-idle-pattern tail)
+                           (remove #(static-idle-marker? (:line %)))
+                           last)
+        selected (cond
+                   (nil? working) (when idle
+                                    {:state "idle" :marker idle})
+                   (nil? idle) {:state "working" :marker working}
+                   (nil? decisive-idle) {:state "working" :marker working}
+                   (>= (:start decisive-idle) (:start working))
+                   {:state "idle" :marker decisive-idle}
+                   :else {:state "working" :marker working})
+        marker (:marker selected)
+        activity-state (:state selected)
+        claude-footer-idle? (and (= activity-state "idle")
                                  (re-find #"(?i)^⏵⏵\s+bypass permissions on"
-                                          (:line idle)))
-        marker (cond
-                 (nil? working) idle
-                 (nil? idle) working
-                 claude-footer-idle? working
-                 (>= (:start idle) (:start working)) idle
-                 :else working)
+                                          (:line marker)))
         line-number (when marker
                       (count (re-seq #"\n"
                                      (subs tail 0 (:start marker)))))]
     (when marker
       (assoc marker
-             :state (if (= marker idle) "idle" "working")
+             :state activity-state
              :line-index (or line-number 0)
-             :kind (if (and (= marker idle)
-                            (re-find #"(?i)ask codex to do anything"
-                                     (:line marker)))
+             :kind (cond
+                     (and (= activity-state "idle")
+                          (re-find #"(?i)ask codex to do anything"
+                                   (:line marker)))
                      :codex-idle-prompt
-                     (if (and (= marker idle) claude-footer-idle?)
-                       :claude-permissions-footer
-                       :generic))))))
+                     claude-footer-idle?
+                     :claude-permissions-footer
+                     :else
+                     :generic)))))
 
 (defn activity-output-state [text]
   (or (:state (activity-marker text)) "unknown"))
@@ -3371,9 +3390,12 @@
                     (str "… +29 lines (ctrl + t to view transcript)\n"
                          "• Working (2s • esc to interrupt)\n")))
 
-(defn test-status-pane! [root text]
+(defn test-status-pane! [root text alive command]
   (require-root! root)
-  (binding [*pane-text* (or text "")]
+  (binding [*pane-text* (or text "")
+            *lieutenant-activity-context*
+            (when (= "alive" alive)
+              {:alive? true :command (or command "")})]
     (println (:body (handle-request root {:method "GET" :uri "/api/state"})))))
 
 (defn test-status-persist! [root first-text second-text]

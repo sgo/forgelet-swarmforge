@@ -5087,12 +5087,12 @@
       (is (nil? (:status_line fallback)))
       (is (re-matches #"\d{4}-\d\d-\d\dT.+Z" (:last_changed_at working))))))
 
-(deftest forge-lieutenant-runtime-activity-uses-the-latest-recognized-marker
-  ;; Given Codex-style working and idle markers in either order
-  ;; When the latest explicit marker is selected from the bounded tail
-  ;; Then the newest marker determines activity without exposing footer paths
+(deftest forge-lieutenant-runtime-activity-prefers-current-work-to-static-prompts
+  ;; Given Codex-style work followed by its persistent input prompt
+  ;; When active work and static chrome both occur in the bounded tail
+  ;; Then current work wins without exposing footer paths or paths from prompts
   (let [root (tmp-dir)
-        captured-idle
+        active-with-prompt
         (str "• Working (32s • esc to interrupt)\n"
              "\n"
              "› Ask Codex to do anything\n"
@@ -5103,28 +5103,46 @@
         (str "› Ask Codex to do anything\n"
              "\n"
              "• Working (1s • esc to interrupt)\n")
-        working-then-idle
+        prompt-only
+        "› Ask Codex to do anything\n"
+        completed
+        (str "• Worked for 2s\n"
+             "\n"
+             "› Ask Codex to do anything\n")
+        completed-after-working
         (str "• Working (2s • esc to interrupt)\n"
+             "Completed\n"
              "\n"
              "› Ask Codex to do anything\n")]
     (seed-mini-forge! root)
     (write-file (fs/path root ".swarmforge/roles.tsv")
                 (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tcodex\ttask\tforward-only\n"
                         root))
-    (let [idle (:activity
-                (lieutenant-activity-state
-                 root "alive" "codex" captured-idle))
+    (let [active (:activity
+                  (lieutenant-activity-state
+                   root "alive" "codex" active-with-prompt))
           working (:activity
                    (lieutenant-activity-state
                     root "alive" "codex" idle-then-working))
+          idle-only (:activity
+                     (lieutenant-activity-state
+                      root "alive" "codex" prompt-only))
           idle-again (:activity
                       (lieutenant-activity-state
-                       root "alive" "codex" working-then-idle))]
-      (is (= "idle" (:state idle)))
-      (is (= "Ask Codex to do anything" (:status_line idle)))
-      (is (not (str/includes? (:status_line idle) "forgelet-forge")))
+                       root "alive" "codex" completed))
+          completed-work (:activity
+                          (lieutenant-activity-state
+                           root "alive" "codex" completed-after-working))]
+      (is (= "working" (:state active)))
+      (is (= "Working (32s • esc to interrupt)" (:status_line active)))
+      (is (not (str/includes? (:status_line active) "forgelet-forge")))
       (is (= "working" (:state working)))
-      (is (= "idle" (:state idle-again))))))
+      (is (= "idle" (:state idle-only)))
+      (is (= "Ask Codex to do anything" (:status_line idle-only)))
+      (is (= "idle" (:state idle-again)))
+      (is (= "Ask Codex to do anything" (:status_line idle-again)))
+      (is (= "idle" (:state completed-work)))
+      (is (str/includes? (:status_line completed-work) "Completed")))))
 
 (deftest forge-lieutenant-runtime-activity-preserves-agent-markers
   ;; Given the existing Claude, Copilot and Grok marker forms
@@ -5137,10 +5155,13 @@
                         root))
     (doseq [[agent text expected]
             [["Claude" "✻ Sauteing… (esc to interrupt)\n" "working"]
+             ["Claude" "✻ Sauteing… (esc to interrupt)\n? for shortcuts\n" "working"]
              ["Claude" "? for shortcuts\n" "idle"]
              ["Copilot" "esc to interrupt · 4s\n" "working"]
+             ["Copilot" "esc to interrupt · 4s\n❯ Ask Copilot to do anything\n" "working"]
              ["Copilot" "❯ Ask Copilot to do anything\n" "idle"]
              ["Grok" "Waiting for response 3s\n" "working"]
+             ["Grok" "Waiting for response 3s\nenter:send  Esc:cancel\n" "working"]
              ["Grok" "enter:send  Esc:cancel\n" "idle"]]]
       (let [activity
             (:activity
@@ -5168,6 +5189,10 @@
         working
         (str "✻ Crunching… (esc to interrupt)\n\n"
              footer)
+        thinking-without-footer
+        "✢ Honking… (6s · ↓ 549 tokens · thinking)\n"
+        thinking-with-footer
+        (str thinking-without-footer "\n" footer)
         blank-prompt "❯ \n"]
     (seed-mini-forge! root)
     (write-file (fs/path root ".swarmforge/roles.tsv")
@@ -5182,6 +5207,12 @@
           active (:activity
                   (lieutenant-activity-state
                    root "alive" "claude" working))
+          thinking-bare (:activity
+                         (lieutenant-activity-state
+                          root "alive" "claude" thinking-without-footer))
+          thinking-active (:activity
+                           (lieutenant-activity-state
+                            root "alive" "claude" thinking-with-footer))
           unrecognized (:activity
                         (lieutenant-activity-state
                          root "alive" "claude" blank-prompt))]
@@ -5189,9 +5220,41 @@
              (select-keys bare [:alive :state :heat])))
       (is (= "idle" (:state surrounding)))
       (is (= "working" (:state active)))
+      (is (= "working" (:state thinking-bare)))
+      (is (= "working" (:state thinking-active)))
+      (is (str/includes? (:status_line thinking-active) "thinking"))
       (is (= "unknown" (:state unrecognized)))
       (is (str/includes? (:status_line bare)
                          "bypass permissions on")))))
+
+(deftest forge-lieutenant-api-state-tracks-a-current-claude-active-interval
+  ;; Given the same Lieutenant moving from idle through a thinking interval
+  ;; When /api/state is read at each point
+  ;; Then current work stays working and completed output returns to idle
+  (let [root (tmp-dir)
+        footer
+        (str "────────────────────────────────────────────\n"
+             "❯ \n"
+             "────────────────────────────────────────────\n"
+             "  Sonnet 5.5 | Context: 18% used | 7d: 1%\n"
+             "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+        state-activity
+        (fn [text]
+          (-> (pack-web-env root {} "--test-status-pane"
+                            (str root) text "alive" "claude")
+              :out
+              (json/parse-string true)
+              ((fn [state] (:lieutenant_activity state)))))]
+    (seed-mini-forge! root)
+    (write-file (fs/path root ".swarmforge/roles.tsv")
+                (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tclaude\ttask\tforward-only\n"
+                        root))
+    (is (= ["idle" "working" "working" "idle"]
+           (mapv (comp :state state-activity)
+                 [footer
+                  (str "✢ Honking… (1s · ↓ 210 tokens · thinking)\n\n" footer)
+                  (str "✢ Honking… (12s · ↓ 549 tokens · thinking)\n\n" footer)
+                  (str "✻ Crunched for 12s · done 9:11 AM\n\n" footer)])))))
 
 (deftest forge-lieutenant-runtime-activity-does-not-guess-from-transcript
   ;; Given queries, a non-empty prompt, token counters and unrelated transcript output
@@ -5211,6 +5274,10 @@
     (let [activity (:activity
                     (lieutenant-activity-state
                      root "alive" "codex" unknown-text))
+          malformed (:activity
+                     (lieutenant-activity-state
+                      root "alive" "claude"
+                      "✢ Honking… (6s · ↓ 549 tokens · thinking\n"))
           fallback (:activity
                     (lieutenant-activity-state
                      root "alive" "zsh"
@@ -5219,6 +5286,8 @@
                    (lieutenant-activity-state root "missing" "" ""))]
       (is (= "unknown" (:state activity)))
       (is (nil? (:status_line activity)))
+      (is (= "unknown" (:state malformed)))
+      (is (nil? (:status_line malformed)))
       (is (= "unavailable" (:state fallback)))
       (is (= "unavailable" (:state missing)))
       (is (nil? (:status_line fallback)))

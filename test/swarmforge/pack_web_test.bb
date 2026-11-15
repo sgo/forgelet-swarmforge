@@ -38,7 +38,9 @@
     "--test-heat-mail" (test-heat-mail! (second args))
     "--test-heat-grok" (test-heat-grok! (second args))
     "--test-heat-collapse" (test-heat-collapse! (second args))
-    "--test-status-pane" (test-status-pane! (second args) (nth args 2 nil))
+    "--test-status-pane" (test-status-pane!
+                          (second args) (nth args 2 nil)
+                          (nth args 3 nil) (nth args 4 nil))
     "--test-status-persist" (test-status-persist! (second args) (nth args 2 nil) (nth args 3 nil))
     "--test-lieutenant-activity" (test-lieutenant-activity!
                                   (second args) (nth args 2 nil)

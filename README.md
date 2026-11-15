@@ -650,11 +650,13 @@ available.
 
 ### Lieutenant activity markers
 
-Lieutenant activity is classified from the latest explicit marker in the
-bounded pane tail. A later `› Ask Codex to do anything` empty-composer prompt
-wins over an earlier Working marker, while a later Working or waiting indicator
-wins over an earlier idle prompt. The same rule covers the existing Claude,
-Copilot and Grok prompt and work markers. Marker status lines are normalized,
+Lieutenant activity is classified from explicit markers in the bounded pane
+tail. Current Working evidence wins over persistent composer and permission
+footers, including `› Ask Codex to do anything`, Claude's shortcuts or bypass
+footer, Copilot's empty composer and Grok's `enter:send` footer. A later
+non-static marker such as completion or explicit idle still determines the
+next state. Current Claude `✢ … thinking` output is working evidence, as are
+the older Claude spinner markers. Marker status lines are normalized,
 length-bounded and redacted before they enter `/api/state`.
 
 No recognized marker means `unknown`; it is not evidence of idleness. A missing
