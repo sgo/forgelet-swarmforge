@@ -1203,6 +1203,27 @@
     (when-not (str/blank? text)
       (subs text 0 (min maximum (count text))))))
 
+(def reply-action-type "reply")
+(def reply-text-max-chars 200)
+(def reply-unsafe-framing-re #"[`$<>|;&\\]")
+(def reply-control-re #"[\p{Cc}\p{Cf}]")
+(def reply-command-re
+  #"(?i)^(?:sudo\s+)?(?:rm|git|bb|sh|bash|zsh|curl|wget|gh|npm|mvn|java|node|python|ruby|perl|kill|pkill|chmod|chown|mkdir|mv|cp)\b")
+
+(defn chat-reply-text [value]
+  (let [text (str/trim (str (or value "")))]
+    (when (and (not (str/blank? text))
+               (<= (count text) reply-text-max-chars)
+               (not (re-find reply-control-re text))
+               (not (re-find reply-unsafe-framing-re text))
+               (not (re-find reply-command-re text))
+               (not (re-find route-absolute-path-re text))
+               (not (re-find chat-token-re text)))
+      text)))
+
+(defn chat-reply-label [text]
+  (route-action-text (str "Reply: " text) 80))
+
 (defn route-proposal-status [proposal]
   (let [status (some-> (:status proposal) name str/lower-case)]
     (cond
@@ -1279,7 +1300,14 @@
              :available available?))))
 
 (defn chat-action [root headers]
-  (let [stored-status (some-> (get headers "action_status")
+  (let [route-fields? (some #(not (str/blank? (str (or (get headers %) ""))))
+                            ["action_proposal_id" "action_family"
+                             "action_project" "action_task_name"])
+        reply-fields? (not (str/blank? (str (or (get headers
+                                                       "action_reply_text")
+                                                ""))))
+        mixed? (and route-fields? reply-fields?)
+        stored-status (some-> (get headers "action_status")
                               str/trim str/lower-case)
         stored-status (when (contains? #{"pending" "consumed" "invalidated"
                                           "superseded" "unavailable"}
@@ -1292,17 +1320,36 @@
                   (when (and value (re-matches route-action-family-re value)) value))
         task-name (route-action-text (get headers "action_task_name") 256)
         label (route-action-text (get headers "action_label") 80)
-        action (when (and (= route-card-action-type (get headers "action"))
-                          stored-status proposal-id family project task-name label)
-                 {:type route-card-action-type
-                  :proposal_id proposal-id
-                  :family family
-                  :project project
-                  :task_name task-name
-                  :label label
-                  :status stored-status})]
-    (when action
-      (resolve-chat-action root action))))
+        route-action
+        (when (and (= route-card-action-type (get headers "action"))
+                   stored-status proposal-id family project task-name label)
+          {:type route-card-action-type
+           :proposal_id proposal-id
+           :family family
+           :project project
+           :task_name task-name
+           :label label
+           :status stored-status})
+        reply-text (chat-reply-text (get headers "action_reply_text"))
+        reply-label (when reply-text (chat-reply-label reply-text))
+        reply-action
+        (when (and (= reply-action-type (get headers "action"))
+                   (contains? #{"pending" "consumed" "unavailable"}
+                              stored-status)
+                   reply-text
+                   (= reply-label (route-action-text
+                                   (get headers "action_label") 80)))
+          {:type reply-action-type
+           :reply_text reply-text
+           :label reply-label
+           :status stored-status
+           :available (= "pending" stored-status)})]
+    (cond
+      mixed? nil
+      (and route-action reply-action) nil
+      reply-action reply-action
+      route-action (resolve-chat-action root route-action)
+      :else nil)))
 
 (defn clarification-metadata [headers]
   (let [id (get headers "clarification_id")

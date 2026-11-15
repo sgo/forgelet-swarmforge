@@ -749,6 +749,23 @@ once by rerunning the identical answer with `--approve-route-card`; that
 backfill preserves its response, timestamps and conversation metadata. The
 answer tool records metadata only; it never approves or executes the action.
 
+Answers that appear to request a literal operator reply through
+``reply with `phrase` ``, ``reply `phrase` `` or ``respond with `phrase` ``
+must state their intent. `--reply-with <exact text>` records one bounded
+`reply` action with the exact text and a derived label.
+`--without-quick-reply` records that the wording is prose and emits no action.
+Omitting both is refused with the repair flags. Reply metadata is one line,
+control-free, length-bounded and rejects paths, credentials, shell framing and
+command-like text. It never executes or sends the phrase.
+
+The route approval and quick-reply action slots are mutually exclusive. A
+completed text-only answer may backfill one quick reply by retrying the identical
+response with `--reply-with`; retries are idempotent and preserve timestamps
+and conversation metadata. `/api/state` exposes the validated reply as
+`{type: "reply", reply_text, label, status, available}` in the existing
+`actions` array. Host action projection and app button behavior remain later
+cards.
+
 `route_card.sh propose` always writes a pending proposal and records when it was
 presented. It rejects `--approval` and `--operator-said`; approval evidence is
 accepted only by a later `commit` or machine `approve`. Words from the pane must

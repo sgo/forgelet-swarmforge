@@ -2885,6 +2885,187 @@
                      (or body "Operator request body.\n")))
     file))
 
+(deftest quick-reply-actions-require-metadata-and-preserve-exact-text
+  ;; Given an answer that asks for a literal quick reply
+  ;; When metadata is omitted, supplied, or overridden as literal prose
+  ;; Then the action is never inferred, and explicit metadata round-trips safely
+  (let [forge (tmp-dir)
+        answer (fs/path forge "tmp" "answer.txt")
+        answer-command (script "pack_dashboard_request.sh")
+        text "Authentication is complete. Reply with `connected and unlocked`.\n"]
+    (setup-pack! forge ["specifier"])
+    (write-file answer text)
+    (let [first-id "req-quick-reply"
+          first-pending (write-pending-chat! forge {:id first-id})
+          missing (run {:dir forge :ok? false}
+                       answer-command "answer" first-id (str answer))
+          diagnostic (str (:err missing) (:out missing))]
+      (is (not (zero? (:exit missing))))
+      (is (str/includes? diagnostic "--reply-with"))
+      (is (str/includes? diagnostic "--without-quick-reply"))
+      (is (str/includes? diagnostic "connected and unlocked"))
+      (is (< (count diagnostic) 1000))
+      (is (fs/regular-file? first-pending))
+
+      (let [answered (run {:dir forge}
+                          answer-command "answer" first-id (str answer)
+                          "--reply-with" "connected and unlocked")
+            done (fs/path forge ".swarmforge/dashboard/requests/done"
+                           (str first-id ".request"))
+            stored (slurp (str done))
+            row (get (into {} (map (juxt :id identity)
+                                   (:chat (web-state forge))))
+                     first-id)]
+        (is (zero? (:exit answered)) (:err answered))
+        (is (str/includes? stored "action: reply\n"))
+        (is (str/includes? stored
+                           "action_reply_text: connected and unlocked\n"))
+        (is (= {:type "reply"
+                :reply_text "connected and unlocked"
+                :label "Reply: connected and unlocked"
+                :status "pending"
+                :available true}
+               (first (:actions row))))
+        (is (= #{:type :reply_text :label :status :available}
+               (set (keys (first (:actions row))))))))
+
+    (let [literal-id "req-quick-reply-literal"
+          literal-pending (write-pending-chat! forge {:id literal-id})
+          literal (run {:dir forge}
+                       answer-command "answer" literal-id (str answer)
+                       "--without-quick-reply")
+          row (get (into {} (map (juxt :id identity)
+                                 (:chat (web-state forge))))
+                   literal-id)]
+      (is (zero? (:exit literal)) (:err literal))
+      (is (not (fs/exists? literal-pending)))
+      (is (not (contains? row :actions))))))
+
+(deftest quick-reply-actions-reject-invalid-and-ambiguous-flags
+  ;; Given malformed quick-reply text and conflicting metadata
+  ;; When any answer is attempted
+  ;; Then every refusal leaves the pending request untouched
+  (let [forge (tmp-dir)
+        answer (fs/path forge "tmp" "answer.txt")
+        command (script "pack_dashboard_request.sh")
+        request-id "req-invalid-quick-reply"
+        pending (write-pending-chat! forge {:id request-id})]
+    (setup-pack! forge ["specifier"])
+    (write-file answer "Authentication is complete.\n")
+    (doseq [[arguments expected]
+            [[["--reply-with" ""] "required"]
+             [["--reply-with" "yes\nno"] "one line"]
+             [["--reply-with" (apply str (repeat 201 "a"))] "at most 200"]
+             [["--reply-with" "/Users/operator/private"] "paths or credentials"]
+             [["--reply-with" "ghp_1234567890abcdefghijklmnopqrstuvwxyz"]
+              "paths or credentials"]
+             [["--reply-with" "run $(rm -rf demo)"] "unsafe framing"]
+             [["--reply-with" "git push --force"] "must not be a command"]
+             [["--reply-with" "yes" "--reply-with" "yes"]
+              "only once"]
+             [["--without-quick-reply" "--without-quick-reply"]
+              "only once"]
+             [["--reply-with" "yes" "--without-quick-reply"]
+              "Choose either --reply-with or --without-quick-reply"]
+             [["--reply-with"] "Missing quick-reply text"]]]
+      (let [result (apply run {:dir forge :ok? false}
+                          command "answer" request-id (str answer) arguments)]
+        (is (not (zero? (:exit result))) (pr-str arguments))
+        (is (str/includes? (str (:err result) (:out result)) expected)
+            (pr-str arguments))))
+    (is (fs/regular-file? pending))
+    (is (not (fs/exists?
+              (fs/path forge ".swarmforge/dashboard/requests/done"
+                       (str request-id ".request")))))))
+
+(deftest quick-reply-and-route-card-actions-cannot-be-mixed
+  ;; Given a response that can name a pending route proposal
+  ;; When approval and quick-reply metadata are both supplied
+  ;; Then the CLI refuses and dashboard parsing rejects the mixed record
+  (let [forge (tmp-dir)
+        answer (fs/path forge "tmp" "answer.txt")
+        request-id "req-mixed-actions"
+        command (script "pack_dashboard_request.sh")]
+    (setup-pack! forge ["specifier"])
+    (fs/create-dirs (fs/path forge "projects" "alpha-app"))
+    (let [proposal-id (route-proposal! forge "alpha-app" "next-card")
+          pending (write-pending-chat! forge {:id request-id})]
+      (write-file answer
+                  (str "Proposed `" proposal-id "`. Reply `connected`.\n"))
+      (let [mixed (run {:dir forge :ok? false}
+                       command "answer" request-id (str answer)
+                       "--approve-route-card" proposal-id
+                       "--reply-with" "connected")]
+        (is (not (zero? (:exit mixed))))
+        (is (str/includes? (str (:err mixed) (:out mixed))
+                           "Choose either --approve-route-card or --reply-with"))
+        (is (fs/regular-file? pending))))
+    (let [done (fs/path forge ".swarmforge/dashboard/requests/done"
+                        "req-mixed-record.request")]
+      (write-file
+       done
+       (str "id: req-mixed-record\n"
+            "status: done\n"
+            "role: lieutenant\n"
+            "action: reply\n"
+            "action_proposal_id: proposal-20261115T140000Z\n"
+            "action_family: forgelet\n"
+            "action_project: alpha-app\n"
+            "action_task_name: next-card\n"
+            "action_reply_text: connected\n"
+            "action_label: Reply: connected\n"
+            "action_status: pending\n"
+            "created_at: 2026-11-15T14:00:00Z\n\n"
+            "Mixed metadata.\n"))
+      (let [row (get (into {} (map (juxt :id identity)
+                                   (:chat (web-state forge))))
+                     "req-mixed-record")]
+        (is (not (contains? row :actions)))))))
+
+(deftest completed-answer-can-backfill-one-quick-reply-idempotently
+  ;; Given an ordinary completed answer
+  ;; When one quick reply is backfilled and retried
+  ;; Then timestamps stay stable, the action is exact, and conflicting retries fail
+  (let [forge (tmp-dir)
+        answer (fs/path forge "tmp" "answer.txt")
+        command (script "pack_dashboard_request.sh")
+        request-id "req-quick-reply-backfill"]
+    (setup-pack! forge ["specifier"])
+    (write-file answer "The device is ready.\n")
+    (write-pending-chat! forge {:id request-id :body "Is it ready?\n"})
+    (let [completed (run {:dir forge}
+                         command "answer" request-id (str answer))
+          done (fs/path forge ".swarmforge/dashboard/requests/done"
+                         (str request-id ".request"))
+          before (slurp (str done))
+          updated (second (re-find #"(?m)^updated_at: (.+)$" before))
+          backfilled (run {:dir forge}
+                          command "answer" request-id (str answer)
+                          "--reply-with" "ready")
+          after (slurp (str done))
+          row (get (into {} (map (juxt :id identity)
+                                 (:chat (web-state forge))))
+                   request-id)]
+      (is (zero? (:exit completed)) (:err completed))
+      (is (zero? (:exit backfilled)) (:err backfilled))
+      (is (= "ready" (get-in row [:actions 0 :reply_text])))
+      (is (= updated
+             (second (re-find #"(?m)^updated_at: (.+)$" after))))
+      (let [retry (run {:dir forge}
+                       command "answer" request-id (str answer)
+                       "--reply-with" "ready")]
+        (is (zero? (:exit retry)) (:err retry))
+        (is (= after (slurp (str done)))))
+      (let [different (run {:dir forge :ok? false}
+                           command "answer" request-id (str answer)
+                           "--reply-with" "not-ready")
+            literal (run {:dir forge :ok? false}
+                         command "answer" request-id (str answer)
+                         "--without-quick-reply")]
+        (is (not (zero? (:exit different))))
+        (is (not (zero? (:exit literal))))
+        (is (= after (slurp (str done))))))))
+
 (deftest answering-challenges-an-unspecified-pending-route-proposal
   ;; Given a response that names one pending local route-card proposal
   ;; When it omits the structured action
