@@ -1051,20 +1051,188 @@ function renderAttention(data) {
   renderClarifications(data.clarifications);
 }
 
-async function loadState() {
-  try {
-    const res = await fetch("/api/state", {cache: "no-store"});
-    if (!res.ok) throw new Error("offline");
-    const data = await res.json();
-    $("error").textContent = "";
-    renderChrome(data);
-    renderBoard(data);
-    renderAttention(data);
-    renderWork(data);
-    renderChat(data);
-  } catch (_) {
-    $("error").textContent = "Swarm disconnected";
+const refreshIntervalMs = 4000;
+const refreshMetrics = {
+  requests: 0,
+  visiblePolls: 0,
+  hiddenPolls: 0,
+  notModified304: 0,
+  fullReads: 0,
+  coalesced: 0,
+  bytes: 0,
+  latencyTotalMs: 0,
+  latencySamples: 0,
+  maxLatencyMs: 0,
+  errors: 0,
+  mutationRefreshes: 0,
+  focusRefreshes: 0,
+  reconnectRefreshes: 0,
+  malformedEtags: 0
+};
+window.__swarmRefreshMetrics = refreshMetrics;
+
+let stateEtag = "";
+let stateBody = "";
+let lastState = null;
+let hasRenderedState = false;
+let refreshInFlight = null;
+let queuedRefresh = false;
+
+function pageVisible() {
+  return document.visibilityState !== "hidden" && !document.hidden;
+}
+
+function validEtag(value) {
+  return typeof value === "string" && /^(?:W\/)?"[^"]+"$/.test(value);
+}
+
+function recordRefreshLatency(started) {
+  const latency = performance.now() - started;
+  refreshMetrics.latencyTotalMs += latency;
+  refreshMetrics.latencySamples += 1;
+  refreshMetrics.maxLatencyMs = Math.max(refreshMetrics.maxLatencyMs, latency);
+}
+
+function refreshFailure(message) {
+  refreshMetrics.errors += 1;
+  $("error").textContent = message;
+}
+
+async function readStateOnce(conditional = true, retryEmpty = true) {
+  const headers = {};
+  if (conditional && hasRenderedState && stateEtag) {
+    headers["If-None-Match"] = stateEtag;
   }
+  const started = performance.now();
+  refreshMetrics.requests += 1;
+  let res;
+  try {
+    res = await fetch("/api/state", {cache: "no-store", headers});
+  } catch (_) {
+    recordRefreshLatency(started);
+    refreshFailure("Swarm disconnected");
+    return false;
+  }
+
+  if (res.status === 304) {
+    refreshMetrics.notModified304 += 1;
+    recordRefreshLatency(started);
+    if (!hasRenderedState) {
+      if (retryEmpty) return readStateOnce(false, false);
+      refreshFailure("Swarm refresh returned no state");
+      return false;
+    }
+    $("error").textContent = "";
+    return true;
+  }
+
+  if (res.status === 401 || res.status === 403) {
+    recordRefreshLatency(started);
+    refreshFailure("Swarm authorization failed");
+    return false;
+  }
+  if (!res.ok) {
+    recordRefreshLatency(started);
+    refreshFailure("Swarm disconnected");
+    return false;
+  }
+
+  let text;
+  try {
+    text = await res.text();
+  } catch (_) {
+    recordRefreshLatency(started);
+    refreshFailure("Swarm disconnected");
+    return false;
+  }
+  recordRefreshLatency(started);
+  refreshMetrics.fullReads += 1;
+  refreshMetrics.bytes += new TextEncoder().encode(text).length;
+
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (_) {
+    refreshFailure("Swarm refresh was malformed");
+    return false;
+  }
+
+  const nextEtag = res.headers.get("ETag") || "";
+  if (nextEtag && !validEtag(nextEtag)) {
+    refreshMetrics.malformedEtags += 1;
+    stateEtag = "";
+  } else {
+    stateEtag = nextEtag;
+  }
+
+  lastState = data;
+  if (!hasRenderedState || text !== stateBody) {
+    try {
+      renderChrome(data);
+      renderBoard(data);
+      renderAttention(data);
+      renderWork(data);
+      renderChat(data);
+      stateBody = text;
+    } catch (_) {
+      refreshFailure("Swarm refresh was malformed");
+      return false;
+    }
+  }
+  hasRenderedState = true;
+  $("error").textContent = "";
+  return true;
+}
+
+function requestStateRefresh(options = {}) {
+  const force = options.force === true;
+  if (!force && !pageVisible()) {
+    refreshMetrics.hiddenPolls += 1;
+    return Promise.resolve(false);
+  }
+  if (refreshInFlight) {
+    refreshMetrics.coalesced += 1;
+    if (options.queue === true) queuedRefresh = true;
+    return refreshInFlight;
+  }
+
+  const run = (async () => {
+    do {
+      queuedRefresh = false;
+      let ok = false;
+      try {
+        ok = await readStateOnce();
+      } catch (_) {
+        refreshFailure("Swarm refresh failed");
+      }
+      if (!ok || !pageVisible()) break;
+    } while (queuedRefresh);
+    return hasRenderedState;
+  })();
+  refreshInFlight = run;
+  const cleanup = () => {
+    if (refreshInFlight === run) refreshInFlight = null;
+    if (queuedRefresh) {
+      queuedRefresh = false;
+      requestStateRefresh({force: true, queue: true});
+    }
+  };
+  run.then(cleanup, cleanup);
+  return run;
+}
+
+function loadState(options = {}) {
+  if (!options.reason) refreshMetrics.mutationRefreshes += 1;
+  return requestStateRefresh({force: true, queue: true});
+}
+
+function pollState() {
+  if (!pageVisible()) {
+    refreshMetrics.hiddenPolls += 1;
+    return Promise.resolve(false);
+  }
+  refreshMetrics.visiblePolls += 1;
+  return requestStateRefresh();
 }
 
 function closeNewTask() {
@@ -1112,14 +1280,12 @@ function fillPackRadios() {
 }
 
 async function refreshForgePacks() {
-  try {
-    const res = await fetch("/api/state", {cache: "no-store"});
-    if (!res.ok) return;
-    const data = await res.json();
-    if (data.packs) forgePacks = data.packs;
-    if (data.all_projects) allProjects = data.all_projects;
-    if (data.open_projects) openProjects = data.open_projects;
-  } catch (_) {}
+  await requestStateRefresh({force: true, queue: true});
+  const data = lastState;
+  if (!data) return;
+  if (data.packs) forgePacks = data.packs;
+  if (data.all_projects) allProjects = data.all_projects;
+  if (data.open_projects) openProjects = data.open_projects;
 }
 
 function openNewProject() {
@@ -1492,6 +1658,7 @@ function renderChat(data) {
           if (res.ok) {
             item.attention = "seen";
             if (state) state.textContent = clarificationStateText(item);
+            loadState();
           } else {
             seenClarificationRequests.delete(item.id);
           }
@@ -1620,8 +1787,43 @@ document.addEventListener("click", (event) => {
                     "agent-" + (project ? project + "-" : "") + role);
   }
 });
-loadState();
-setInterval(loadState, 2000);
+document.addEventListener("visibilitychange", () => {
+  if (pageVisible()) {
+    requestStateRefresh({force: true});
+  } else {
+    refreshMetrics.hiddenPolls += 1;
+  }
+});
+window.addEventListener("focus", () => {
+  if (pageVisible()) {
+    refreshMetrics.focusRefreshes += 1;
+    requestStateRefresh({force: true});
+  }
+});
+window.addEventListener("online", () => {
+  refreshMetrics.reconnectRefreshes += 1;
+  requestStateRefresh({force: true, queue: true});
+});
+window.addEventListener("offline", () => {
+  refreshFailure("Swarm disconnected");
+});
+window.addEventListener("pageshow", () => {
+  if (pageVisible()) requestStateRefresh({force: true});
+});
+window.__swarmDashboard = {
+  refresh: (reason = "manual") => {
+    if (reason === "mutation") refreshMetrics.mutationRefreshes += 1;
+    return requestStateRefresh({force: true, queue: true});
+  },
+  poll: pollState,
+  metrics: refreshMetrics,
+  get state() { return lastState; },
+  get etag() { return stateEtag; },
+  get inFlight() { return Boolean(refreshInFlight); },
+  setEtagForTest(value) { stateEtag = value || ""; }
+};
+loadState({reason: "initial"});
+setInterval(pollState, refreshIntervalMs);
 </script>
 </body>
 </html>

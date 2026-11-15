@@ -604,7 +604,8 @@ new:
 The forge side is deliberately small, because the bridge reads the forge rather
 than the other way round. A running dashboard, found through
 `<forge root>/.swarmforge/dashboard-url` and read fresh every time. The endpoints
-the bridge calls — `/api/health`, `/api/state`, `/api/chat`, `/api/approvals/<id>/<action>`,
+the bridge calls — `/api/health`, `/api/state`, `/api/automation-state`,
+`/api/chat`, `/api/approvals/<id>/<action>`,
 `/api/tasks/retry`, `/api/clarifications/<id>/answer`,
 `/api/clarifications/<id>/seen`, and `/api/clarifications/<id>/withdraw` — which mean a forge
 whose tooling predates one of them is refreshed first, or left out. And the
@@ -671,6 +672,18 @@ safe aggregate request/hit/miss/coalesced/build/failure counts, latest build
 duration and response bytes, and counts keyed only by bounded invalidation
 reason. A failed refresh removes the old entry and returns a bounded 502 instead
 of serving stale success.
+
+Full and bounded state responses carry an ETag derived from their exact rendered
+body. A matching `If-None-Match` returns 304 with no state body; malformed or
+non-matching tags fall back to a full response. The browser dashboard retains
+the last rendered state and uses one in-flight refresh at a time. It suspends
+periodic reads while hidden, reconciles immediately after visibility or focus
+returns, refreshes on reconnect and after successful mutations, and retains a
+four-second visible fallback poll for changes made directly on disk. Coalesced
+bursts and conditional reads are recorded in bounded
+`window.__swarmRefreshMetrics` counters for requests, 304s, full reads, bytes,
+latency, visibility, reconnect and mutation refreshes without collecting
+endpoint content or identifiers.
 
 ### Lieutenant activity markers
 

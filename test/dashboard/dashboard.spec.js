@@ -484,6 +484,240 @@ test.describe("pack dashboard", () => {
     }
   });
 
+  test("hidden pages stop polling and visible bursts coalesce into one read", async ({ page }) => {
+    const local = await startDashboard();
+    const stateHeaders = [];
+    let stateRequests = 0;
+    let active = 0;
+    let maxActive = 0;
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname === "/api/state") {
+        stateRequests += 1;
+        stateHeaders.push(request.headers());
+      }
+    });
+    try {
+      await page.goto(local.url);
+      await expect(page.locator('[data-project="htw"]')).toBeVisible();
+      await expect.poll(() => page.evaluate(() => window.__swarmRefreshMetrics.fullReads))
+        .toBeGreaterThan(0);
+
+      const beforeConditional = stateRequests;
+      await page.evaluate(() => window.__swarmDashboard.poll());
+      await expect.poll(() => page.evaluate(() => window.__swarmRefreshMetrics.notModified304))
+        .toBeGreaterThan(0);
+      expect(stateRequests).toBe(beforeConditional + 1);
+      expect(stateHeaders.at(-1)["if-none-match"]).toMatch(/^"[0-9a-f]{64}"$/);
+      await expect(page.locator('[data-project="htw"]')).toBeVisible();
+
+      await page.evaluate(() => {
+        Object.defineProperty(document, "hidden", {
+          configurable: true,
+          get: () => true
+        });
+        document.dispatchEvent(new Event("visibilitychange"));
+        window.__swarmDashboard.poll();
+        window.__swarmDashboard.poll();
+      });
+      const beforeHidden = stateRequests;
+      await page.waitForTimeout(4300);
+      expect(stateRequests).toBe(beforeHidden);
+      expect(await page.evaluate(() => window.__swarmRefreshMetrics.hiddenPolls))
+        .toBeGreaterThanOrEqual(3);
+
+      await page.route("**/api/state", async (route) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        await route.continue();
+        active -= 1;
+      });
+      const beforeVisible = stateRequests;
+      const beforeCoalesced = await page.evaluate(
+        () => window.__swarmRefreshMetrics.coalesced
+      );
+      await page.evaluate(() => {
+        Object.defineProperty(document, "hidden", {
+          configurable: true,
+          get: () => false
+        });
+        document.dispatchEvent(new Event("visibilitychange"));
+        window.dispatchEvent(new Event("focus"));
+        window.__swarmDashboard.poll();
+      });
+      await expect.poll(() => stateRequests).toBe(beforeVisible + 1);
+      await expect.poll(() => page.evaluate(() => window.__swarmDashboard.inFlight))
+        .toBeFalsy();
+      expect(maxActive).toBe(1);
+      expect(await page.evaluate(() => window.__swarmRefreshMetrics.coalesced))
+        .toBeGreaterThan(beforeCoalesced);
+      await page.unroute("**/api/state");
+    } finally {
+      await stopDashboard(local);
+    }
+  });
+
+  test("state changes and successful mutations refresh without waiting for fallback", async ({ page }) => {
+    const local = await startDashboard();
+    try {
+      await page.goto(local.url);
+      await expect(page.locator('[data-project="htw"]')).toBeVisible();
+      const beforeBytes = await page.evaluate(() => window.__swarmRefreshMetrics.bytes);
+      fs.appendFileSync(
+        path.join(local.root, "projects/htw/.swarmforge/board/tasks.tsv"),
+        "fallback-card\tspecifier\t2026-01-01T00:00:02Z\t2026-01-01T00:00:02Z\tfallback-card-id\t0\n"
+      );
+      await page.waitForTimeout(850);
+      await page.evaluate(() => window.__swarmDashboard.poll());
+      await expect(page.locator('[data-project="htw"]')).toContainText("fallback-card");
+      expect(await page.evaluate(() => window.__swarmRefreshMetrics.bytes))
+        .toBeGreaterThan(beforeBytes);
+
+      await page.locator('[data-project="htw"] .project-header button', {
+        hasText: "New Task"
+      }).click();
+      await page.locator("#nt-name").fill("mutation-card");
+      await page.locator("#nt-text").fill("Refresh immediately after the write.");
+      const mutationStarted = Date.now();
+      await page.locator("#nt-ok").click();
+      await expect(page.locator('[data-project="htw"]')).toContainText("mutation-card");
+      expect(Date.now() - mutationStarted).toBeLessThan(2500);
+    } finally {
+      await stopDashboard(local);
+    }
+  });
+
+  test("fixed idle refresh measurement sends no bodies and no hidden requests", async ({ page }) => {
+    const local = await startDashboard();
+    let stateRequests = 0;
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname === "/api/state") stateRequests += 1;
+    });
+    try {
+      await page.goto(local.url);
+      await expect(page.locator('[data-project="htw"]')).toBeVisible();
+      await expect.poll(() => page.evaluate(() => window.__swarmRefreshMetrics.fullReads))
+        .toBeGreaterThan(0);
+      const measurement = await page.evaluate(async () => {
+        const before = {...window.__swarmRefreshMetrics};
+        const started = performance.now();
+        for (let index = 0; index < 20; index += 1) {
+          await window.__swarmDashboard.poll();
+        }
+        const elapsedMs = performance.now() - started;
+        const after = {...window.__swarmRefreshMetrics};
+        return {
+          elapsedMs,
+          requests: after.requests - before.requests,
+          notModified304: after.notModified304 - before.notModified304,
+          fullReads: after.fullReads - before.fullReads,
+          bytes: after.bytes - before.bytes,
+          priorDesignBytes:
+            (before.bytes / Math.max(1, before.fullReads)) * 20
+        };
+      });
+      console.log("idle refresh measurement", JSON.stringify(measurement));
+      expect(measurement.requests).toBe(20);
+      expect(measurement.notModified304).toBe(20);
+      expect(measurement.fullReads).toBe(0);
+      expect(measurement.bytes).toBe(0);
+      expect(measurement.elapsedMs).toBeLessThan(2000);
+
+      const beforeHidden = stateRequests;
+      const hidden = await page.evaluate(async () => {
+        Object.defineProperty(document, "hidden", {
+          configurable: true,
+          get: () => true
+        });
+        document.dispatchEvent(new Event("visibilitychange"));
+        const requestsBefore = window.__swarmRefreshMetrics.requests;
+        for (let index = 0; index < 20; index += 1) {
+          await window.__swarmDashboard.poll();
+        }
+        return window.__swarmRefreshMetrics.requests - requestsBefore;
+      });
+      expect(hidden).toBe(0);
+      expect(stateRequests).toBe(beforeHidden);
+    } finally {
+      await stopDashboard(local);
+    }
+  });
+
+  test("conditional state handles missing prior state and explicit failures", async ({ page }) => {
+    const local = await startDashboard();
+    let firstStateRequest = true;
+    await page.route("**/api/state", async (route) => {
+      if (firstStateRequest) {
+        firstStateRequest = false;
+        await route.fulfill({
+          status: 304,
+          headers: {ETag: "\"without-prior-state\""},
+          body: ""
+        });
+      } else {
+        await route.continue();
+      }
+    });
+    try {
+      await page.goto(local.url);
+      await expect(page.locator('[data-project="htw"]')).toBeVisible();
+      expect(await page.evaluate(() => window.__swarmRefreshMetrics.notModified304))
+        .toBeGreaterThan(0);
+      expect(await page.evaluate(() => window.__swarmRefreshMetrics.fullReads))
+        .toBeGreaterThan(0);
+      await page.unroute("**/api/state");
+
+      const currentBody = await page.evaluate(
+        () => JSON.stringify(window.__swarmDashboard.state)
+      );
+      await page.route("**/api/state", (route) => route.fulfill({
+        status: 200,
+        headers: {"Content-Type": "application/json", ETag: "malformed"},
+        body: currentBody
+      }));
+      await page.evaluate(() => window.__swarmDashboard.refresh("mutation"));
+      expect(await page.evaluate(() => window.__swarmRefreshMetrics.malformedEtags))
+        .toBeGreaterThan(0);
+      expect(await page.evaluate(() => window.__swarmDashboard.etag)).toBe("");
+      await page.unroute("**/api/state");
+
+      await page.route("**/api/state", (route) => route.fulfill({
+        status: 401,
+        body: ""
+      }));
+      await page.evaluate(() => window.__swarmDashboard.refresh("mutation"));
+      await expect(page.locator("#error")).toContainText("authorization failed");
+      await expect(page.locator('[data-project="htw"]')).toBeVisible();
+      await page.unroute("**/api/state");
+
+      await page.evaluate(() => window.dispatchEvent(new Event("online")));
+      await expect(page.locator("#error")).toHaveText("");
+      expect(await page.evaluate(() => window.__swarmRefreshMetrics.reconnectRefreshes))
+        .toBeGreaterThan(0);
+
+      await page.route("**/api/state", (route) => route.abort("failed"));
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await expect(page.locator("#error")).toHaveText("Swarm disconnected");
+      await expect(page.locator('[data-project="htw"]')).toBeVisible();
+      await page.unroute("**/api/state");
+
+      await page.route("**/api/state", (route) => route.fulfill({
+        status: 200,
+        headers: {"Content-Type": "application/json"},
+        body: "{"
+      }));
+      await page.evaluate(() => window.__swarmDashboard.refresh("mutation"));
+      await expect(page.locator("#error")).toHaveText("Swarm refresh was malformed");
+      await expect(page.locator('[data-project="htw"]')).toBeVisible();
+      await page.unroute("**/api/state");
+      await page.evaluate(() => window.dispatchEvent(new Event("online")));
+      await expect(page.locator("#error")).toHaveText("");
+    } finally {
+      await page.unroute("**/api/state");
+      await stopDashboard(local);
+    }
+  });
+
   test("the done column is collapsed until its header is clicked", async ({ page }) => {
     // The done column grows for the life of a forge, so it starts closed and says
     // how many cards it holds; its header is the handle. The card has to be in the

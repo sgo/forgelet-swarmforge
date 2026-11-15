@@ -307,8 +307,13 @@
   (json/parse-string (:out (pack-web root true "--test-state" (str root))) true))
 
 (defn direct-response
-  [root method uri body]
-  (web/handle-request root {:method method :uri uri :body body}))
+  ([root method uri body]
+   (direct-response root method uri body nil))
+  ([root method uri body headers]
+   (web/handle-request root {:method method
+                             :uri uri
+                             :body body
+                             :headers headers})))
 
 (defn direct-json
   [root uri]
@@ -890,6 +895,47 @@
           (is (>= (:builds metrics) 2))
           (is (= (count (.getBytes (:body second-response) "UTF-8"))
                  (:last_response_bytes metrics))))))))
+
+(deftest dashboard-conditional-reads-use-authoritative-state-etags
+  ;; Given a full state body and its ETag
+  ;; When the same body is requested conditionally
+  ;; Then the server returns 304 without a body, while malformed tags and
+  ;; changed state return a fresh body with a new tag
+  (let [root (doto (tmp-dir) setup-pack!)]
+    (try
+      (web/reset-dashboard-cache!)
+      (binding [web/*dashboard-cache-now-ms* 1000]
+        (let [first-response (direct-response root "GET" "/api/state" nil)
+              etag (get-in first-response [:headers "ETag"])
+              weak (str "W/" etag)
+              unchanged (direct-response
+                         root "GET" "/api/state" nil
+                         {"if-none-match" weak})
+              malformed (direct-response
+                         root "GET" "/api/state" nil
+                         {"If-None-Match" "not-an-etag"})]
+          (is (= 200 (:status first-response)))
+          (is (re-matches #"\"[0-9a-f]{64}\"" etag))
+          (is (= 304 (:status unchanged)))
+          (is (nil? (:body unchanged)))
+          (is (= etag (get-in unchanged [:headers "ETag"])))
+          (is (= 200 (:status malformed)))
+          (is (= (:body first-response) (:body malformed)))))
+      (create-task root "etag-change" "specifier")
+      (binding [web/*dashboard-cache-now-ms* 1800]
+        (let [old-etag (get-in
+                        (direct-response root "GET" "/api/state" nil)
+                        [:headers "ETag"])]
+          (create-task root "etag-second-change" "specifier")
+          (binding [web/*dashboard-cache-now-ms* 2600]
+            (let [changed (direct-response
+                           root "GET" "/api/state" nil
+                           {"If-None-Match" old-etag})]
+              (is (= 200 (:status changed)))
+              (is (not= old-etag (get-in changed [:headers "ETag"])))
+              (is (str/includes? (:body changed) "etag-second-change"))))))
+      (finally
+        (web/reset-dashboard-cache!)))))
 
 (deftest dashboard-cache-coalesces-concurrent-snapshot-builds
   ;; Given one slow authoritative snapshot build

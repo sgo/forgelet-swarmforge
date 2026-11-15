@@ -84,6 +84,7 @@
          :misses 0
          :coalesced 0
          :requests 0
+         :not_modified 0
          :builds 0
          :failures 0
          :last_build_ms 0
@@ -1879,6 +1880,30 @@
 (defn dashboard-cache-now []
   (or *dashboard-cache-now-ms* (System/currentTimeMillis)))
 
+(defn dashboard-etag [body]
+  (let [digest (java.security.MessageDigest/getInstance "SHA-256")
+        hash (apply str
+                    (map #(format "%02x" %)
+                         (.digest digest (.getBytes (str body) "UTF-8"))))]
+    (str "\"" hash "\"")))
+
+(defn request-header [headers name]
+  (some (fn [[key value]]
+          (when (= (str/lower-case (str key))
+                   (str/lower-case name))
+            value))
+        headers))
+
+(defn matching-etag? [header etag]
+  (when (and header etag)
+    (some (fn [candidate]
+            (or (= "*" candidate)
+                (= etag candidate)))
+          (->> (str/split (str header) #",")
+               (map str/trim)
+               (map #(str/replace % #"^W/" ""))
+               (remove str/blank?)))))
+
 (defn dashboard-cache-metric! [key]
   (swap! dashboard-cache-metrics
          #(-> %
@@ -1895,6 +1920,7 @@
            :misses 0
            :coalesced 0
            :requests 0
+           :not_modified 0
            :builds 0
            :failures 0
            :last_build_ms 0
@@ -1984,11 +2010,14 @@
                   (try
                     (let [value (builder)
                           elapsed (long (/ (- (System/nanoTime) started) 1000000.0))
-                          built (assoc value
-                                       :epoch epoch
-                                       :built-at (or (:built_at value)
-                                                     (dashboard-cache-now))
-                                       :build_ms elapsed)
+                          etag (when-let [body (:body value)]
+                                 (dashboard-etag body))
+                          built (cond-> (assoc value
+                                               :epoch epoch
+                                               :built-at (or (:built_at value)
+                                                             (dashboard-cache-now))
+                                               :build_ms elapsed)
+                                  etag (assoc :etag etag))
                           current-epoch (get @dashboard-state-epochs root-key 0)]
                       (swap! dashboard-cache-metrics
                              #(-> %
@@ -2167,11 +2196,13 @@
          (count (.getBytes (str body) "UTF-8"))))
 
 (defn dashboard-cache-headers [projection result]
-  {"Content-Type" "application/json"
-   "Cache-Control" "no-store"
-   "X-SwarmForge-Projection" projection
-   "X-SwarmForge-Cache" (or (:cache_status result) "miss")
-   "X-SwarmForge-Build-Ms" (str (or (:build_ms result) 0))})
+  (cond-> {"Content-Type" "application/json"
+           "Cache-Control" "no-store"
+           "X-SwarmForge-Projection" projection
+           "X-SwarmForge-Cache" (or (:cache_status result) "miss")
+           "X-SwarmForge-Build-Ms" (str (or (:build_ms result) 0))}
+    (:etag result)
+    (assoc "ETag" (:etag result))))
 
 (defn api-state [root]
   (:value (cached-dashboard-snapshot root)))
@@ -2350,27 +2381,52 @@
     (paged-chat-state root pagination)
     (api-state root)))
 
-(defn dashboard-state-response [root uri]
-  (if-let [pagination (chat-page-parameters uri)]
-    (let [snapshot (cached-dashboard-snapshot root)
-          body (json/generate-string
-                (paged-chat-state root pagination (:value snapshot)))]
-      (record-dashboard-response-bytes! body)
-      {:status 200
-       :headers (dashboard-cache-headers "dashboard-state-page-v1" snapshot)
-       :body body})
-    (let [result (cached-dashboard-state root)]
-      (record-dashboard-response-bytes! (:body result))
-      {:status 200
-       :headers (dashboard-cache-headers "dashboard-state-v1" result)
-       :body (:body result)})))
+(defn not-modified-response [projection result]
+  (swap! dashboard-cache-metrics update :not_modified (fnil inc 0))
+  {:status 304
+   :headers (dashboard-cache-headers projection result)
+   :body nil})
 
-(defn automation-state-response [root]
-  (let [result (cached-automation-state root)]
-    (record-dashboard-response-bytes! (:body result))
-    {:status 200
-     :headers (dashboard-cache-headers dashboard-automation-projection result)
-     :body (:body result)}))
+(defn dashboard-state-response
+  ([root uri]
+   (dashboard-state-response root uri nil))
+  ([root uri headers]
+   (if-let [pagination (chat-page-parameters uri)]
+     (let [snapshot (cached-dashboard-snapshot root)
+           body (json/generate-string
+                 (paged-chat-state root pagination (:value snapshot)))
+           result (assoc snapshot :etag (dashboard-etag body))]
+       (if (matching-etag? (request-header headers "If-None-Match")
+                           (:etag result))
+         (not-modified-response "dashboard-state-page-v1" result)
+         (do
+           (record-dashboard-response-bytes! body)
+           {:status 200
+            :headers (dashboard-cache-headers "dashboard-state-page-v1" result)
+            :body body})))
+     (let [result (cached-dashboard-state root)]
+       (if (matching-etag? (request-header headers "If-None-Match")
+                           (:etag result))
+         (not-modified-response "dashboard-state-v1" result)
+         (do
+           (record-dashboard-response-bytes! (:body result))
+           {:status 200
+            :headers (dashboard-cache-headers "dashboard-state-v1" result)
+            :body (:body result)}))))))
+
+(defn automation-state-response
+  ([root]
+   (automation-state-response root nil))
+  ([root headers]
+   (let [result (cached-automation-state root)]
+     (if (matching-etag? (request-header headers "If-None-Match")
+                         (:etag result))
+       (not-modified-response dashboard-automation-projection result)
+       (do
+         (record-dashboard-response-bytes! (:body result))
+         {:status 200
+          :headers (dashboard-cache-headers dashboard-automation-projection result)
+          :body (:body result)})))))
 
 (defn require-root! [root]
   (when (str/blank? root)
@@ -3318,8 +3374,11 @@
             (forge/read-open-projects forge))
       (throw (ex-info (str "Unknown clarification: " id) {:http-status 404}))))
 
-(defn handle-get [root uri]
-  (cond
+(defn handle-get
+  ([root uri]
+   (handle-get root uri nil))
+  ([root uri headers]
+   (cond
     (= "/" uri)
     {:status 200
      :headers {"Content-Type" "text/html; charset=utf-8"}
@@ -3329,10 +3388,10 @@
     (health-response)
 
     (= "/api/state" (first (str/split (or uri "") #"\?")))
-    (dashboard-state-response root uri)
+    (dashboard-state-response root uri headers)
 
     (= "/api/automation-state" (first (str/split (or uri "") #"\?")))
-    (automation-state-response root)
+    (automation-state-response root headers)
 
     (agent-pane-role uri)
     (get-agent-pane (request-project-root root uri) uri)
@@ -3352,7 +3411,7 @@
     (= "/api/mission" (first (str/split (or uri "") #"\?")))
     (get-mission (request-project-root root uri))
 
-    :else {:status 404 :body "Not found"}))
+    :else {:status 404 :body "Not found"})))
 
 (defn confirm-teardown? [body]
   (let [text (str/trim (or body ""))]
@@ -3522,10 +3581,10 @@
       (str/starts-with? (or path "") "/api/clarifications") "clarification-write"
       :else "dashboard-write")))
 
-(defn handle-request [root {:keys [method uri body]}]
+(defn handle-request [root {:keys [method uri body headers]}]
   (try
     (let [response (case method
-                     "GET" (handle-get root uri)
+                     "GET" (handle-get root uri headers)
                      "POST" (handle-post root uri body)
                      {:status 404 :body "Not found"})]
       (when (and (= method "POST")
@@ -4017,7 +4076,8 @@
   (fn [req]
     (handle-request root {:method (str/upper-case (name (:request-method req)))
                           :uri (request-uri req)
-                          :body (request-body req)})))
+                          :body (request-body req)
+                          :headers (:headers req)})))
 
 (defn write-dashboard-url! [root url]
   (let [file (fs/path root ".swarmforge" "dashboard-url")]
