@@ -2130,7 +2130,8 @@
     (contains? item :reviews)
     (assoc :has_reviews (boolean (seq (:reviews item))))))
 
-(def resolved-approval-resolutions #{"approved" "sent_back"})
+(def resolved-approval-resolutions
+  #{"approved" "sent_back" "automatic_spec_approval" "auto_approved"})
 
 (defn automation-resolved-approval [item]
   (let [resolution (:resolution item)]

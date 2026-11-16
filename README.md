@@ -679,12 +679,15 @@ workspace paths and unrelated project state are excluded. Every collection has
 a fixed maximum plus `count` and `truncated`; project and card order follows the
 authoritative board order.
 
-Resolved approval rows carry their authoritative `resolution` as exactly
-`approved` or `sent_back`, alongside the existing safe identity fields. Pending
-approvals do not carry a resolution. A missing, non-string or unknown resolved
-ending fails the automation projection closed with the ordinary bounded 502
-rather than emitting a value that a Matrix client could render as a misleading
-mark.
+Resolved approval rows carry their exact authoritative `resolution` as
+`approved`, `sent_back`, `automatic_spec_approval` or `auto_approved`, alongside
+the existing safe identity fields. Pending approvals do not carry a resolution.
+A missing, non-string or unknown resolved ending fails the automation projection
+closed with the ordinary bounded 502 rather than emitting a value that a Matrix
+client could render as a misleading mark. Bridge policy remains explicit:
+`approved` selects the manual ➡ mark, `sent_back` selects the manual ⬅ mark, and
+automatic endings retain their exact value without being presented as either
+manual decision.
 
 State responses report `X-SwarmForge-Projection`, `X-SwarmForge-Cache`
 (`hit`, `miss` or `coalesced`) and `X-SwarmForge-Build-Ms`. Process metrics hold

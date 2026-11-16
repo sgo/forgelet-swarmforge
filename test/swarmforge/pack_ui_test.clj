@@ -916,10 +916,11 @@
                  (:last_response_bytes metrics))))))))
 
 (deftest dashboard-automation-resolved-approvals-expose-only-their-resolution
-  ;; Given approved and sent-back resolutions in a Family plus one pending approval
+  ;; Given all authoritative manual and automatic resolutions in a Family
+  ;; plus one pending approval
   ;; When the automation and full dashboard states are read
   ;; Then resolved rows preserve project identity and exact endings while the
-  ;; pending row carries no fabricated resolution
+  ;; pending row carries no fabricated resolution and only manual endings mark
   (let [forge (tmp-dir)
         alpha (fs/path forge "projects" "alpha")
         beta (fs/path forge "projects" "beta")]
@@ -940,8 +941,12 @@
           "pending body must not escape\n"))
     (web/record-resolution! (str alpha) "approval-alpha-approved"
                             "alpha-card" "approved")
+    (web/record-resolution! (str alpha) "approval-alpha-automatic"
+                            "automatic-card" "automatic_spec_approval")
     (web/record-resolution! (str beta) "approval-beta-sent-back"
                             "beta-card" "sent_back")
+    (web/record-resolution! (str beta) "approval-beta-auto-approved"
+                            "auto-card" "auto_approved")
     (try
       (web/reset-dashboard-cache!)
       (binding [web/*dashboard-cache-now-ms* 1000]
@@ -949,7 +954,7 @@
               full (direct-json forge "/api/state")
               pending (get-in automation [:approvals :items])
               resolved (get-in automation [:resolved_approvals :items])
-              by-project (into {} (map (juxt :project identity) resolved))
+              by-id (into {} (map (juxt :id identity) resolved))
               full-resolutions
               (into {} (map (juxt :id :resolution)
                             (:resolved_approvals full)))
@@ -963,16 +968,32 @@
                    :has_reviews false}]
                  pending))
           (is (not-any? #(contains? % :resolution) pending))
-          (is (= ["approval-alpha-approved" "approval-beta-sent-back"]
-                 (mapv :id resolved)))
-          (is (= ["alpha" "beta"] (mapv :project resolved)))
-          (is (= ["approved" "sent_back"] (mapv :resolution resolved)))
+          (is (= #{"approval-alpha-approved" "approval-alpha-automatic"
+                   "approval-beta-sent-back" "approval-beta-auto-approved"}
+                 (set (map :id resolved))))
+          (is (= ["alpha" "alpha" "beta" "beta"]
+                 (mapv :project resolved)))
+          (is (= #{"approved" "sent_back" "automatic_spec_approval"
+                   "auto_approved"}
+                 (set (map :resolution resolved))))
           (is (= (mapv :resolution resolved)
                  (mapv #(get full-resolutions (:id %)) resolved)))
-          (is (= ["➡" "⬅"]
-                 (mapv #(get marks (:resolution %)) resolved)))
-          (is (= #{:id :task :project :resolution}
-                 (set (keys (by-project "alpha")))))
+          (is (= {"approval-alpha-approved" "➡"
+                  "approval-beta-sent-back" "⬅"}
+                 (into {} (keep (fn [row]
+                                  (when-let [mark (get marks
+                                                       (:resolution row))]
+                                    [(:id row) mark]))
+                                resolved))))
+          (is (nil? (get marks
+                         (get-in by-id
+                                 ["approval-alpha-automatic" :resolution]))))
+          (is (nil? (get marks
+                         (get-in by-id
+                                 ["approval-beta-auto-approved" :resolution]))))
+          (is (every? #(= #{:id :task :project :resolution}
+                          (set (keys %)))
+                      resolved))
           (is (not (str/includes? (:body (direct-response
                                           forge "GET"
                                           "/api/automation-state" nil))
@@ -1014,32 +1035,56 @@
           (web/reset-dashboard-cache!))))))
 
 (deftest dashboard-automation-resolved-approvals-remain-bounded
-  ;; Given more resolved approvals than the automation approval limit
+  ;; Given a live-shaped Family with 713 resolved approvals spanning all four
+  ;; authoritative endings
   ;; When the projection is built
-  ;; Then it reports the full count, returns only the bound, and stays small
-  (let [root (doto (tmp-dir) setup-pack!)]
-    (doseq [index (range 250)]
-      (write-file
-       (fs/path root ".swarmforge" "approvals" "resolved"
-                (format "approval-bound-%03d.edn" index))
-       (pr-str {:id (format "approval-bound-%03d" index)
-                :task (format "card-%03d" index)
-                :resolution "approved"
-                :at "2026-01-01T00:00:00Z"})))
+  ;; Then it succeeds, reports the full count, returns only the bound, and
+  ;; remains within the response-size budget
+  (let [forge (tmp-dir)
+        alpha (fs/path forge "projects" "alpha")
+        beta (fs/path forge "projects" "beta")
+        resolutions ["automatic_spec_approval" "automatic_spec_approval"
+                     "automatic_spec_approval" "auto_approved"
+                     "approved" "sent_back"]
+        write-resolution!
+        (fn [index]
+          (let [project (if (< index 357) alpha beta)
+                id (format "approval-bound-%03d" index)]
+            (write-file
+             (fs/path project ".swarmforge" "approvals" "resolved"
+                      (str id ".edn"))
+             (pr-str {:id id
+                      :task (format "card-%03d" index)
+                      :resolution (nth resolutions (mod index (count resolutions)))
+                      :at "2026-01-01T00:00:00Z"}))))]
+    (doseq [project [alpha beta]]
+      (fs/create-dirs project)
+      (setup-pack! (str project) ["specifier"]))
+    (write-file (fs/path forge ".swarmforge" "open-projects")
+                "alpha\nbeta\n")
+    (doseq [index (range 713)]
+      (write-resolution! index))
     (try
       (web/reset-dashboard-cache!)
       (binding [web/*dashboard-cache-now-ms* 1000]
-        (let [response (direct-response root "GET"
+        (let [response (direct-response forge "GET"
                                         "/api/automation-state" nil)
               state (json/parse-string (:body response) true)
-              resolved (:resolved_approvals state)]
+              resolved (:resolved_approvals state)
+              full (direct-json forge "/api/state")]
           (is (= 200 (:status response)))
           (is (< (count (.getBytes (:body response) "UTF-8")) 500000))
-          (is (= {:count 250 :truncated true}
+          (is (= {:count 713 :truncated true}
                  (select-keys resolved [:count :truncated])))
           (is (= 200 (count (:items resolved))))
-          (is (every? #(= "approved" (:resolution %)) (:items resolved)))
-          (is (= 200 (count (set (map :id (:items resolved))))))))
+          (is (every? web/resolved-approval-resolutions
+                      (map :resolution (:items resolved))))
+          (is (= 200 (count (set (map :id (:items resolved))))))
+          (is (every? #(contains? #{"alpha" "beta"} (:project %))
+                      (:items resolved)))
+          (is (= 713 (count (:resolved_approvals full))))
+          (is (= web/resolved-approval-resolutions
+                 (set (map :resolution (:resolved_approvals full)))))))
       (finally
         (web/reset-dashboard-cache!)))))
 
