@@ -845,10 +845,16 @@
       (binding [web/*dashboard-cache-now-ms* 1000]
         (let [first-response (direct-response root "GET" "/api/automation-state" nil)
               second-response (direct-response root "GET" "/api/automation-state" nil)
+              conditional-response
+              (direct-response root "GET" "/api/automation-state" nil
+                               {"If-None-Match"
+                                (get-in first-response [:headers "ETag"])})
               state (json/parse-string (:body first-response) true)
               metrics @web/dashboard-cache-metrics]
           (is (= 200 (:status first-response)))
           (is (= 200 (:status second-response)))
+          (is (= 304 (:status conditional-response)))
+          (is (nil? (:body conditional-response)))
           (is (= (:body first-response) (:body second-response)))
           (is (= "miss"
                  (get-in first-response [:headers "X-SwarmForge-Cache"])))
@@ -872,8 +878,12 @@
                            :kind "stage-review"
                            :has_reviews false}]}
                  (:approvals state)))
-          (is (= ["approval-resolved"]
-                 (mapv :id (get-in state [:resolved_approvals :items]))))
+          (is (not (contains? (get-in state [:approvals :items 0])
+                              :resolution)))
+          (is (= [{:id "approval-resolved"
+                   :task "resolved-card"
+                   :resolution "approved"}]
+                 (get-in state [:resolved_approvals :items])))
           (is (= ["clar-legacy-cached"]
                  (mapv :id (get-in state [:clarifications :legacy :items]))))
           (is (= "clar-typed-cached"
@@ -904,6 +914,134 @@
           (is (>= (:builds metrics) 2))
           (is (= (count (.getBytes (:body second-response) "UTF-8"))
                  (:last_response_bytes metrics))))))))
+
+(deftest dashboard-automation-resolved-approvals-expose-only-their-resolution
+  ;; Given approved and sent-back resolutions in a Family plus one pending approval
+  ;; When the automation and full dashboard states are read
+  ;; Then resolved rows preserve project identity and exact endings while the
+  ;; pending row carries no fabricated resolution
+  (let [forge (tmp-dir)
+        alpha (fs/path forge "projects" "alpha")
+        beta (fs/path forge "projects" "beta")]
+    (doseq [project [alpha beta]]
+      (fs/create-dirs project)
+      (setup-pack! (str project) ["specifier"]))
+    (write-file (fs/path forge ".swarmforge" "open-projects")
+                "alpha\nbeta\n")
+    (write-file
+     (fs/path alpha ".swarmforge" "handoffs" "pending_approval"
+              "approval-alpha-pending.handoff")
+     (str "from: specifier\n"
+          "to: coder\n"
+          "task_id: task-alpha-pending\n"
+          "task: alpha-pending\n"
+          "kind: stage-review\n"
+          "\n"
+          "pending body must not escape\n"))
+    (web/record-resolution! (str alpha) "approval-alpha-approved"
+                            "alpha-card" "approved")
+    (web/record-resolution! (str beta) "approval-beta-sent-back"
+                            "beta-card" "sent_back")
+    (try
+      (web/reset-dashboard-cache!)
+      (binding [web/*dashboard-cache-now-ms* 1000]
+        (let [automation (direct-json forge "/api/automation-state")
+              full (direct-json forge "/api/state")
+              pending (get-in automation [:approvals :items])
+              resolved (get-in automation [:resolved_approvals :items])
+              by-project (into {} (map (juxt :project identity) resolved))
+              full-resolutions
+              (into {} (map (juxt :id :resolution)
+                            (:resolved_approvals full)))
+              marks {"approved" "➡" "sent_back" "⬅"}]
+          (is (= [{:id "approval-alpha-pending"
+                   :gate "spec → coder"
+                   :task_id "task-alpha-pending"
+                   :task "alpha-pending"
+                   :kind "stage-review"
+                   :project "alpha"
+                   :has_reviews false}]
+                 pending))
+          (is (not-any? #(contains? % :resolution) pending))
+          (is (= ["approval-alpha-approved" "approval-beta-sent-back"]
+                 (mapv :id resolved)))
+          (is (= ["alpha" "beta"] (mapv :project resolved)))
+          (is (= ["approved" "sent_back"] (mapv :resolution resolved)))
+          (is (= (mapv :resolution resolved)
+                 (mapv #(get full-resolutions (:id %)) resolved)))
+          (is (= ["➡" "⬅"]
+                 (mapv #(get marks (:resolution %)) resolved)))
+          (is (= #{:id :task :project :resolution}
+                 (set (keys (by-project "alpha")))))
+          (is (not (str/includes? (:body (direct-response
+                                          forge "GET"
+                                          "/api/automation-state" nil))
+                                  "pending body must not escape")))))
+      (finally
+        (web/reset-dashboard-cache!)))))
+
+(deftest dashboard-automation-resolved-approvals-fail-closed-on-invalid-endings
+  ;; Given resolved approval records with missing, non-string or unknown endings
+  ;; When the automation projection is built
+  ;; Then it returns a bounded failure instead of a misleading Matrix mark
+  (doseq [[label record]
+          [["missing" {:id "approval-missing-resolution"
+                       :task "missing-card"
+                       :at "2026-01-01T00:00:00Z"}]
+           ["non-string" {:id "approval-non-string-resolution"
+                          :task "malformed-card"
+                          :resolution 42
+                          :at "2026-01-01T00:00:00Z"}]
+           ["unknown" {:id "approval-unknown-resolution"
+                       :task "unknown-card"
+                       :resolution "rejected"
+                       :at "2026-01-01T00:00:00Z"}]]]
+    (let [root (doto (tmp-dir) setup-pack!)
+          file (fs/path root ".swarmforge" "approvals" "resolved"
+                        (str (:id record) ".edn"))]
+      (write-file file (pr-str record))
+      (try
+        (web/reset-dashboard-cache!)
+        (binding [web/*dashboard-cache-now-ms* 1000]
+          (let [response (direct-response root "GET"
+                                          "/api/automation-state" nil)]
+            (is (= 502 (:status response)) label)
+            (is (< (count (:body response)) 300) label)
+            (is (not (str/includes? (:body response) ":resolved_approvals"))
+                label)
+            (is (not (str/includes? (:body response) (:id record))) label)))
+        (finally
+          (web/reset-dashboard-cache!))))))
+
+(deftest dashboard-automation-resolved-approvals-remain-bounded
+  ;; Given more resolved approvals than the automation approval limit
+  ;; When the projection is built
+  ;; Then it reports the full count, returns only the bound, and stays small
+  (let [root (doto (tmp-dir) setup-pack!)]
+    (doseq [index (range 250)]
+      (write-file
+       (fs/path root ".swarmforge" "approvals" "resolved"
+                (format "approval-bound-%03d.edn" index))
+       (pr-str {:id (format "approval-bound-%03d" index)
+                :task (format "card-%03d" index)
+                :resolution "approved"
+                :at "2026-01-01T00:00:00Z"})))
+    (try
+      (web/reset-dashboard-cache!)
+      (binding [web/*dashboard-cache-now-ms* 1000]
+        (let [response (direct-response root "GET"
+                                        "/api/automation-state" nil)
+              state (json/parse-string (:body response) true)
+              resolved (:resolved_approvals state)]
+          (is (= 200 (:status response)))
+          (is (< (count (.getBytes (:body response) "UTF-8")) 500000))
+          (is (= {:count 250 :truncated true}
+                 (select-keys resolved [:count :truncated])))
+          (is (= 200 (count (:items resolved))))
+          (is (every? #(= "approved" (:resolution %)) (:items resolved)))
+          (is (= 200 (count (set (map :id (:items resolved))))))))
+      (finally
+        (web/reset-dashboard-cache!)))))
 
 (deftest dashboard-automation-clarifications-expose-safe-bounded-question-excerpts
   ;; Given legacy and typed clarifications with short, unsafe, oversized and

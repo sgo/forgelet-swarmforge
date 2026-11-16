@@ -679,6 +679,13 @@ workspace paths and unrelated project state are excluded. Every collection has
 a fixed maximum plus `count` and `truncated`; project and card order follows the
 authoritative board order.
 
+Resolved approval rows carry their authoritative `resolution` as exactly
+`approved` or `sent_back`, alongside the existing safe identity fields. Pending
+approvals do not carry a resolution. A missing, non-string or unknown resolved
+ending fails the automation projection closed with the ordinary bounded 502
+rather than emitting a value that a Matrix client could render as a misleading
+mark.
+
 State responses report `X-SwarmForge-Projection`, `X-SwarmForge-Cache`
 (`hit`, `miss` or `coalesced`) and `X-SwarmForge-Build-Ms`. Process metrics hold
 safe aggregate request/hit/miss/coalesced/build/failure counts, latest build

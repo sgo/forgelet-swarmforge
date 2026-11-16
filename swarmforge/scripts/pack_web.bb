@@ -2130,6 +2130,21 @@
     (contains? item :reviews)
     (assoc :has_reviews (boolean (seq (:reviews item))))))
 
+(def resolved-approval-resolutions #{"approved" "sent_back"})
+
+(defn automation-resolved-approval [item]
+  (let [resolution (:resolution item)]
+    (when-not (and (string? resolution)
+                   (contains? resolved-approval-resolutions resolution))
+      (throw (bounded-dashboard-build-error :resolved-approval-resolution)))
+    (assoc (automation-approval item) :resolution resolution)))
+
+(defn automation-resolved-approval-section [items]
+  (bounded-automation-section
+   (mapv automation-resolved-approval items)
+   automation-approval-limit
+   identity))
+
 (defn automation-card [item]
   (select-keys item [:name :id :lane :updated_at :audit_count :batch :merging]))
 
@@ -2232,9 +2247,8 @@
      :approvals
      (bounded-automation-section
       (:approvals snapshot) automation-approval-limit automation-approval)
-     :resolved_approvals
-     (bounded-automation-section
-      (:resolved_approvals snapshot) automation-approval-limit automation-approval)
+     :resolved_approvals (automation-resolved-approval-section
+                          (:resolved_approvals snapshot))
      :clarifications
      {:legacy
       (bounded-automation-section
