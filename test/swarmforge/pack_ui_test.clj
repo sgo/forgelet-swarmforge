@@ -837,6 +837,7 @@
                 "status: pending\n"
                 "role: specifier\n"
                 "created_at: 2026-01-01T00:00:00Z\n"
+                "response: hidden legacy answer\n"
                 "\n"
                 "legacy clarification body\n"))]
     (try
@@ -878,23 +879,149 @@
           (is (= "clar-typed-cached"
                  (get-in state [:clarifications :typed :items 0
                                 :clarification_id])))
+          (is (= "typed clarification body"
+                 (get-in state [:clarifications :typed :items 0
+                                :question_excerpt])))
+          (is (= "legacy clarification body"
+                 (get-in state [:clarifications :legacy :items 0
+                                :question_excerpt])))
           (is (= "specifier"
                  (get-in state [:projects :items 0 :activity :items 0 :role])))
           (is (not (contains? (get-in state [:clarifications :typed :items 0])
                               :body)))
           (is (not (contains? (get-in state [:clarifications :legacy :items 0])
                               :response)))
+          (is (not (contains? (get-in state [:clarifications :typed :items 0])
+                              :reference_id)))
           (is (not (contains? state :chat)))
           (is (not (str/includes? (:body first-response)
                                   "Integrate HTW stories")))
           (is (not (str/includes? (:body first-response)
-                                  "clarification body")))
+                                  "hidden legacy answer")))
           (is (not (str/includes? (:body first-response)
                                   "features/cached.feature")))
           (is (>= (:hits metrics) 1))
           (is (>= (:builds metrics) 2))
           (is (= (count (.getBytes (:body second-response) "UTF-8"))
                  (:last_response_bytes metrics))))))))
+
+(deftest dashboard-automation-clarifications-expose-safe-bounded-question-excerpts
+  ;; Given legacy and typed clarifications with short, unsafe, oversized and
+  ;; empty question bodies
+  ;; When the automation projection is read
+  ;; Then both stores expose one safe bounded question excerpt without bodies,
+  ;; answers or references
+  (let [root (doto (tmp-dir) setup-pack!)
+        secret-path "/Users/operator/private/project"
+        token "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+        oversized (apply str (repeat 700 "x"))
+        write-legacy!
+        (fn [id body & [response]]
+          (write-file
+           (fs/path root ".swarmforge" "dashboard" "clarifications" "pending"
+                    (str id ".request"))
+           (str "id: " id "\n"
+                "status: pending\n"
+                "role: specifier\n"
+                "created_at: 2026-01-01T00:00:00Z\n"
+                (when response (str "response: " response "\n"))
+                "\n"
+                body "\n")))
+        write-typed!
+        (fn [id body]
+          (write-file
+           (fs/path root ".swarmforge" "dashboard" "requests" "pending"
+                    (str id ".request"))
+           (str "id: " id "\n"
+                "status: open\n"
+                "created_at: 2026-01-01T00:00:00Z\n"
+                "updated_at: 2026-01-01T00:00:00Z\n"
+                "author: project-agent\n"
+                "direction: project-agent\n"
+                "kind: clarification\n"
+                "clarification_id: " id "\n"
+                "reference_id: clar-reference\n"
+                "attention_state: unseen\n"
+                "\n"
+                body "\n")))]
+    (write-legacy! "clar-legacy-short" "Short legacy question?"
+                   "hidden legacy answer")
+    (write-legacy! "clar-legacy-empty" " \n\t ")
+    (write-legacy! "clar-legacy-unsafe"
+                   (str "Inspect " secret-path "\nwith " token "\n" oversized))
+    (write-file
+     (fs/path root ".swarmforge" "dashboard" "clarifications" "pending"
+              "clar-legacy-malformed.request")
+     "id: clar-legacy-malformed\nstatus: pending\nrole: specifier")
+    (write-typed! "clar-reference" "Reference question?")
+    (write-typed! "clar-typed-short" "Short typed question?")
+    (write-typed! "clar-typed-empty" "")
+    (write-typed! "clar-typed-unsafe"
+                  (str "Inspect " secret-path "\nwith " token "\n" oversized))
+    (try
+      (web/reset-dashboard-cache!)
+      (binding [web/*dashboard-cache-now-ms* 1000]
+        (let [response (direct-response root "GET" "/api/automation-state" nil)
+              state (json/parse-string (:body response) true)
+              legacy (into {} (map (juxt :id identity)
+                                   (get-in state
+                                           [:clarifications :legacy :items])))
+              typed (into {} (map (juxt :id identity)
+                                  (get-in state
+                                          [:clarifications :typed :items])))
+              unsafe-legacy (:question_excerpt
+                             (get legacy "clar-legacy-unsafe"))
+              unsafe-typed (:question_excerpt
+                            (get typed "clar-typed-unsafe"))
+              emoji-excerpt
+              (web/automation-clarification-question
+               (apply str (repeat 600 "😀")))]
+          (is (= 200 (:status response)))
+          (is (= "Short legacy question?"
+                 (get-in legacy ["clar-legacy-short" :question_excerpt])))
+          (is (= "Short typed question?"
+                 (get-in typed ["clar-typed-short" :question_excerpt])))
+          (is (contains? (get legacy "clar-legacy-empty")
+                         :question_excerpt))
+          (is (nil? (get-in legacy
+                            ["clar-legacy-empty" :question_excerpt])))
+          (is (contains? (get typed "clar-typed-empty")
+                         :question_excerpt))
+          (is (nil? (get-in typed ["clar-typed-empty" :question_excerpt])))
+          (is (contains? (get legacy "clar-legacy-malformed")
+                         :question_excerpt))
+          (is (nil? (get-in legacy
+                            ["clar-legacy-malformed" :question_excerpt])))
+          (doseq [excerpt [unsafe-legacy unsafe-typed]]
+            (is (= web/automation-clarification-excerpt-limit
+                   (.codePointCount ^String excerpt 0 (.length ^String excerpt))))
+            (is (str/ends-with?
+                 excerpt web/automation-clarification-excerpt-marker))
+            (is (str/includes? excerpt "[redacted-path]"))
+            (is (str/includes? excerpt "[redacted-token]"))
+            (is (not (str/includes? excerpt secret-path)))
+            (is (not (str/includes? excerpt token)))
+            (is (not (str/includes? excerpt "\n")))
+            (is (not (str/includes?
+                      (:body response)
+                      (apply str (repeat 700 "x"))))))
+          (is (= web/automation-clarification-excerpt-limit
+                 (.codePointCount ^String emoji-excerpt
+                                  0 (.length ^String emoji-excerpt))))
+          (is (str/ends-with?
+               emoji-excerpt web/automation-clarification-excerpt-marker))
+          (is (not (contains? (get typed "clar-typed-short")
+                              :reference_id)))
+          (is (not (contains? (get typed "clar-typed-short") :body)))
+          (is (not (contains? (get legacy "clar-legacy-short") :response)))
+          (is (not (str/includes? (:body response) "hidden legacy answer")))
+          (is (= "Short typed question?"
+                 (str/trimr
+                  (:body (get (into {} (map (juxt :id identity)
+                                           (:chat (web-state root))))
+                              "clar-typed-short")))))))
+      (finally
+        (web/reset-dashboard-cache!)))))
 
 (deftest dashboard-conditional-reads-use-authoritative-state-etags
   ;; Given a full state body and its ETag
@@ -1128,6 +1255,68 @@
           (is (true? (:truncated cards)))
           (is (= 200 (count (:items cards))))
           (is (= "card-0" (get-in cards [:items 0 :name])))))
+      (finally
+        (web/reset-dashboard-cache!)))))
+
+(deftest dashboard-automation-clarification-excerpts-remain-bounded
+  ;; Given more legacy and typed clarifications than either projection section
+  ;; may contain, each with a long question
+  ;; When the automation projection is built
+  ;; Then both sections keep their row bounds and the response stays bounded
+  (let [root (doto (tmp-dir) setup-pack!)
+        question (apply str (repeat 2000 "q"))
+        write-legacy!
+        (fn [index]
+          (let [id (format "clar-legacy-bound-%03d" index)]
+            (write-file
+             (fs/path root ".swarmforge" "dashboard" "clarifications" "pending"
+                      (str id ".request"))
+             (str "id: " id "\n"
+                  "status: pending\n"
+                  "role: specifier\n"
+                  "created_at: 2026-01-01T00:00:00Z\n"
+                  "\n" question "\n"))))
+        write-typed!
+        (fn [index]
+          (let [id (format "clar-typed-bound-%03d" index)]
+            (write-file
+             (fs/path root ".swarmforge" "dashboard" "requests" "pending"
+                      (str id ".request"))
+             (str "id: " id "\n"
+                  "status: open\n"
+                  "created_at: 2026-01-01T00:00:00Z\n"
+                  "updated_at: 2026-01-01T00:00:00Z\n"
+                  "author: project-agent\n"
+                  "direction: project-agent\n"
+                  "kind: clarification\n"
+                  "clarification_id: " id "\n"
+                  "attention_state: unseen\n"
+                  "\n" question "\n"))))]
+    (doseq [index (range 250)]
+      (write-legacy! index)
+      (write-typed! index))
+    (try
+      (web/reset-dashboard-cache!)
+      (binding [web/*dashboard-cache-now-ms* 1000]
+        (let [response (direct-response root "GET" "/api/automation-state" nil)
+              state (json/parse-string (:body response) true)
+              legacy (get-in state [:clarifications :legacy])
+              typed (get-in state [:clarifications :typed])
+              excerpts (concat (map :question_excerpt (:items legacy))
+                               (map :question_excerpt (:items typed)))]
+          (is (= 200 (:status response)))
+          (is (< (count (.getBytes (:body response) "UTF-8")) 500000))
+          (is (= {:count 250 :truncated true}
+                 (select-keys legacy [:count :truncated])))
+          (is (= {:count 250 :truncated true}
+                 (select-keys typed [:count :truncated])))
+          (is (= 200 (count (:items legacy))))
+          (is (= 200 (count (:items typed))))
+          (is (every?
+               #(<= (.codePointCount ^String % 0 (.length ^String %))
+                    web/automation-clarification-excerpt-limit)
+               excerpts))
+          (is (not (str/includes? (:body response) question)))))
       (finally
         (web/reset-dashboard-cache!)))))
 

@@ -2122,6 +2122,8 @@
 (def automation-activity-limit 64)
 (def automation-lane-limit 64)
 (def automation-identity-limit 512)
+(def automation-clarification-excerpt-limit 500)
+(def automation-clarification-excerpt-marker " [truncated]")
 
 (defn automation-approval [item]
   (cond-> (select-keys item [:id :gate :task_id :task :kind :project])
@@ -2137,16 +2139,44 @@
 (defn automation-activity [item]
   (select-keys item [:alive :state :heat :last_changed_at]))
 
+(defn code-point-length [text]
+  (.codePointCount ^String text 0 (.length ^String text)))
+
+(defn code-point-prefix [text maximum]
+  (if (<= (code-point-length text) maximum)
+    text
+    (subs text 0 (.offsetByCodePoints ^String text 0 (int maximum)))))
+
+(defn automation-clarification-question [text]
+  (let [text (when (string? text)
+               (-> text
+                   (str/replace #"[\p{Cc}\p{Cf}]" " ")
+                   (str/replace #"\s+" " ")
+                   (str/replace clarification-path-re "[redacted-path]")
+                   (str/replace chat-token-re "[redacted-token]")
+                   str/trim))]
+    (when-not (str/blank? text)
+      (if (> (code-point-length text)
+             automation-clarification-excerpt-limit)
+        (let [prefix-limit (- automation-clarification-excerpt-limit
+                              (code-point-length
+                               automation-clarification-excerpt-marker))]
+          (str (code-point-prefix text prefix-limit)
+               automation-clarification-excerpt-marker))
+        text))))
+
 (defn automation-clarification [item]
-  (select-keys item
-               [:id :status :role :created_at :project :author :direction :kind
-                :clarification_id :reference_id :attention :answered_at
-                :answered_by :withdrawn_at :seen_at :updated_at]))
+  (assoc (select-keys item
+                      [:id :status :role :created_at :project :author :direction
+                       :kind :clarification_id :attention :answered_at
+                       :answered_by :withdrawn_at :seen_at :updated_at])
+         :question_excerpt
+         (automation-clarification-question (:body item))))
 
 (defn typed-project-clarifications [root project]
   (->> (list-chat root)
        (filter #(= "clarification" (:kind %)))
-       (map #(assoc (automation-clarification %) :project project))
+       (map #(assoc % :project project))
        (sort-by (juxt #(str (:created_at %)) #(str (:id %))))
        vec))
 

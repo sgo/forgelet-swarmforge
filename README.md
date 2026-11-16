@@ -668,11 +668,16 @@ are process-local and root-isolated; no state crosses dashboard processes.
 
 `GET /api/automation-state` returns the bounded `automation-v1` projection used
 by automation consumers. It carries Family/project identity, approvals,
-resolved approvals, legacy and typed clarification lifecycle facts, lanes,
-cards and bounded activity facts. Approval review bodies, chat/clarification
-bodies, pane status text, dashboard URLs, workspace paths and unrelated project
-state are excluded. Every collection has a fixed maximum plus `count` and
-`truncated`; project and card order follows the authoritative board order.
+resolved approvals, legacy and typed clarification lifecycle facts including a
+bounded `question_excerpt`, lanes, cards and bounded activity facts. The excerpt
+is at most 500 Unicode code points including its ` [truncated]` marker. It
+flattens controls and whitespace, redacts filesystem paths and credential-shaped
+tokens, and is `null` when the source question is blank or malformed. Approval
+review bodies, clarification answers, clarification references, full
+clarification bodies, surrounding chat, pane status text, dashboard URLs,
+workspace paths and unrelated project state are excluded. Every collection has
+a fixed maximum plus `count` and `truncated`; project and card order follows the
+authoritative board order.
 
 State responses report `X-SwarmForge-Projection`, `X-SwarmForge-Cache`
 (`hit`, `miss` or `coalesced`) and `X-SwarmForge-Build-Ms`. Process metrics hold
