@@ -104,6 +104,30 @@
                       :task-id task-id :audit audit}))))
       [])))
 
+(declare route!)
+
+(defn stage-ready-queued-project []
+  (let [root (tmp-project)]
+    (route! root "active" "task-active")
+    (route! root "queued-a" "task-queued-a")
+    (route! root "queued-b" "task-queued-b")
+    (write-file (fs/path root ".gitignore")
+                ".swarmforge/\ntarget/\ntmp/\n")
+    (sh/sh "git" "init" "-q" :dir (str root))
+    (sh/sh "git" "config" "user.email" "test@example.com" :dir (str root))
+    (sh/sh "git" "config" "user.name" "Test" :dir (str root))
+    (sh/sh "git" "add" "-A" :dir (str root))
+    (sh/sh "git" "commit" "-q" "-m" "active card" :dir (str root))
+    (let [propose (sh/sh "bb" (str (fs/path scripts "stage.bb"))
+                         "propose" "spec" "tasks/*.md" "--root" (str root))
+          code (sh/sh "bb" (str (fs/path scripts "stage.bb"))
+                      "check" "code" "--root" (str root))]
+      (when-not (zero? (:exit propose))
+        (throw (ex-info "Could not prepare spec gate" propose)))
+      (when-not (zero? (:exit code))
+        (throw (ex-info "Could not prepare code gate" code)))
+      root)))
+
 (defn mark-card-done! [project name]
   (let [result (board project "done" "--name" name)]
     (when-not (zero? (:exit result))
@@ -728,6 +752,12 @@
         (let [result (route! root name (get ids name))]
           (is (zero? (:exit result)) (:err result))
           (is (str/includes? (:out result) "QUEUED:"))))
+      (is (fs/regular-file? (fs/path root "tasks" "active.md")))
+      (is (not (fs/exists? (fs/path root "tasks" "second.md"))))
+      (is (not (fs/exists? (fs/path root "tasks" "third.md"))))
+      (doseq [name ["active" "second" "third"]]
+        (is (fs/regular-file?
+             (fs/path root ".swarmforge" "board" (str name ".txt")))))
       (is (= ["spec" "queued" "queued"]
              (mapv :lane (rows root))))
       (is (= ["req-promote-task-active.request"]
@@ -748,12 +778,18 @@
              (into {} (map (juxt :name :lane)) (rows root))))
       (is (= ["req-promote-task-second.request"]
              (mapv fs/file-name (request-files root))))
+      (is (= "# second\n\nsecond card\n"
+             (slurp (str (fs/path root "tasks" "second.md")))))
+      (is (not (fs/exists? (fs/path root "tasks" "third.md"))))
 
       (let [before (mapv #(slurp (str %)) (request-files root))
+            second-doc (fs/path root "tasks" "second.md")
+            doc-mtime (fs/last-modified-time second-doc)
             duplicate (board root "complete-promote" "--name" "active")]
         (is (zero? (:exit duplicate)) (:err duplicate))
         (is (= before (mapv #(slurp (str %)) (request-files root))))
-        (is (= 1 (count (request-files root)))))
+        (is (= 1 (count (request-files root))))
+        (is (= doc-mtime (fs/last-modified-time second-doc))))
 
       (let [promotion (edn/read-string
                        (slurp (str (fs/path root ".swarmforge/card-promotions/task-active.edn"))))]
@@ -856,6 +892,7 @@
         (fs/create-dirs pending))
       (is (= {"active" "done" "next" "queued"}
              (into {} (map (juxt :name :lane)) (rows root))))
+      (is (not (fs/exists? (fs/path root "tasks" "next.md"))))
       (is (empty? (request-files root)))
       (let [promotion (edn/read-string
                        (slurp (str (fs/path root ".swarmforge/card-promotions/task-active.edn"))))]
@@ -863,8 +900,85 @@
       (let [recovered (board root "complete-promote" "--name" "active")]
         (is (zero? (:exit recovered)) (:err recovered)))
       (is (= "spec" (:lane (first (filter #(= "next" (:name %)) (rows root))))))
+      (is (= "# next\n\nnext card\n"
+             (slurp (str (fs/path root "tasks" "next.md")))))
       (is (= ["req-promote-task-next.request"]
              (mapv fs/file-name (request-files root))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest promotion-validates-the-queued-note-before-activation
+  ;; Given a queued card whose board note is missing or conflicts with an
+  ;; existing task document
+  ;; When completion attempts promotion
+  ;; Then the row stays queued, the source note is preserved, and no partial
+  ;; document is accepted
+  (let [root (tmp-project)]
+    (try
+      (route! root "active" "task-active")
+      (route! root "next" "task-next")
+      (let [done (fs/path root ".swarmforge/dashboard/requests/done"
+                          "req-promote-task-active.request")
+            body (fs/path root ".swarmforge/board/next.txt")
+            doc (fs/path root "tasks/next.md")]
+        (fs/create-dirs (fs/parent done))
+        (fs/move (first (request-files root)) done)
+        (fs/delete body)
+        (let [missing (board root "complete-promote" "--name" "active")]
+          (is (not (zero? (:exit missing))))
+          (is (str/includes? (str (:err missing) (:out missing))
+                             "Card note is missing"))
+          (is (= "queued"
+                 (:lane (first (filter #(= "next" (:name %)) (rows root))))))
+          (is (not (fs/exists? doc))))
+
+        (write-file body "next card\n")
+        (write-file doc "# next\n\nwrong bytes\n")
+        (let [conflict (board root "complete-promote" "--name" "active")]
+          (is (not (zero? (:exit conflict))))
+          (is (str/includes? (str (:err conflict) (:out conflict))
+                             "conflicts with active note"))
+          (is (= "wrong bytes\n"
+                 (second (str/split (slurp (str doc)) #"\n\n" 2))))
+          (is (= "queued"
+                 (:lane (first (filter #(= "next" (:name %)) (rows root)))))))
+
+        (fs/delete doc)
+        (let [promoted (board root "complete-promote" "--name" "active")]
+          (is (zero? (:exit promoted)) (:err promoted))
+          (is (str/includes? (:out promoted) "PROMOTED:next:task-next:"))
+          (is (= "# next\n\nnext card\n" (slurp (str doc))))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest queued-removal-preserves-board-recovery-and-removes-only-exact-doc
+  ;; Given queued cards with no document and with a legacy exact document
+  ;; When each queued row is removed
+  ;; Then the board body remains and only the exact tracked copy is removed
+  (let [root (tmp-project)]
+    (try
+      (route! root "active" "task-active")
+      (route! root "legacy" "task-legacy")
+      (let [legacy-doc (fs/path root "tasks/legacy.md")
+            legacy-body (fs/path root ".swarmforge/board/legacy.txt")]
+        (write-file legacy-doc "# legacy\n\nlegacy card\n")
+        (let [removed (board root "remove" "--name" "legacy")]
+          (is (zero? (:exit removed)) (:err removed))
+          (is (not (fs/exists? legacy-doc)))
+          (is (= "legacy card\n" (slurp (str legacy-body))))
+          (is (not (some #(= "legacy" (:name %)) (rows root))))))
+
+      (route! root "conflict" "task-conflict")
+      (let [conflict-doc (fs/path root "tasks/conflict.md")
+            conflict-body (fs/path root ".swarmforge/board/conflict.txt")]
+        (write-file conflict-doc "# conflict\n\ndifferent\n")
+        (let [refused (board root "remove" "--name" "conflict")]
+          (is (not (zero? (:exit refused))))
+          (is (str/includes? (str (:err refused) (:out refused))
+                             "conflicts with active note"))
+          (is (fs/regular-file? conflict-doc))
+          (is (fs/regular-file? conflict-body))
+          (is (some #(= "conflict" (:name %)) (rows root)))))
       (finally
         (fs/delete-tree root)))))
 
@@ -873,6 +987,10 @@
     (try
       (route! root "active" "task-active")
       (route! root "next" "task-next")
+      (is (fs/regular-file? (fs/path root "tasks" "active.md")))
+      (is (not (fs/exists? (fs/path root "tasks" "next.md"))))
+      (is (= "next card\n"
+             (slurp (str (fs/path root ".swarmforge" "board" "next.txt")))))
       (let [done (fs/path root ".swarmforge/dashboard/requests/done/req-promote-task-active.request")]
         (fs/create-dirs (fs/parent done))
         (fs/move (first (request-files root)) done))
@@ -894,6 +1012,8 @@
           (is (str/includes? (:out complete) "PROMOTED:next:task-next:"))))
       (is (= "done" (:lane (first (filter #(= "active" (:name %)) (rows root))))))
       (is (= "spec" (:lane (first (filter #(= "next" (:name %)) (rows root))))))
+      (is (= "# next\n\nnext card\n"
+             (slurp (str (fs/path root "tasks" "next.md")))))
       (is (= ["req-promote-task-next.request"]
              (mapv fs/file-name (request-files root))))
       (let [run (sh/sh "bb" (str (fs/path scripts "agent-runner.bb"))
@@ -908,6 +1028,60 @@
         (sh/sh "tmux" "-S" (str (fs/path root ".swarmforge/agent-tmux.sock"))
                "kill-server")
         (fs/delete-tree root)))))
+
+(deftest queued-board-notes-do-not-block-completion-but-dirty-state-does
+  ;; Given an active card and two queued board notes with no tracked task docs
+  ;; When completion runs, arbitrary dirty state is rejected, and a clean tree
+  ;; completes
+  ;; Then only the promoted queued note materializes and all queued bodies survive
+  (let [complete! (fn [root]
+                    (sh/sh "bb" (str (fs/path scripts "stage.bb"))
+                           "complete" "--root" (str root)))]
+    (let [root (stage-ready-queued-project)]
+      (try
+        (let [completed (complete! root)]
+          (is (zero? (:exit completed)) (str (:err completed) (:out completed)))
+          (is (= "done"
+                 (:lane (first (filter #(= "active" (:name %)) (rows root))))))
+          (is (= "spec"
+                 (:lane (first (filter #(= "queued-a" (:name %))
+                                       (rows root))))))
+          (is (fs/regular-file? (fs/path root "tasks/queued-a.md")))
+          (is (not (fs/exists? (fs/path root "tasks/queued-b.md"))))
+          (doseq [name ["active" "queued-a" "queued-b"]]
+            (is (fs/regular-file?
+                 (fs/path root ".swarmforge/board" (str name ".txt"))))))
+        (finally
+          (fs/delete-tree root))))
+
+    (doseq [[label dirty!]
+            [["untracked"
+              #(write-file (fs/path % "unrelated.txt") "dirty\n")]
+             ["modified"
+              #(write-file (fs/path % "tasks/active.md")
+                           "# active\n\nmodified\n")]
+             ["staged"
+              (fn [root]
+                (write-file (fs/path root "staged.txt") "staged\n")
+                (sh/sh "git" "add" "staged.txt" :dir (str root)))]
+             ["missing-active-note"
+              #(fs/delete (fs/path % "tasks/active.md"))]
+             ["malformed-board"
+              (fn [root]
+                (let [file (fs/path root ".swarmforge/board/tasks.tsv")]
+                  (write-file
+                   file
+                   (str/replace (slurp (str file))
+                                #"(?m)^(queued-a\tqueued\t[^\t]+\t[^\t]+)\t[^\t]+"
+                                "$1\t"))))]]]
+      (let [root (stage-ready-queued-project)]
+        (try
+          (dirty! root)
+          (let [refused (complete! root)]
+            (is (not (zero? (:exit refused))) label)
+            (is (not (str/blank? (str (:err refused) (:out refused)))) label))
+          (finally
+            (fs/delete-tree root)))))))
 
 (deftest dashboard-exposes-queued-and-one-active-card
   (let [root (tmp-project)]
@@ -1114,6 +1288,10 @@
                [(:lane queued-approved) (:status queued-approved)]))
         (is (= "queued" (:created_lane queued-approved)))
         (is (not (str/blank? (:task_id queued-approved))))
+        (is (fs/regular-file? (fs/path project "tasks" "first-card.md")))
+        (is (not (fs/exists? (fs/path project "tasks" "second-card.md"))))
+        (is (fs/regular-file?
+             (fs/path project ".swarmforge" "board" "second-card.txt")))
         (is (= [] (:proposals pending)))
         (is (= 2 (count (rows project))))
         (is (not (zero? (:exit duplicate))))

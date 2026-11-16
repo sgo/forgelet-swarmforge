@@ -2083,7 +2083,9 @@
         (is (zero? (:exit (route "queued" "task-queued")))))
       (let [proposal (run-stage project "propose" "spec" "tasks/*.md")]
         (is (zero? (:exit proposal)) (str (:err proposal) (:out proposal))))
-      (is (zero? (:exit (git project "add" "tasks/active.md" "tasks/queued.md"))))
+      (is (fs/regular-file? (fs/path project "tasks" "active.md")))
+      (is (not (fs/exists? (fs/path project "tasks" "queued.md"))))
+      (is (zero? (:exit (git project "add" "tasks/active.md"))))
       (is (zero? (:exit (git project "commit" "-q" "-m" "queue cards"))))
       (let [status (-> (run-stage project "status" "--json")
                        :out
@@ -2121,6 +2123,7 @@
                             [name lane])))
                    (str/split-lines
                     (slurp (str (fs/path project ".swarmforge/board/tasks.tsv")))))))
+      (is (fs/regular-file? (fs/path project "tasks" "queued.md")))
       (is (zero? (:exit (git project "stash" "pop"))))
       (is (str/includes? (slurp (str (fs/path project "AGENTS.md")))
                          "operator work to restore"))

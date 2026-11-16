@@ -125,15 +125,19 @@
       (fs/create-dirs (fs/parent file))
       (spit (str file) text))))
 
+(defn task-document [name text]
+  (let [body (or text "")]
+    (str "# " name "\n\n"
+         body
+         (when-not (str/ends-with? body "\n") "\n"))))
+
+(declare atomic-spit! record-activation! row-for row-note-body!)
+
 (defn write-task-doc! [root name text]
   (when (some? name)
-    (let [file (task-doc-file root name)
-          body (or text "")]
+    (let [file (task-doc-file root name)]
       (fs/create-dirs (fs/parent file))
-      (spit (str file)
-            (str "# " name "\n\n"
-                 body
-                 (when-not (str/ends-with? body "\n") "\n"))))))
+      (atomic-spit! file (task-document name text)))))
 
 (defn timestamp []
   (.format java.time.format.DateTimeFormatter/ISO_INSTANT
@@ -169,7 +173,23 @@
             ""))
     (fs/move tmp file {:replace-existing true :atomic-move true})))
 
-(declare atomic-spit! record-activation!)
+(defn materialize-task-doc! [root name text]
+  (let [file (task-doc-file root name)
+        expected (task-document name text)]
+    (cond
+      (fs/regular-file? file)
+      (if (= expected (slurp (str file)))
+        :validated
+        (exit! 1 (str "Queued card note conflicts with active note: " name)))
+
+      (fs/exists? file)
+      (exit! 1 (str "Queued card note path is not a regular file: " name))
+
+      :else
+      (do
+        (fs/create-dirs (fs/parent file))
+        (atomic-spit! file expected)
+        :created))))
 
 (defn row-name [line]
   (first (str/split line #"\t")))
@@ -213,7 +233,8 @@
               (record-activation! root task-id activated-at))
             (write-rows file (conj rows (task-row name lane activated-at task-id))))
           (write-body! root name (:text opts))
-          (write-task-doc! root name (:text opts)))))))
+          (when-not (= lane "queued")
+            (write-task-doc! root name (:text opts))))))))
 
 (defn rewrite-lane
   ([line name lane]
@@ -404,6 +425,18 @@
         (let [rows (read-rows file)]
           (when-not (find-task rows name)
             (exit! 1 (str "Unknown task name: " name)))
+          (let [task (find-task rows name)
+                [_ lane _ _ _] (str/split task #"\t" -1)
+                doc (task-doc-file root name)]
+            (when (= lane "queued")
+              (let [body (row-note-body! root task)]
+                (when (fs/exists? doc)
+                  (when-not (and (fs/regular-file? doc)
+                                 (= (task-document name body)
+                                    (slurp (str doc))))
+                    (exit! 1 (str "Queued card note conflicts with active note: "
+                                  name)))
+                  (fs/delete-if-exists doc)))))
           (write-rows file (filterv #(not= (str/lower-case name)
                                            (str/lower-case (or (row-name %) "")))
                                     rows)))))))
@@ -434,6 +467,37 @@
                     (let [[_ _ created _ task-id] (str/split row #"\t" -1)]
                       [created (or task-id "")])))
          vec)))
+
+(defn row-note-body! [root row]
+  (let [[name lane _ _ task-id] (str/split (or row "") #"\t" -1)
+        body-file (task-body-file root name)]
+    (when-not (and (not (str/blank? (or name "")))
+                   (not (str/blank? (or lane "")))
+                   (not (str/blank? (or task-id ""))))
+      (exit! 1 (str "Malformed board row: " (or row ""))))
+    (when-not (fs/regular-file? body-file)
+      (exit! 1 (str "Card note is missing: " name)))
+    (slurp (str body-file))))
+
+(defn queued-note-body! [root row]
+  (when-not (= "queued" (second (str/split (or row "") #"\t" -1)))
+    (exit! 1 (str "Malformed queued board row: " (or row ""))))
+  (row-note-body! root row))
+
+(defn materialize-queued-row! [root row]
+  (let [[name _ _ _ _] (str/split row #"\t" -1)
+        text (queued-note-body! root row)]
+    {:name name
+     :result (materialize-task-doc! root name text)
+     :text text}))
+
+(defn cleanup-created-task-doc! [root name materialization]
+  (when (and (= :created (if (map? materialization)
+                           (:result materialization)
+                           materialization))
+             (let [row (row-for (read-rows (tasks-file root)) name)]
+               (and row (= "queued" (second (str/split row #"\t" -1))))))
+    (fs/delete-if-exists (task-doc-file root name))))
 
 (defn request-dir [root]
   (fs/path root ".swarmforge" "dashboard" "requests" "pending"))
@@ -505,6 +569,8 @@
                   recovery-name (when recover (row-name recover))
                   recovery-id (when recover
                                 (nth (str/split recover #"\t" -1) 4 nil))
+                  recovery-materialization
+                  (when recover (materialize-queued-row! root recover))
                   lane (if (or (seq active) recover) "queued" "spec")
                   activated-at (timestamp)
                   row (task-row name lane activated-at task-id)
@@ -517,32 +583,38 @@
                                             %)
                                          rows)
                                    rows)]
-              (when recover
-                (record-activation! root recovery-id activated-at)
-                (let [body-file (task-body-file root recovery-name)]
+              (try
+                (when recover
+                  (record-activation! root recovery-id activated-at)
                   (ensure-promotion-request!
                    root (request-id recovery-id) recovery-name recovery-id
-                   (if (fs/regular-file? body-file) (slurp (str body-file)) ""))))
-              (when (= lane "spec")
-                (record-activation! root task-id activated-at))
-              (write-rows file (conj recovered-rows row))
-              (write-body! root name text)
-              (write-task-doc! root name text)
-              (cond
-                recover
-                (do
-                  (fs/delete-if-exists (fs/path root ".swarmforge" "project-idle"))
-                  (println (str "RECOVERED:" recovery-name ":" recovery-id))
+                   (:text recovery-materialization)))
+                (when (= lane "spec")
+                  (record-activation! root task-id activated-at))
+                (write-rows file (conj recovered-rows row))
+                (write-body! root name text)
+                (when-not (= lane "queued")
+                  (write-task-doc! root name text))
+                (cond
+                  recover
+                  (do
+                    (fs/delete-if-exists (fs/path root ".swarmforge" "project-idle"))
+                    (println (str "RECOVERED:" recovery-name ":" recovery-id))
+                    (println (str "QUEUED:" name ":" task-id)))
+
+                  (= lane "spec")
+                  (let [rid (request-id task-id)]
+                    (fs/delete-if-exists (fs/path root ".swarmforge" "project-idle"))
+                    (ensure-promotion-request! root rid name task-id text)
+                    (println (str "ACTIVE:" name ":" task-id ":" rid)))
+
+                  :else
                   (println (str "QUEUED:" name ":" task-id)))
-
-                (= lane "spec")
-                (let [rid (request-id task-id)]
-                  (fs/delete-if-exists (fs/path root ".swarmforge" "project-idle"))
-                  (ensure-promotion-request! root rid name task-id text)
-                  (println (str "ACTIVE:" name ":" task-id ":" rid)))
-
-                :else
-                (println (str "QUEUED:" name ":" task-id))))))))))
+                (catch Throwable error
+                  (when recovery-materialization
+                    (cleanup-created-task-doc! root recovery-name
+                                               recovery-materialization))
+                  (throw error))))))))))
 
 (defn promotion-file [root completed-id]
   (fs/path root ".swarmforge" "card-promotions"
@@ -569,16 +641,18 @@
     (rewrite-lane line name "done")
     line))
 
-(defn row-body [root row]
-  (let [name (row-name row)]
-    (if (fs/regular-file? (task-body-file root name))
-      (slurp (str (task-body-file root name)))
-      "")))
-
 (defn promote-recorded! [root file rows promotion]
   (let [target (row-for rows (:promoted-name promotion))]
-    (when target
-      (let [[target-name target-lane _ _ target-id] (str/split target #"\t" -1)]
+    (when-not target
+      (exit! 1 (str "Promotion target is missing from the board: "
+                    (:promoted-name promotion))))
+    (let [[target-name target-lane _ _ target-id] (str/split target #"\t" -1)
+          _ (when-not (contains? #{"queued" "spec"} target-lane)
+              (exit! 1 (str "Promotion target is in unexpected lane "
+                            target-lane ": " target-name)))
+          note-text (row-note-body! root target)
+          materialization (materialize-task-doc! root target-name note-text)]
+      (try
         (let [activated-at (timestamp)]
           (when (= target-lane "queued")
             (record-activation! root
@@ -587,7 +661,7 @@
           (ensure-promotion-request! root (:request-id promotion)
                                      target-name
                                      (or (:promoted-id promotion) target-id)
-                                     (row-body root target))
+                                     note-text)
           (when (= target-lane "queued")
             (atomic-spit!
              file
@@ -598,7 +672,10 @@
                             %)
                          rows))
                   "\n")))
-          (fs/delete-if-exists (fs/path root ".swarmforge" "project-idle")))))
+          (fs/delete-if-exists (fs/path root ".swarmforge" "project-idle")))
+        (catch Throwable error
+          (cleanup-created-task-doc! root target-name materialization)
+          (throw error))))
     (write-promotion! root (:completed-id promotion)
                       (assoc promotion :status :complete
                                        :completed-at (timestamp)))

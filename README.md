@@ -240,6 +240,14 @@ dashboard request. `stage complete` is the promotion boundary: it marks the
 finished card done, promotes the oldest queued card to `spec`, and creates
 exactly one request for it. The dashboard shows `queued` before the gate lanes.
 
+A queued card's note lives only in ignored
+`.swarmforge/board/<card>.txt`; it does not create `tasks/<card>.md`. Promotion
+materializes that active note atomically from the board body, or validates an
+existing note byte-for-byte without rewriting it. Missing, malformed or
+conflicting queued notes fail closed and leave the row queued. Removing a queued
+row preserves the board body and removes only an exact tracked copy, so an
+active card's reviewed tree is not dirtied by later queued cards.
+
 Spec approval moves the active card from `spec` to `code` for visibility,
 whether approval is automatic or operator-recorded. It does not run or complete
 the code gate; the card remains in code until the agent records that gate and
