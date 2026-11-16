@@ -56,7 +56,4 @@ source, or operate an active forge.
 
 ## Operator acceptance
 
-- owner: operator | environment: disposable single-agent project | checks:
-  create two queued cards while an earlier card reaches deploy; confirm deploy
-  passes and both queued notes remain recoverable until promotion | status:
-  pending
+- owner: operator | environment: disposable single-agent project | checks: create two queued cards while an earlier card reaches deploy and confirm deploy passes while both queued notes remain recoverable until promotion | status: pending
