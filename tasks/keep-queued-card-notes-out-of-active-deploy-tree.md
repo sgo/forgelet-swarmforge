@@ -1,5 +1,3 @@
-# keep-queued-card-notes-out-of-active-deploy-tree
-
 # Keep queued card notes out of the active deploy tree
 
 ## Operator-observed problem
