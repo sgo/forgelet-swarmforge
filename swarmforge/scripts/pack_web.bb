@@ -2131,7 +2131,8 @@
     (assoc :has_reviews (boolean (seq (:reviews item))))))
 
 (def resolved-approval-resolutions
-  #{"approved" "sent_back" "automatic_spec_approval" "auto_approved"})
+  #{"approved" "sent_back" "automatic_spec_approval" "auto_approved"
+    "superseded"})
 
 (defn automation-resolved-approval [item]
   (let [resolution (:resolution item)]
@@ -2211,6 +2212,10 @@
   (let [family? (forge/forge? root)
         family-identity {:kind (if family? "family" "project")
                          :name (str (fs/file-name root))}
+        resolved-approvals (if family?
+                             (:resolved_approvals snapshot)
+                             (tagged (:name family-identity)
+                                     (:resolved_approvals snapshot)))
         projects (if family?
                    (:projects snapshot)
                    [{:name (:name family-identity)
@@ -2249,7 +2254,7 @@
      (bounded-automation-section
       (:approvals snapshot) automation-approval-limit automation-approval)
      :resolved_approvals (automation-resolved-approval-section
-                          (:resolved_approvals snapshot))
+                          resolved-approvals)
      :clarifications
      {:legacy
       (bounded-automation-section

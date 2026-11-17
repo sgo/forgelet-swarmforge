@@ -882,6 +882,7 @@
                               :resolution)))
           (is (= [{:id "approval-resolved"
                    :task "resolved-card"
+                   :project (str (fs/file-name root))
                    :resolution "approved"}]
                  (get-in state [:resolved_approvals :items])))
           (is (= ["clar-legacy-cached"]
@@ -1034,8 +1035,58 @@
         (finally
           (web/reset-dashboard-cache!))))))
 
+(deftest dashboard-automation-resolved-approvals-preserve-superseded-in-every-scope
+  ;; Given a live-shaped Family and a project root whose historical resolved
+  ;; approvals include the authoritative superseded ending
+  ;; When each automation projection is read
+  ;; Then both succeed, preserve superseded, and every row carries its owner
+  (let [forge (tmp-dir)
+        alpha (fs/path forge "projects" "alpha")
+        beta (fs/path forge "projects" "beta")]
+    (doseq [project [alpha beta]]
+      (fs/create-dirs project)
+      (setup-pack! (str project) ["specifier"]))
+    (write-file (fs/path forge ".swarmforge" "open-projects")
+                "alpha\nbeta\n")
+    (web/record-resolution! (str alpha) "approval-alpha-superseded"
+                            "alpha-superseded" "superseded")
+    (web/record-resolution! (str beta) "approval-beta-approved"
+                            "beta-approved" "approved")
+    (web/record-resolution! (str beta) "approval-beta-superseded"
+                            "beta-superseded" "superseded")
+    (try
+      (web/reset-dashboard-cache!)
+      (binding [web/*dashboard-cache-now-ms* 1000]
+        (let [family-response (direct-response forge "GET"
+                                               "/api/automation-state" nil)
+              family (json/parse-string (:body family-response) true)
+              project-response (direct-response beta "GET"
+                                                "/api/automation-state" nil)
+              project (json/parse-string (:body project-response) true)
+              family-resolved (get-in family [:resolved_approvals :items])
+              project-resolved (get-in project [:resolved_approvals :items])]
+          (is (= 200 (:status family-response)))
+          (is (= "family" (get-in family [:identity :kind])))
+          (is (= 2 (count (filter #(= "superseded" (:resolution %))
+                                  family-resolved))))
+          (is (every? #(contains? #{"alpha" "beta"} (:project %))
+                      family-resolved))
+          (is (some #(and (= "approval-alpha-superseded" (:id %))
+                          (= "alpha" (:project %))
+                          (= "superseded" (:resolution %)))
+                    family-resolved))
+          (is (= 200 (:status project-response)))
+          (is (= "project" (get-in project [:identity :kind])))
+          (is (= 2 (count project-resolved)))
+          (is (every? #(= "beta" (:project %)) project-resolved))
+          (is (some #(and (= "approval-beta-superseded" (:id %))
+                          (= "superseded" (:resolution %)))
+                    project-resolved))))
+      (finally
+        (web/reset-dashboard-cache!)))))
+
 (deftest dashboard-automation-resolved-approvals-remain-bounded
-  ;; Given a live-shaped Family with 713 resolved approvals spanning all four
+  ;; Given a live-shaped Family with 713 resolved approvals spanning all five
   ;; authoritative endings
   ;; When the projection is built
   ;; Then it succeeds, reports the full count, returns only the bound, and
@@ -1045,7 +1096,7 @@
         beta (fs/path forge "projects" "beta")
         resolutions ["automatic_spec_approval" "automatic_spec_approval"
                      "automatic_spec_approval" "auto_approved"
-                     "approved" "sent_back"]
+                     "approved" "sent_back" "superseded"]
         write-resolution!
         (fn [index]
           (let [project (if (< index 357) alpha beta)
