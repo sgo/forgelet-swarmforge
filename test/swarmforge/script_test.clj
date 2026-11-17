@@ -71,6 +71,34 @@
 (defn dashboard-url-port [url]
   (Long/parseLong (second (re-matches #".*:(\d+)\s*$" (str/trim url)))))
 
+(defn free-port []
+  (with-open [socket (doto (java.net.ServerSocket.)
+                       (.bind (java.net.InetSocketAddress. "127.0.0.1" 0)))]
+    (.getLocalPort socket)))
+
+(defn start-direct-dashboard [root & port-args]
+  (let [pb (doto (java.lang.ProcessBuilder.
+                  (into [(script "pack_web.sh") "--serve" (str root)] port-args))
+             (.directory (java.io.File. (str root))))
+        _ (doto (.environment pb)
+            (.put "PATH" (System/getenv "PATH"))
+            (.put "GIT_CONFIG_NOSYSTEM" "1"))]
+    (.start pb)))
+
+(defn wait-for-dashboard-url [root timeout-ms]
+  (let [file (fs/path root ".swarmforge" "dashboard-url")
+        deadline (+ (System/currentTimeMillis) timeout-ms)]
+    (loop []
+      (cond
+        (fs/regular-file? file) true
+        (> (System/currentTimeMillis) deadline) false
+        :else (do (Thread/sleep 50) (recur))))))
+
+(defn stop-direct-dashboard [^java.lang.Process process]
+  (when (.isAlive process)
+    (.destroyForcibly process)
+    (.waitFor process 5 java.util.concurrent.TimeUnit/SECONDS)))
+
 (defn kill-tmux-server! [socket]
   (run {:dir repo-root :ok? false} "tmux" "-S" socket "kill-server"))
 
@@ -758,6 +786,95 @@
         (run {:dir root :ok? false} (script "swarmforge.bb")
              "--test-stop-pack-web" (str root))
         (kill-tmux-server! socket)
+        (fs/delete-tree root)))))
+
+(deftest direct-dashboard-start-honors-and-records-its-persisted-port
+  ;; Given a persisted port that is available
+  ;; When pack_web starts directly without an explicit port
+  ;; Then it binds that port and leaves the preference unchanged
+  (let [root (tmp-dir)
+        port-file (fs/path root ".swarmforge/dashboard-port")
+        preferred (free-port)]
+    (try
+      (write-file port-file (str preferred "\n"))
+      (let [process (start-direct-dashboard root)]
+        (try
+          (is (wait-for-dashboard-url root 5000) "dashboard-url was written")
+          (let [url (str/trim (slurp (str (fs/path root ".swarmforge/dashboard-url"))))]
+            (is (= preferred (dashboard-url-port url)))
+            (is (= (str preferred "\n") (slurp (str port-file)))))
+          (finally
+            (stop-direct-dashboard process))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest direct-dashboard-start-reuses-records-and-falls-back-from-a-persisted-port
+  ;; Given a direct dashboard with no saved address
+  ;; When it starts, restarts, and then starts while its recorded port is held
+  ;; Then the first two runs share a recorded port and the third records its fallback
+  (let [root (tmp-dir)
+        port-file (fs/path root ".swarmforge/dashboard-port")]
+    (try
+      (let [first-process (start-direct-dashboard root)]
+        (try
+          (is (wait-for-dashboard-url root 5000) "first dashboard-url was written")
+          (finally
+            (stop-direct-dashboard first-process))))
+      (fs/delete-if-exists (fs/path root ".swarmforge/dashboard-url"))
+      (let [first-port (Long/parseLong (str/trim (slurp (str port-file))))]
+        (is (<= 1 first-port 65535))
+        (let [second-process (start-direct-dashboard root)]
+          (try
+            (is (wait-for-dashboard-url root 5000) "second dashboard-url was written")
+            (let [second-url (str/trim
+                              (slurp (str (fs/path root ".swarmforge/dashboard-url"))))]
+              (is (= first-port (dashboard-url-port second-url)))
+              (is (= (str first-port "\n") (slurp (str port-file)))))
+            (finally
+              (stop-direct-dashboard second-process))))
+        (fs/delete-if-exists (fs/path root ".swarmforge/dashboard-url"))
+        (with-open [held (doto (java.net.ServerSocket.)
+                           (.bind (java.net.InetSocketAddress.
+                                   "127.0.0.1" (int first-port))))]
+          (let [third-process (start-direct-dashboard root)]
+            (try
+              (is (wait-for-dashboard-url root 5000) "third dashboard-url was written")
+              (let [third-url (str/trim
+                               (slurp (str (fs/path root ".swarmforge/dashboard-url"))))
+                    fallback-port (dashboard-url-port third-url)]
+                (is (not= first-port fallback-port))
+                (is (= (str fallback-port "\n") (slurp (str port-file))))
+                (is (dashboard-http-reachable? third-url)))
+              (finally
+                (stop-direct-dashboard third-process))))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest direct-dashboard-explicit-port-overrides-and-replaces-the-persisted-port
+  ;; Given an unavailable persisted port and a free explicit port
+  ;; When pack_web starts directly
+  ;; Then the explicit port is authoritative and becomes the new preference
+  (let [root (tmp-dir)
+        port-file (fs/path root ".swarmforge/dashboard-port")
+        held (java.net.ServerSocket.)
+        explicit-socket (java.net.ServerSocket.)]
+    (try
+      (.bind held (java.net.InetSocketAddress. "127.0.0.1" 0))
+      (.bind explicit-socket (java.net.InetSocketAddress. "127.0.0.1" 0))
+      (let [explicit (.getLocalPort explicit-socket)]
+        (.close explicit-socket)
+        (write-file port-file (str (.getLocalPort held) "\n"))
+        (let [process (start-direct-dashboard root (str explicit))]
+          (try
+            (is (wait-for-dashboard-url root 5000) "dashboard-url was written")
+            (let [url (str/trim (slurp (str (fs/path root ".swarmforge/dashboard-url"))))]
+              (is (= explicit (dashboard-url-port url)))
+              (is (= (str explicit "\n") (slurp (str port-file)))))
+            (finally
+              (stop-direct-dashboard process)))))
+      (finally
+        (.close held)
+        (.close explicit-socket)
         (fs/delete-tree root)))))
 
 (deftest an-abrupt-dashboard-exit-reuses-the-preferred-port

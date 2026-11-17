@@ -4181,17 +4181,76 @@
     (fs/create-dirs (fs/parent file))
     (spit (str file) (str url "\n"))))
 
+(defn dashboard-port-file [root]
+  (fs/path root ".swarmforge" "dashboard-port"))
+
+(defn valid-dashboard-port [value]
+  (let [text (str/trim (str value))]
+    (when (re-matches #"[0-9]{1,5}" text)
+      (let [port (Long/parseLong text)]
+        (when (<= 1 port 65535)
+          (str port))))))
+
+(defn persisted-dashboard-port [root]
+  (let [file (dashboard-port-file root)]
+    (when (fs/regular-file? file)
+      (valid-dashboard-port (slurp (str file))))))
+
+(defn write-dashboard-port! [root port]
+  (let [file (dashboard-port-file root)]
+    (fs/create-dirs (fs/parent file))
+    (let [tmp (fs/create-temp-file {:dir (fs/parent file)
+                                    :prefix ".dashboard-port."})]
+      (spit (str tmp) (str port "\n"))
+      (fs/move tmp file {:replace-existing true :atomic-move true}))))
+
+(defn dashboard-port-available? [port]
+  (try
+    (let [socket (java.net.ServerSocket.)]
+      (try
+        (.setReuseAddress socket false)
+        (.bind socket (java.net.InetSocketAddress.
+                       "127.0.0.1" (Integer/parseInt (str port))))
+        true
+        (finally (.close socket))))
+    (catch Exception _ false)))
+
+(defn dashboard-port-usable? [port]
+  (or (dashboard-port-available? port)
+      (and (fs/which "lsof")
+           (not (zero? (:exit
+                        (sh "lsof" "-nP" (str "-iTCP:" port)
+                            "-sTCP:LISTEN")))))))
+
 (defn parse-port [port-str]
   (if (str/blank? port-str) 0 (Long/parseLong port-str)))
 
+(defn bind-dashboard-server! [root port]
+  (http/run-server (http-handler root)
+                   {:ip "127.0.0.1"
+                    :port port
+                    :worker-count 8
+                    :legacy-return-value? false}))
+
+(defn dashboard-server! [root port-str]
+  (if-not (str/blank? port-str)
+    (bind-dashboard-server! root (parse-port port-str))
+    (if-let [persisted (persisted-dashboard-port root)]
+      (let [port (parse-port persisted)]
+        (if (dashboard-port-usable? port)
+          (try
+            (bind-dashboard-server! root port)
+            (catch java.net.BindException _
+              (bind-dashboard-server! root 0)))
+          (bind-dashboard-server! root 0)))
+      (bind-dashboard-server! root 0))))
+
 (defn serve! [root port-str]
   (let [root (require-root! root)
-        server (http/run-server (http-handler root)
-                                {:ip "127.0.0.1"
-                                 :port (parse-port port-str)
-                                 :worker-count 8
-                                 :legacy-return-value? false})
-        url (str "http://127.0.0.1:" (http/server-port server))]
+        server (dashboard-server! root port-str)
+        port (http/server-port server)
+        url (str "http://127.0.0.1:" port)]
+    (write-dashboard-port! root port)
     (write-pack-web-pid! root)
     (write-dashboard-url! root url)
     (println url)

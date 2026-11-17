@@ -15,7 +15,8 @@
             [swarm-handoff]
             [swarm-tool]
             [swarm-window-watchdog]
-            [swarmforge]))
+            [swarmforge]
+            [org.httpkit.server :as http]))
 
 (defn- tmp-dir []
   (fs/create-temp-dir {:prefix "swarmforge-in-process-test."}))
@@ -67,6 +68,50 @@
 (deftest pack-web-reads-query-values
   (is (= "HTW" (pack-web/query-value "/api/task?name=HTW" "name")))
   (is (nil? (pack-web/query-value "/api/task" "name"))))
+
+(deftest pack-web-owns-atomic-dashboard-port-state
+  (let [root (tmp-dir)]
+    (try
+      (is (= "50684" (pack-web/valid-dashboard-port " 50684 ")))
+      (is (nil? (pack-web/valid-dashboard-port "0")))
+      (is (nil? (pack-web/valid-dashboard-port "70000")))
+      (is (nil? (pack-web/valid-dashboard-port "../../unsafe")))
+      (pack-web/write-dashboard-port! root 50684)
+      (is (= "50684\n"
+             (slurp (str (fs/path root ".swarmforge" "dashboard-port")))))
+      (is (= "50684" (pack-web/persisted-dashboard-port root)))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest pack-web-binds-its-persisted-port-and-falls-back-when-it-is-occupied
+  (let [root (tmp-dir)
+        preferred-socket (java.net.ServerSocket.)
+        held (java.net.ServerSocket.)]
+    (try
+      (.bind preferred-socket (java.net.InetSocketAddress. "127.0.0.1" 0))
+      (let [preferred (.getLocalPort preferred-socket)]
+        (.close preferred-socket)
+        (pack-web/write-dashboard-port! root preferred)
+        (let [server (pack-web/dashboard-server! root nil)]
+          (try
+            (is (= preferred (http/server-port server)))
+            (finally
+              (http/server-stop! server))))
+        (.bind held (java.net.InetSocketAddress. "127.0.0.1" preferred))
+        (let [server (pack-web/dashboard-server! root nil)]
+          (try
+            (is (not= preferred (http/server-port server)))
+            (finally
+              (http/server-stop! server))))
+        (let [server (pack-web/dashboard-server! root "0")]
+          (try
+            (is (pos? (http/server-port server)))
+            (finally
+              (http/server-stop! server)))))
+      (finally
+        (.close preferred-socket)
+        (.close held)
+        (fs/delete-tree root)))))
 
 (deftest pack-board-parses-flags
   (is (= {:positional ["list"] :root "/tmp/root"}

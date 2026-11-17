@@ -104,9 +104,11 @@ That prints the supervisor, dashboard process, PID, URL, preferred port, socket
 and log. `dashboard-url` and `pack_web.pid` remain the live bridge-facing and
 diagnostic state; stop removes both only after the supervised process has
 exited. The separate `dashboard-port` file is the durable bind preference. A
-successful start records the serving port there, a later start tries it before
-stopping anything, and an occupied or unusable preference falls back to a new
-available port. For old state, the preference is seeded from `dashboard-url`.
+successful start records the serving port there, and every supported start path
+tries it before falling back to an available port. A direct
+`pack_web.sh --serve <root>` uses and updates the preference itself; an explicit
+numeric port still overrides it. For old state, the launcher seeds the preference
+from `dashboard-url`.
 
 Set `SWARMFORGE_REPO_URL` to `https://github.com/unclebob/swarm-forge` and
 `SWARMFORGE_BASE_REF` to `main` to compose Uncle Bob's products instead, or point
