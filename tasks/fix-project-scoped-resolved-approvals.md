@@ -38,3 +38,21 @@ Build a live-shaped Family containing `superseded` and verify its Family
 projection returns 200 while preserving the ending. Build a project root with
 resolved approvals and verify every project-level row carries that root's
 project name. Verify an intentionally unknown resolution still returns 502.
+
+## Verification
+
+- `bb test`: 481 tests, 3,574 assertions, 0 failures, all 21 browser tests, and
+  the required bounded-projection E2E passed.
+- `bb crap`: 22 coverage tests and 123 assertions passed; the complete coverage
+  and CRAP gate passed.
+- Focused projection tests cover a live-shaped Family and project root
+  containing `superseded`, exact resolution preservation, project ownership on
+  every project-level row, pending rows without resolution, missing/non-string/
+  unknown fail-closed endings, the 200-row response bound, cache, ETag,
+  invalidation, ordering, response size and Family/project identity.
+- Source delivery: implementation commit `219bb8e` was pushed to
+  `origin/forgelet`; the approved task/Gherkin bundle is in `f6299b1`.
+
+## Operator acceptance
+
+- owner: operator | environment: composed dashboard and deployed bridge | checks: confirm Saibill, Innersource and Ledgerhall Family projections return 200 with `superseded` preserved; confirm project-level resolved rows carry their project and the bridge accepts them; confirm an unknown ending still fails closed | status: pending
