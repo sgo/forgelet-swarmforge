@@ -71,7 +71,4 @@ port.
 
 ## Operator acceptance
 
-- owner: operator | environment: all four Family dashboards | checks: restart
-  the dashboards through each supported path and confirm live ports match
-  `dashboard-port`; after the next composition, confirm Tailscale Serve can be
-  mapped to the recorded ports without fallback | status: pending
+- owner: operator | environment: all four Family dashboards | checks: restart the dashboards through each supported path and confirm live ports match `dashboard-port`; after the next composition, confirm Tailscale Serve can be mapped to the recorded ports without fallback | status: pending
