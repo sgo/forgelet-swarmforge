@@ -1034,13 +1034,6 @@
     (fs/delete-if-exists file)
     (fs/delete-if-exists (dashboard-url-file ctx))))
 
-(defn open-browser? []
-  (not= "0" (System/getenv "SWARMFORGE_OPEN_BROWSER")))
-
-(defn maybe-open-browser! [url]
-  (when (and (open-browser?) (command-exists? "open"))
-    (process/sh {:continue true} "open" url)))
-
 (defn dashboard-status [ctx]
   (let [url-file (dashboard-url-file ctx)
         pid-file (pack-web-pid-file ctx)
@@ -1119,7 +1112,6 @@
         (when serving-port
           (write-dashboard-port! ctx serving-port))
         (println (str green "Dashboard: " url reset))
-        (maybe-open-browser! url)
         url))))
 
 (defn context [working-dir]

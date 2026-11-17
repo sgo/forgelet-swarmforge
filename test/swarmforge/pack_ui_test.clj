@@ -5585,7 +5585,6 @@
         open-env {"SWARMFORGE_AGENT_COMMAND" supervised-fake-agent
                   "SWARMFORGE_PROJECT_RUNTIME_ENV" (str runtime-env)
                   "SWARMFORGE_TEST_RUNTIME_ENV_LOG" (str runtime-env-log)
-                  "SWARMFORGE_OPEN_BROWSER" "0"
                   "SWARMFORGE_PREVENT_SLEEP" "0"
                   "SWARMFORGE_RUNTIME_READY_TIMEOUT_MS" "10000"}]
     (try

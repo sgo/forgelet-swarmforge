@@ -31,6 +31,29 @@
                       (assoc result :args args))))
     result))
 
+(defn symlink-dashboard-command! [bin command]
+  (when-let [target (fs/which command)]
+    (let [link (fs/path bin command)]
+      (when-not (fs/exists? link)
+        (fs/create-sym-link link target)))))
+
+(defn dashboard-path-without-browser-launcher [root]
+  (let [bin (fs/path root "dashboard-bin")]
+    (fs/create-dirs bin)
+    (doseq [command ["bb" "tmux" "lsof" "ps" "kill" "uname" "sh" "zsh" "dirname"]]
+      (symlink-dashboard-command! bin command))
+    (str bin)))
+
+(defn dashboard-path-with-fake-browser-launcher [root]
+  (let [bin (fs/path root "dashboard-bin")
+        marker (fs/path root "browser-opened")]
+    (write-file (fs/path bin "open")
+                (str "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""
+                     marker "\"\n"))
+    (run {:dir root} "chmod" "+x" (str (fs/path bin "open")))
+    {:path (str bin ":" (System/getenv "PATH"))
+     :marker marker}))
+
 (defn init-repo! [root]
   (run {:dir root} "git" "init" "-q")
   (run {:dir root} "git" "config" "user.email" "test@example.com")
@@ -691,7 +714,7 @@
         port-file (fs/path state "dashboard-port")
         pid-file (fs/path state "pack_web.pid")]
     (try
-      (let [started (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+      (let [started (run {:dir root}
                          (script "swarmforge.bb")
                          "--test-start-pack-web" (str root))
             url (str/trim (slurp (str url-file)))
@@ -732,10 +755,10 @@
         url-file (fs/path state "dashboard-url")
         port-file (fs/path state "dashboard-port")]
     (try
-      (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+      (run {:dir root}
            (script "swarmforge.bb") "--test-start-pack-web" (str root))
       (let [first-url (str/trim (slurp (str url-file)))]
-        (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+        (run {:dir root}
              (script "swarmforge.bb") "--test-start-pack-web" (str root))
         (is (= first-url (str/trim (slurp (str url-file)))))
         (is (= (second (re-matches #".*:(\d+)$" first-url))
@@ -746,13 +769,79 @@
         (run {:dir root} "tmux" "-S" socket "kill-session"
              "-t" "=swarmforge-dashboard")
         (is (= [] (tmux-session-names socket)))
-        (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+        (run {:dir root}
              (script "swarmforge.bb") "--test-start-pack-web" (str root))
         (is (= first-url (str/trim (slurp (str url-file)))))
         (is (= (second (re-matches #".*:(\d+)$" first-url))
                (str/trim (slurp (str port-file)))))
         (is (= ["swarmforge-dashboard"] (tmux-session-names socket)))
         (is (dashboard-http-reachable? first-url)))
+      (finally
+        (run {:dir root :ok? false} (script "swarmforge.bb")
+             "--test-stop-pack-web" (str root))
+        (kill-tmux-server! socket)
+        (fs/delete-tree root)))))
+
+(deftest a-dashboard-starts-without-a-browser-launcher
+  ;; Given a PATH with the dashboard's required tools but no browser launcher
+  ;; When the supervised dashboard starts and stops
+  ;; Then startup, URL publication, port recording and supervision remain working
+  (let [root (tmp-dir)
+        state (fs/path root ".swarmforge")
+        socket (str (fs/path state "dashboard-tmux.sock"))
+        url-file (fs/path state "dashboard-url")
+        port-file (fs/path state "dashboard-port")
+        restricted-path (dashboard-path-without-browser-launcher root)]
+    (try
+      (let [started (run {:dir root
+                          :env {"PATH" restricted-path
+                                "SWARMFORGE_PREVENT_SLEEP" "0"}}
+                         (script "swarmforge.bb")
+                         "--test-start-pack-web" (str root))
+            url (str/trim (slurp (str url-file)))
+            port (dashboard-url-port url)]
+        (is (str/includes? (:out started) url))
+        (is (= (str port "\n") (slurp (str port-file))))
+        (is (dashboard-http-reachable? url)))
+      (let [stopped (run {:dir root :env {"PATH" restricted-path}}
+                         (script "swarmforge.bb")
+                         "--test-stop-pack-web" (str root))]
+        (is (str/includes? (:out stopped) "supervisor=stopped"))
+        (is (str/includes? (:out stopped) "process=stopped")))
+      (finally
+        (run {:dir root :ok? false} (script "swarmforge.bb")
+             "--test-stop-pack-web" (str root))
+        (kill-tmux-server! socket)
+        (fs/delete-tree root)))))
+
+(deftest dashboard-start-stop-and-restart-never-invoke-open
+  ;; Given a fake `open` first on PATH
+  ;; When a dashboard starts, stops and starts again
+  ;; Then every run prints its URL and the fake browser launcher is never called
+  (let [root (tmp-dir)
+        state (fs/path root ".swarmforge")
+        socket (str (fs/path state "dashboard-tmux.sock"))
+        url-file (fs/path state "dashboard-url")
+        {:keys [path marker]} (dashboard-path-with-fake-browser-launcher root)
+        env {"PATH" path "SWARMFORGE_PREVENT_SLEEP" "0"}]
+    (try
+      (let [first (run {:dir root :env env}
+                       (script "swarmforge.bb")
+                       "--test-start-pack-web" (str root))
+            first-url (str/trim (slurp (str url-file)))]
+        (is (str/includes? (:out first) first-url))
+        (is (dashboard-http-reachable? first-url))
+        (is (not (fs/exists? marker))))
+      (run {:dir root :env env}
+           (script "swarmforge.bb") "--test-stop-pack-web" (str root))
+      (is (not (fs/exists? marker)))
+      (let [second (run {:dir root :env env}
+                        (script "swarmforge.bb")
+                        "--test-start-pack-web" (str root))
+            second-url (str/trim (slurp (str url-file)))]
+        (is (str/includes? (:out second) second-url))
+        (is (dashboard-http-reachable? second-url))
+        (is (not (fs/exists? marker))))
       (finally
         (run {:dir root :ok? false} (script "swarmforge.bb")
              "--test-stop-pack-web" (str root))
@@ -769,7 +858,7 @@
         pid-file (fs/path state "pack_web.pid")
         port-file (fs/path state "dashboard-port")]
     (try
-      (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+      (run {:dir root}
            (script "swarmforge.bb") "--test-start-pack-web" (str root))
       (let [first-url (str/trim (slurp (str url-file)))
             first-port (dashboard-url-port first-url)]
@@ -778,7 +867,7 @@
         (is (not (fs/exists? url-file)))
         (is (not (fs/exists? pid-file)))
         (is (= (str first-port "\n") (slurp (str port-file))))
-        (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+        (run {:dir root}
              (script "swarmforge.bb") "--test-start-pack-web" (str root))
         (is (= first-url (str/trim (slurp (str url-file)))))
         (is (= (str first-port "\n") (slurp (str port-file)))))
@@ -887,13 +976,13 @@
         url-file (fs/path state "dashboard-url")
         pid-file (fs/path state "pack_web.pid")]
     (try
-      (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+      (run {:dir root}
            (script "swarmforge.bb") "--test-start-pack-web" (str root))
       (let [first-url (str/trim (slurp (str url-file)))
             pid (str/trim (slurp (str pid-file)))]
         (run {:dir root :ok? false} "kill" "-KILL" pid)
         (Thread/sleep 200)
-        (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+        (run {:dir root}
              (script "swarmforge.bb") "--test-start-pack-web" (str root))
         (is (= first-url (str/trim (slurp (str url-file)))))
         (is (dashboard-http-reachable? first-url)))
@@ -914,14 +1003,14 @@
         port-file (fs/path state "dashboard-port")
         held (java.net.ServerSocket.)]
     (try
-      (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+      (run {:dir root}
            (script "swarmforge.bb") "--test-start-pack-web" (str root))
       (let [first-url (str/trim (slurp (str url-file)))
             first-port (dashboard-url-port first-url)]
         (run {:dir root} (script "swarmforge.bb")
              "--test-stop-pack-web" (str root))
         (.bind held (java.net.InetSocketAddress. "127.0.0.1" first-port))
-        (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+        (run {:dir root}
              (script "swarmforge.bb") "--test-start-pack-web" (str root))
         (let [next-url (str/trim (slurp (str url-file)))
               next-port (dashboard-url-port next-url)]
@@ -951,8 +1040,7 @@
         (.close held)
         (write-file port-file (str preferred "\n"))
         (write-file socket-file "not a tmux socket\n")
-        (let [failed (run {:dir root :ok? false
-                           :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+        (let [failed (run {:dir root :ok? false}
                           (script "swarmforge.bb")
                           "--test-start-pack-web" (str root))]
           (is (not (zero? (:exit failed))))
@@ -989,7 +1077,7 @@
                   :else (do (Thread/sleep 50) (recur))))))
           "detached dashboard wrote its address")
       (let [old-url (str/trim (slurp (str url-file)))]
-        (run {:dir root :env {"SWARMFORGE_OPEN_BROWSER" "0"}}
+        (run {:dir root}
              (script "swarmforge.bb") "--test-start-pack-web" (str root))
         (is (= old-url (str/trim (slurp (str url-file)))))
         (is (= ["swarmforge-dashboard"] (tmux-session-names socket)))

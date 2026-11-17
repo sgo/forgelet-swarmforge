@@ -107,8 +107,9 @@ exited. The separate `dashboard-port` file is the durable bind preference. A
 successful start records the serving port there, and every supported start path
 tries it before falling back to an available port. A direct
 `pack_web.sh --serve <root>` uses and updates the preference itself; an explicit
-numeric port still overrides it. For old state, the launcher seeds the preference
-from `dashboard-url`.
+numeric port still overrides it. Dashboard startup prints the URL for the
+operator but never opens a browser. For old state, the launcher seeds the
+preference from `dashboard-url`.
 
 Set `SWARMFORGE_REPO_URL` to `https://github.com/unclebob/swarm-forge` and
 `SWARMFORGE_BASE_REF` to `main` to compose Uncle Bob's products instead, or point
