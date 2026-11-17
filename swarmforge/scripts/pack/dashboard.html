@@ -161,7 +161,6 @@ header.top h1{margin:0;font-size:15px}.meta{color:var(--muted);font-size:12px}.m
     <div class="tag">Attention</div>
     <div id="attention-rows">
       <div id="attention-approvals"></div>
-      <div id="attention-clarifications"></div>
     </div>
   </div>
 
@@ -796,7 +795,6 @@ async function viewDoc(path, approvalId, project) {
 }
 
 const openDocMenus = new Set();
-const clarDrafts = {};
 
 function artifactMenu(paths, item) {
   const id = item && item.id ? item.id : "";
@@ -896,9 +894,6 @@ function chimeNewAttention(data) {
   (data.approvals || []).forEach((item) => {
     if (item && item.id) keys.push("a:" + item.id);
   });
-  (data.clarifications || []).forEach((item) => {
-    if (item && item.id && item.status === "pending") keys.push("c:" + item.id);
-  });
   let fresh = false;
   if (attentionPrimed) {
     keys.forEach((key) => {
@@ -930,125 +925,15 @@ function attentionRow(item) {
   return row;
 }
 
-function fillClarWindow(win, item) {
-  const request = item.body || "";
-  const draft = clarDrafts[item.id] || "";
-  win.document.open();
-  win.document.write(
-    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Clarification</title>" +
-    "<style>html,body{height:100%;margin:0;display:flex;flex-direction:column;background:#f8f8f5;color:#1e221f;font-family:ui-sans-serif,system-ui,sans-serif}" +
-    "header{flex:0 0 auto;padding:8px 10px;background:linear-gradient(180deg,#eceee8,#e0e3dc);border-bottom:1px solid #d5d9d2;font-weight:600;font-size:13px}" +
-    "#clar-request{flex:1 1 50%;min-height:4rem;margin:0;padding:12px;overflow:auto;white-space:pre-wrap;background:#fffef9;font:13px/1.45 ui-sans-serif,system-ui,sans-serif}" +
-    ".doc-split{flex:0 0 6px;cursor:row-resize;background:#d5d9d2}" +
-    ".doc-split:hover{background:#b8bfb6}" +
-    "#clar-response-pane{flex:1 1 50%;min-height:4rem;display:flex;flex-direction:column;padding:10px 12px;background:#fff;gap:6px}" +
-    "label{font-size:10px;text-transform:uppercase;font-weight:700;color:#68726c}" +
-    "textarea{flex:1;min-height:4rem;width:100%;border:1px solid #c6cbc5;border-radius:6px;padding:8px;font:13px/1.45 ui-sans-serif,system-ui,sans-serif;resize:none}" +
-    ".actions{display:flex;justify-content:flex-end}" +
-    "button{border:1px solid #9aa59e;background:#3d5a45;border-color:#3d5a45;color:#fff;padding:5px 12px;border-radius:7px;font-size:12px;cursor:pointer}" +
-    "</style></head><body>" +
-    "<header>Clarification requested from: " + escapeHtml(item.role || "agent") + "</header>" +
-    "<pre id=\"clar-request\">" + escapeHtml(request) + "</pre>" +
-    "<div class=\"doc-split\" id=\"clar-split\" title=\"Drag to resize\"></div>" +
-    "<div id=\"clar-response-pane\"><label for=\"clar-response\">Response</label>" +
-    "<textarea id=\"clar-response\">" + escapeHtml(draft) + "</textarea>" +
-    "<div class=\"actions\"><button type=\"button\" id=\"clar-ok\">OK</button></div></div>" +
-    "</body></html>"
-  );
-  win.document.close();
-  bindVSplit(win, win.document.getElementById("clar-split"),
-    win.document.getElementById("clar-request"),
-    win.document.getElementById("clar-response-pane"));
-}
-
-function openClarification(item) {
-  const win = window.open("about:blank", "clar-" + encodeURIComponent(item.id || "") + "-" + Date.now(),
-    "resizable=yes,scrollbars=yes,width=720,height=520");
-  if (!win) return;
-  fillClarWindow(win, item);
-  const box = win.document.getElementById("clar-response");
-  win.document.getElementById("clar-ok").onclick = async () => {
-    const text = box.value;
-    clarDrafts[item.id] = text;
-    await postClarification(item.id, text);
-    win.close();
-  };
-}
-
-function clarificationRow(item) {
-  const row = document.createElement("form");
-  row.className = "att-row";
-  const pill = document.createElement("span");
-  pill.className = "pill pill-warn";
-  pill.textContent = "Clarification requested from: " + (item.role || "agent");
-  const pair = attentionWorkPair(item.project, item.task);
-  const summary = document.createElement("span");
-  summary.textContent = item.body || "";
-  const input = document.createElement("input");
-  input.type = "text";
-  input.placeholder = "Answer…";
-  input.dataset.clarId = item.id || "";
-  input.value = clarDrafts[item.id] || "";
-  input.addEventListener("input", () => {
-    clarDrafts[item.id] = input.value;
-  });
-  const open = document.createElement("button");
-  open.type = "button";
-  open.className = "btn btn-sm";
-  open.textContent = "Open";
-  open.onclick = (event) => {
-    event.preventDefault();
-    openClarification(item);
-  };
-  const send = document.createElement("button");
-  send.type = "submit";
-  send.className = "btn btn-sm btn-primary";
-  send.textContent = "Submit";
-  row.addEventListener("submit", (event) => {
-    event.preventDefault();
-    postClarification(item.id, input.value);
-  });
-  row.append(pill, pair, summary, input, open, send);
-  return row;
-}
-
-async function postClarification(id, text) {
-  if (!text || !text.trim()) return;
-  await fetch("/api/clarifications/" + encodeURIComponent(id) + "/answer", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({text})
-  });
-  loadState();
-}
-
 function renderApprovals(items) {
   const box = $("attention-approvals");
   box.replaceChildren();
   (items || []).forEach((item) => box.appendChild(attentionRow(item)));
 }
 
-function renderClarifications(items) {
-  const box = $("attention-clarifications");
-  const pending = (items || []).filter((item) => item.status === "pending");
-  const live = {};
-  pending.forEach((item) => {
-    live[item.id] = true;
-  });
-  [...box.querySelectorAll("[data-clar-id]")].forEach((input) => {
-    if (!live[input.dataset.clarId]) input.closest(".att-row").remove();
-  });
-  pending.forEach((item) => {
-    if (!box.querySelector("[data-clar-id=\"" + item.id + "\"]")) {
-      box.appendChild(clarificationRow(item));
-    }
-  });
-}
-
 function renderAttention(data) {
   chimeNewAttention(data);
   renderApprovals(data.approvals);
-  renderClarifications(data.clarifications);
 }
 
 const refreshIntervalMs = 4000;

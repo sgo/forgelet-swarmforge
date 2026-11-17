@@ -617,8 +617,8 @@ than the other way round. A running dashboard, found through
 `<forge root>/.swarmforge/dashboard-url` and read fresh every time. The endpoints
 the bridge calls — `/api/health`, `/api/state`, `/api/automation-state`,
 `/api/chat`, `/api/approvals/<id>/<action>`,
-`/api/tasks/retry`, `/api/clarifications/<id>/answer`,
-`/api/clarifications/<id>/seen`, and `/api/clarifications/<id>/withdraw` — which mean a forge
+`/api/tasks/retry`, `/api/clarifications/<id>/seen`, and
+`/api/clarifications/<id>/withdraw` — which mean a forge
 whose tooling predates one of them is refreshed first, or left out. And the
 forge's own adapter, `swarmforge/scripts/matrix-bridge.sh`, which arrives with
 the bridge's installation rather than with this fork.
@@ -634,7 +634,7 @@ Reachability probes use this endpoint.
 projects, tasks, approvals, clarifications, conversations, activity and
 completion statistics. A snapshot reads each project's board directly once,
 builds one task view and one work view per project, reads each chat, approval
-and clarification store once, and reuses those values through active-card,
+store once, and reuses those values through active-card,
 idle, status and work-queue fields. Independent project slices run with a bound
 of four workers, chat records with a bound of eight, and response order is
 preserved. A failed required project scan fails the whole request rather than
@@ -650,8 +650,9 @@ Each project slice also carries
 `clarification_attention: {unseen, unresolved, latest_change_at}` so a Family
 client can derive attention without scanning message text. `unseen` is true
 exactly when at least one open clarification is unseen; marking it seen leaves
-it unresolved. The old clarification store and Matrix path remain available for
-migration.
+it unresolved. Historical legacy clarification files are ignored. The
+`automation-v1` projection retains an empty bounded `clarifications.legacy`
+compatibility section while typed chat records remain the only authority.
 
 The repeatable Saibill-scale fixture has 13 projects, 420 tasks, 450 chat
 records and a state body around 934 KB. The regression budget is health p95
@@ -671,9 +672,10 @@ are process-local and root-isolated; no state crosses dashboard processes.
 
 `GET /api/automation-state` returns the bounded `automation-v1` projection used
 by automation consumers. It carries Family/project identity, approvals,
-resolved approvals, legacy and typed clarification lifecycle facts including a
-bounded `question_excerpt`, lanes, cards and bounded activity facts. The excerpt
-is at most 500 Unicode code points including its ` [truncated]` marker. It
+resolved approvals, typed clarification lifecycle facts including a bounded
+`question_excerpt`, lanes, cards and bounded activity facts. The legacy
+clarification section remains present but is always empty. The excerpt is at
+most 500 Unicode code points including its ` [truncated]` marker. It
 flattens controls and whitespace, redacts filesystem paths and credential-shaped
 tokens, and is `null` when the source question is blank or malformed. Approval
 review bodies, clarification answers, clarification references, full

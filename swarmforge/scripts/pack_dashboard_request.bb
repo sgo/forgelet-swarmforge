@@ -15,7 +15,6 @@
        "                                   | --reply-with <exact text>\n"
        "                                   | --without-route-card-action\n"
        "                                   | --without-quick-reply]\n"
-       "  pack_dashboard_request.sh clarify <question-file>\n"
        "  pack_dashboard_request.sh clarify-chat <clarification-id> <question-file>\n"
        "                                           [--reference <clarification-id>]\n"
        "  pack_dashboard_request.sh withdraw-clarification <clarification-id>\n"
@@ -106,9 +105,6 @@
 
 (defn chat-id []
   (str "req-" (str/replace (timestamp) #"[^0-9A-Za-z]" "")))
-
-(defn clar-id []
-  (str "clar-" (str/replace (timestamp) #"[^0-9A-Za-z]" "")))
 
 (defn pending-dir [root]
   (fs/path root ".swarmforge" "dashboard" "requests" "pending"))
@@ -629,37 +625,6 @@
         action
         (assoc :actions [action])))))
 
-(defn clar-pending-dir [root]
-  (fs/path root ".swarmforge" "dashboard" "clarifications" "pending"))
-
-(defn clar-done-dir [root]
-  (fs/path root ".swarmforge" "dashboard" "clarifications" "done"))
-
-(defn clar-file [dir id]
-  (fs/path dir (str id ".request")))
-
-(defn create-clarification! [root role body]
-  (when (str/blank? body)
-    (exit! 1 "Missing clarification question"))
-  (let [id (clar-id)
-        now (timestamp)
-        file (clar-file (clar-pending-dir root) id)]
-    (fs/create-dirs (fs/parent file))
-    (spit (str file) (render-request {"id" id
-                                      "status" "pending"
-                                      "role" role
-                                      "body" body
-                                      "created_at" now}))
-    id))
-
-(defn clarify! [question-file]
-  (when-not (fs/regular-file? question-file)
-    (exit! 1 (str "Question file not found: " question-file)))
-  (let [root (project-root)
-        role (sender-role)
-        body (slurp (str question-file))]
-    (println (create-clarification! root role body))))
-
 (defn list-requests [root]
   (vec (concat (map request-entry (list-files (pending-dir root)))
                (map request-entry (list-files (done-dir root))))))
@@ -684,11 +649,6 @@
 
 (defn find-done-request [root id]
   (let [file (request-file (done-dir root) id)]
-    (when (fs/regular-file? file)
-      file)))
-
-(defn find-done-clarification [root id]
-  (let [file (clar-file (clar-done-dir root) id)]
     (when (fs/regular-file? file)
       file)))
 
@@ -968,9 +928,6 @@
                       approve-route-card without-route-card-action
                       reply-with without-quick-reply)
 
-        (find-done-clarification root id)
-        (println "ANSWERED:" id)
-
         :else
         (exit! 1 (str "Unknown pending request: " id))))))
 
@@ -994,7 +951,6 @@
                                 (flag? args "--without-route-card-action")
                                 reply-with
                                 without-quick-reply?))
-    "clarify" (clarify! (second args))
     "clarify-chat"
     (let [id (second args)
           question-file (nth args 2 nil)

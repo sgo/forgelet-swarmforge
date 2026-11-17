@@ -41,15 +41,6 @@ function seedProject(project) {
       "\n" +
       "payload\n"
   );
-  writeFile(
-    path.join(project, ".swarmforge/dashboard/clarifications/pending/clar-1.request"),
-    "id: clar-1\n" +
-      "status: pending\n" +
-      "role: specifier\n" +
-      "created_at: 2026-01-01T00:00:00Z\n" +
-      "\n" +
-      "Does the bat drop to any of 20 rooms?\n"
-  );
 }
 
 function seedForge(root) {
@@ -212,18 +203,12 @@ test.describe("pack dashboard", () => {
     await expect(page.locator("#nt-name")).toBeFocused();
   });
 
-  test("Attention lists approvals and clarifications", async ({ page }) => {
+  test("Attention lists approvals", async ({ page }) => {
     await page.goto(handle.url);
     await expect(page.locator("#attention-approvals .att-row")).toContainText("HTW");
     await expect(page.locator("#attention-approvals .att-row")).toContainText("Approve");
     await expect(page.locator("#attention-approvals .att-row")).toContainText("Reject");
     await expect(page.locator("#attention-approvals .att-row")).toContainText("Documents");
-    await expect(page.locator("#attention-clarifications .att-row")).toContainText(
-      "Clarification requested from: specifier"
-    );
-    await expect(page.locator("#attention-clarifications .att-row")).toContainText(
-      "Does the bat drop to any of 20 rooms?"
-    );
   });
 
   test("Approve is disabled when a document has comments", async ({ page }) => {
@@ -349,7 +334,6 @@ test.describe("pack dashboard", () => {
     await expect(pair).toContainText("htw/HTW");
     await expect(page.locator("#attention-approvals .att-project")).toHaveCSS("font-weight", "700");
     await expect(pair).toHaveCSS("text-decoration-line", "underline");
-    await expect(page.locator("#attention-clarifications .att-project")).toHaveText("htw");
   });
 
   test("chimes once when a new Attention row appears", async ({ page }) => {
@@ -378,23 +362,6 @@ test.describe("pack dashboard", () => {
       expect(await page.evaluate(() => window.__swarmChime || 0)).toBe(before + 1);
     } finally {
       fs.rmSync(second, { force: true });
-    }
-  });
-
-  test("Clarification Open posts the answer", async ({ page, context }) => {
-    const local = await startDashboard();
-    try {
-      await page.goto(local.url);
-      const popupPromise = context.waitForEvent("page");
-      await page.locator("#attention-clarifications button", { hasText: "Open" }).click();
-      const clar = await popupPromise;
-      await clar.waitForLoadState("domcontentloaded");
-      await expect(clar.locator("#clar-request")).toContainText("Does the bat drop to any of 20 rooms?");
-      await clar.locator("#clar-response").fill("Yes, any of the 20 rooms.");
-      await clar.locator("#clar-ok").click();
-      await expect(page.locator("#attention-clarifications .att-row")).toHaveCount(0);
-    } finally {
-      await stopDashboard(local);
     }
   });
 

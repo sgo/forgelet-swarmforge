@@ -33,7 +33,7 @@
        "\n"
        "The ring carries what the request is: the command that answers it, and the\n"
        "gate it holds, when it holds one — an approval the operator forwarded is\n"
-       "the operator's decision and a clarification the operator's answer. Printing\n"
+       "the operator's decision. Printing\n"
        "what a ring would carry, without a pane to ring:\n"
        "\n"
        "  doorbell.sh print-ring <body>\n"
@@ -227,21 +227,13 @@
 (defn approval-request? [text]
   (boolean (re-find #"(?m)^Approval for .+ in .+" (or text ""))))
 
-(defn clarification-request? [text]
-  (boolean (re-find #"(?m)^Clarification for .+ from .+" (or text ""))))
-
 (defn answer-reminder [id text]
   (str "Answer with: pack_dashboard_request.sh answer " id " ./tmp/answer.txt"
        " (a reply only in this pane reaches nobody)."
        (when (approval-request? text)
          (str " This one is an approval gate, and the gate is the operator's: read the"
               " pending handoff, then reply with your assessment and a recommendation."
-              " Do not approve unless the operator says to."))
-       (when (clarification-request? text)
-         (str " This one is a clarification an agent is blocked on, and the answer is"
-              " the operator's to give: read the question, ground it in the project's"
-              " state, then reply with what you would answer and why. Do not answer"
-              " the clarification request unless the operator says to."))))
+              " Do not approve unless the operator says to."))))
 
 (defn ordinal [n]
   (case (int n)

@@ -51,7 +51,6 @@
     "--test-health-during-slow-state" (test-health-during-slow-state! (second args))
     "--test-dashboard-benchmark" (test-dashboard-benchmark!
                                   (second args) (nth args 2 nil))
-    "--test-answer-clarification" (test-answer-clarification! (second args) (nth args 2 nil) (nth args 3 nil))
     "--test-create-chat-clarification" (test-create-chat-clarification!
                                         (second args) (nth args 2 nil)
                                         (nth args 3 nil) (nth args 4 nil))

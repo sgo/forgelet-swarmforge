@@ -223,18 +223,6 @@
                  (boolean (re-find (re-pattern (str "(?m)^from: " (java.util.regex.Pattern/quote role-name) "\\s*$")) text))))
              (remove fs/directory? (fs/list-dir dir)))))))
 
-;; A role with an open clarification is waiting on a decision, not stopped. The
-;; check reads the project's own store, where each request names the role it came
-;; from.
-(defn waiting-on-a-decision? [project role]
-  (let [dir (fs/path project ".swarmforge" "dashboard" "clarifications" "pending")]
-    (boolean
-     (when (fs/directory? dir)
-       (some (fn [file]
-               (let [text (slurp (str file))]
-                 (boolean (re-find (re-pattern (str "(?m)^role: " (java.util.regex.Pattern/quote role) "\\s*$")) text))))
-             (fs/list-dir dir))))))
-
 (defn newest-mtime [dir]
   (when (fs/directory? dir)
     (->> (file-seq (fs/file dir))
@@ -268,7 +256,6 @@
         ;; went missing: the board says the role holds work and nothing exists to
         ;; hand it over.
         notes-anywhere (mapv #(note-anywhere? project (:worktree role) %) lane-cards)
-        waiting (waiting-on-a-decision? project (:role role))
         awaiting-operator (approval-waiting-on-the-operator? project (:role role))]
     {:role (:role role)
      :pane (:pane role)
@@ -291,7 +278,6 @@
        ;; Before anything about quiet mail: if this role's handoff is sitting with
        ;; the operator, its queue is not stalled, it is blocked on a person.
        awaiting-operator :waiting-on-the-operator
-       waiting :waiting-on-a-decision
        ;; Mail that arrived while the role was finishing a turn is not a stall
        ;; yet: the same grace that keeps a between-turns pause quiet applies to it.
        (and (pos? new) (or (nil? quiet) (> quiet grace-minutes))) :waiting-for-pickup

@@ -34,8 +34,8 @@
        "machine interface used by Forgelet Host; propose and commit retain their\n"
        "existing human-readable output.\n"
        "\n"
-       "The proposal is never written to the clarification store: that channel\n"
-       "belongs to the pack's agents asking to be unblocked. Ask the operator\n"
+       "The proposal is never written to project chat as a typed clarification.\n"
+       "That path belongs to the pack's agents asking to be unblocked. Ask the operator\n"
        "yourself — in the chat channel, in this pane, or on the phone.\n"
        "\n"
        "commit reports the lane read back from the created board row and records\n"
@@ -218,26 +218,16 @@
      :body (or body "")
      :response (str/replace (get headers "response" "") #"\\n" "\n")}))
 
-(defn clarification-path [root id state]
-  (fs/path root ".swarmforge" "dashboard" "clarifications" state (str id ".request")))
-
 (defn chat-path [root id state]
   (fs/path root ".swarmforge" "dashboard" "requests" state (str id ".request")))
 
 (defn record-in-root
-  "The operator's own words, from an answered clarification or from a chat
-  request they wrote. Returns nil when the id is unknown in this root."
+  "The operator's own words from a chat request they wrote. Returns nil when
+  the id is unknown in this root."
   [root id]
-  (let [answered (clarification-path root id "done")
-        pending (clarification-path root id "pending")
-        chat-pending (chat-path root id "pending")
+  (let [chat-pending (chat-path root id "pending")
         chat-done (chat-path root id "done")]
     (cond
-      (fs/regular-file? answered)
-      (let [r (parse-request answered)]
-        {:kind "clarification" :path (str answered) :id id
-         :headers (:headers r) :text (:response r)})
-
       (fs/regular-file? chat-pending)
       (let [r (parse-request chat-pending)]
         {:kind "chat request" :path (str chat-pending) :id id
@@ -247,9 +237,6 @@
       (let [r (parse-request chat-done)]
         {:kind "chat request" :path (str chat-done) :id id
          :headers (:headers r) :text (:response r)})
-
-      (fs/regular-file? pending)
-      {:kind "clarification" :path (str pending) :pending true :text ""}
 
       :else nil)))
 
@@ -1011,8 +998,8 @@
       (exit! 1 (str "Note file not found: " note-file)))
     (let [note (str/trimr (slurp (str note-file)))
           lane (initial-lane project)
-          ;; The proposal is only ever a record here. The clarification store
-          ;; belongs to the pack's agents asking the operator to unblock a card;
+          ;; The proposal is only ever a record here. Typed project chat
+          ;; clarifications belong to the pack's agents asking the operator to unblock a card;
           ;; a card proposal is the lieutenant's own question to the operator,
           ;; asked in the chat channel (this pane) or on the phone, never by
           ;; borrowing the agents' channel.
@@ -1029,7 +1016,7 @@
       (println "PROPOSED:" id "card" name "in" (str project) "lane" lane)
       (println "Ask the operator directly — in this chat, or on the phone where")
       (println "their message arrives as a chat request. Nothing was written to")
-      (println "the clarification store, which is the agents' channel.")
+      (println "project chat as a typed clarification, which is the agents' channel.")
       (println (str "Approval must name `" id "` or `" name
                     "`, or be tied to this proposal in a dashboard answer."))
       (println "Then run: route_card.sh commit" id "--operator-said \"<their exact words>\"")
@@ -1127,7 +1114,7 @@
               (exit! 1 (str "No approval source. Pass --operator-said \"<their exact words>\""
                             " for approval given in this chat, or --approval <request-id>"
                             " for one that left a record. A card proposal is never"
-                            " answered through the clarification store.")))
+                            " answered as a typed project clarification.")))
           record (approval-from [project-root forge] proposal explicit said)]
       (when-not (affirmative? (:text record) name id
                               (or structured-tie?

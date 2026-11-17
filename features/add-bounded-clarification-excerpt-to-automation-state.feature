@@ -1,11 +1,12 @@
 Feature: Add a bounded clarification excerpt to automation state
 
-  Scenario: Expose short legacy and typed questions
-    Given legacy and typed short clarification questions
+  Scenario: Expose short typed questions
+    Given a typed short clarification question
     When the automation projection is read
-    Then both rows carry the same bounded question excerpt field
-    And each excerpt preserves the short question
+    Then the row carries a bounded question excerpt field
+    And the excerpt preserves the short question
     And identities and lifecycle fields remain unchanged
+    And the legacy compatibility section remains empty
 
   Scenario: Bound and sanitize a long question
     Given a clarification question containing controls, paths, credentials and long text
@@ -21,9 +22,10 @@ Feature: Add a bounded clarification excerpt to automation state
     And no text is invented
 
   Scenario: Keep automation clarifications bounded
-    Given more legacy and typed clarifications than the projection row limits
+    Given more typed clarifications than the projection row limit
     When the automation projection is read
-    Then both clarification sections remain within their row limits
+    Then the typed clarification section remains within its row limit
+    And the legacy compatibility section remains empty
     And every excerpt remains within its configured limit
     And the response remains within its response-size bound
 

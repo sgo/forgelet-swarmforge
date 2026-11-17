@@ -830,9 +830,11 @@
                                   "resolved-card" "approved")
         _ (web/create-chat-clarification!
            root "clar-typed-cached" "typed clarification body" nil)
+        legacy-file (fs/path root ".swarmforge" "dashboard"
+                            "clarifications" "pending"
+                            "clar-legacy-cached.request")
         _ (write-file
-           (fs/path root ".swarmforge" "dashboard" "clarifications" "pending"
-                    "clar-legacy-cached.request")
+           legacy-file
            (str "id: clar-legacy-cached\n"
                 "status: pending\n"
                 "role: specifier\n"
@@ -885,23 +887,19 @@
                    :project (str (fs/file-name root))
                    :resolution "approved"}]
                  (get-in state [:resolved_approvals :items])))
-          (is (= ["clar-legacy-cached"]
-                 (mapv :id (get-in state [:clarifications :legacy :items]))))
+          (is (fs/regular-file? legacy-file))
+          (is (= {:count 0 :truncated false :items []}
+                 (get-in state [:clarifications :legacy])))
           (is (= "clar-typed-cached"
                  (get-in state [:clarifications :typed :items 0
                                 :clarification_id])))
           (is (= "typed clarification body"
                  (get-in state [:clarifications :typed :items 0
                                 :question_excerpt])))
-          (is (= "legacy clarification body"
-                 (get-in state [:clarifications :legacy :items 0
-                                :question_excerpt])))
           (is (= "specifier"
                  (get-in state [:projects :items 0 :activity :items 0 :role])))
           (is (not (contains? (get-in state [:clarifications :typed :items 0])
                               :body)))
-          (is (not (contains? (get-in state [:clarifications :legacy :items 0])
-                              :response)))
           (is (not (contains? (get-in state [:clarifications :typed :items 0])
                               :reference_id)))
           (is (not (contains? state :chat)))
@@ -1140,11 +1138,11 @@
         (web/reset-dashboard-cache!)))))
 
 (deftest dashboard-automation-clarifications-expose-safe-bounded-question-excerpts
-  ;; Given legacy and typed clarifications with short, unsafe, oversized and
-  ;; empty question bodies
+  ;; Given historical legacy records and typed clarifications with short,
+  ;; unsafe, oversized and empty question bodies
   ;; When the automation projection is read
-  ;; Then both stores expose one safe bounded question excerpt without bodies,
-  ;; answers or references
+  ;; Then typed rows expose safe bounded excerpts while legacy compatibility is
+  ;; empty and the historical store is ignored
   (let [root (doto (tmp-dir) setup-pack!)
         secret-path "/Users/operator/private/project"
         token "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
@@ -1197,36 +1195,26 @@
       (binding [web/*dashboard-cache-now-ms* 1000]
         (let [response (direct-response root "GET" "/api/automation-state" nil)
               state (json/parse-string (:body response) true)
-              legacy (into {} (map (juxt :id identity)
-                                   (get-in state
-                                           [:clarifications :legacy :items])))
+              legacy (get-in state [:clarifications :legacy])
               typed (into {} (map (juxt :id identity)
                                   (get-in state
                                           [:clarifications :typed :items])))
-              unsafe-legacy (:question_excerpt
-                             (get legacy "clar-legacy-unsafe"))
               unsafe-typed (:question_excerpt
                             (get typed "clar-typed-unsafe"))
               emoji-excerpt
               (web/automation-clarification-question
                (apply str (repeat 600 "😀")))]
           (is (= 200 (:status response)))
-          (is (= "Short legacy question?"
-                 (get-in legacy ["clar-legacy-short" :question_excerpt])))
+          (is (= {:count 0 :truncated false :items []} legacy))
+          (is (fs/regular-file?
+               (fs/path root ".swarmforge" "dashboard" "clarifications"
+                        "pending" "clar-legacy-short.request")))
           (is (= "Short typed question?"
                  (get-in typed ["clar-typed-short" :question_excerpt])))
-          (is (contains? (get legacy "clar-legacy-empty")
-                         :question_excerpt))
-          (is (nil? (get-in legacy
-                            ["clar-legacy-empty" :question_excerpt])))
           (is (contains? (get typed "clar-typed-empty")
                          :question_excerpt))
           (is (nil? (get-in typed ["clar-typed-empty" :question_excerpt])))
-          (is (contains? (get legacy "clar-legacy-malformed")
-                         :question_excerpt))
-          (is (nil? (get-in legacy
-                            ["clar-legacy-malformed" :question_excerpt])))
-          (doseq [excerpt [unsafe-legacy unsafe-typed]]
+          (doseq [excerpt [unsafe-typed]]
             (is (= web/automation-clarification-excerpt-limit
                    (.codePointCount ^String excerpt 0 (.length ^String excerpt))))
             (is (str/ends-with?
@@ -1247,7 +1235,6 @@
           (is (not (contains? (get typed "clar-typed-short")
                               :reference_id)))
           (is (not (contains? (get typed "clar-typed-short") :body)))
-          (is (not (contains? (get legacy "clar-legacy-short") :response)))
           (is (not (str/includes? (:body response) "hidden legacy answer")))
           (is (= "Short typed question?"
                  (str/trimr
@@ -1493,10 +1480,11 @@
         (web/reset-dashboard-cache!)))))
 
 (deftest dashboard-automation-clarification-excerpts-remain-bounded
-  ;; Given more legacy and typed clarifications than either projection section
-  ;; may contain, each with a long question
+  ;; Given more typed clarifications than the projection section may contain
+  ;; plus historical legacy records with the same long question
   ;; When the automation projection is built
-  ;; Then both sections keep their row bounds and the response stays bounded
+  ;; Then typed rows keep their bound, legacy compatibility stays empty and the
+  ;; response stays bounded
   (let [root (doto (tmp-dir) setup-pack!)
         question (apply str (repeat 2000 "q"))
         write-legacy!
@@ -1536,16 +1524,16 @@
               state (json/parse-string (:body response) true)
               legacy (get-in state [:clarifications :legacy])
               typed (get-in state [:clarifications :typed])
-              excerpts (concat (map :question_excerpt (:items legacy))
-                               (map :question_excerpt (:items typed)))]
+              excerpts (map :question_excerpt (:items typed))]
           (is (= 200 (:status response)))
           (is (< (count (.getBytes (:body response) "UTF-8")) 500000))
-          (is (= {:count 250 :truncated true}
-                 (select-keys legacy [:count :truncated])))
+          (is (= {:count 0 :truncated false :items []} legacy))
           (is (= {:count 250 :truncated true}
                  (select-keys typed [:count :truncated])))
-          (is (= 200 (count (:items legacy))))
           (is (= 200 (count (:items typed))))
+          (is (fs/regular-file?
+               (fs/path root ".swarmforge" "dashboard" "clarifications"
+                        "pending" "clar-legacy-bound-000.request")))
           (is (every?
                #(<= (.codePointCount ^String % 0 (.length ^String %))
                     web/automation-clarification-excerpt-limit)
@@ -5128,90 +5116,44 @@
     (is (str/includes? (str (:err result) (:out result)) "Unknown approval"))
     (is (zero? (:exit (pack-web root false "--test-state" (str root)))))))
 
-(deftest pack-web-unknown-clarification-keeps-the-server
-  ;; Given a pack with no pending clarification
-  ;; When POST /api/clarifications/missing/answer
-  ;; Then it reports Unknown clarification and the next request still works
+(deftest legacy-clarification-command-and-answer-endpoint-are-unavailable
+  ;; Given historical pending and done clarification records
+  ;; When the legacy command and answer endpoint are tried
+  ;; Then both are unavailable and the historical files remain untouched and
+  ;; are not surfaced by /api/state
   (let [root (tmp-dir)
-        _ (setup-pack! root)
-        result (pack-web root false "--test-answer-clarification"
-                         (str root) "no-such-id" "nope")]
-    (is (not (zero? (:exit result))))
-    (is (str/includes? (:out result) "error"))
-    (is (str/includes? (str (:err result) (:out result)) "Unknown clarification"))
-    (is (zero? (:exit (pack-web root false "--test-state" (str root)))))))
-
-(deftest pack-web-clarification-posts-to-attention-and-answers-into-the-role
-  ;; Given QA posts a clarification question
-  ;; When the operator answers
-  ;; Then /api/state listed it and the answer is injected into QA with the durable id
-  (let [root (tmp-dir)
-        argv-file (str (fs/path root "tmux.argv"))
-        question (fs/path root "tmp" "question.txt")]
-    (setup-pack! root ["QA"])
-    (write-file (fs/path root ".swarmforge/tmux-socket") (str (fs/path root "tmux.sock") "\n"))
-    (write-file question "Does the bat drop to any of 20 rooms?\n")
-    (let [created (run {:dir root :env {"SWARMFORGE_ROLE" "QA"}}
-                       (script "pack_dashboard_request.sh")
-                       "clarify" (str question))
-          id (str/trim (:out created))
-          pending (web-state root)
-          item (first (:clarifications pending))]
-      (is (zero? (:exit created)))
-      (is (str/starts-with? id "clar-"))
-      (is (= "QA" (:role item)))
-      (is (str/includes? (:body item) "Does the bat drop to any of 20 rooms?"))
-      (is (= "pending" (:status item)))
-      (pack-web-env root {"SWARMFORGE_TMUX_STUB" argv-file}
-                    "--test-answer-clarification" (str root) id "Yes, 1 to 20.\nUse all rooms.")
-      (let [argv (read-argv argv-file)
-            stdin (slurp (str argv-file ".stdin"))
-            done (first (:clarifications (web-state root)))
-            stored (slurp (str (first (fs/list-dir
-                                       (fs/path root ".swarmforge/dashboard/clarifications/done")))))]
-        (is (str/includes? stdin id))
-        (is (str/includes? stdin "Yes, 1 to 20."))
-        (is (str/includes? stdin "Use all rooms."))
-        (is (not-any? #(str/includes? (str %) "Use all rooms.") argv))
-        (is (= "done" (:status done)))
-        (is (= "Yes, 1 to 20.\nUse all rooms." (:response done)))
-        (is (str/includes? stored "response: Yes, 1 to 20.\\nUse all rooms.\n"))))))
-
-(deftest pack-dashboard-request-accepts-an-already-answered-clarification
-  (let [root (tmp-dir)
-        argv-file (str (fs/path root "tmux.argv"))
         question (fs/path root "tmp" "question.txt")
-        ack (fs/path root "tmp" "answer.txt")]
+        pending (fs/path root ".swarmforge" "dashboard" "clarifications"
+                          "pending" "clar-legacy-kept.request")
+        done (fs/path root ".swarmforge" "dashboard" "clarifications"
+                       "done" "clar-legacy-done.request")]
     (setup-pack! root ["QA"])
-    (write-file (fs/path root ".swarmforge/tmux-socket") (str (fs/path root "tmux.sock") "\n"))
-    (write-file question "Does the bat drop to any of 20 rooms?\n")
-    (write-file ack "ignored local ack\n")
-    (let [created (run {:dir root :env {"SWARMFORGE_ROLE" "QA"}}
-                       (script "pack_dashboard_request.sh")
-                       "clarify" (str question))
-          id (str/trim (:out created))]
-      (pack-web-env root {"SWARMFORGE_TMUX_STUB" argv-file}
-                    "--test-answer-clarification" (str root) id "Yes, 1 to 20.")
-      (let [acked (run {:dir root :env {"SWARMFORGE_ROLE" "QA"}}
-                       (script "pack_dashboard_request.sh")
-                       "answer" id (str ack))
-            done (first (:clarifications (web-state root)))
-            pending-requests (fs/path root ".swarmforge/dashboard/requests/pending")
-            done-file (first (fs/list-dir
-                              (fs/path root ".swarmforge/dashboard/clarifications/done")))]
-        (is (zero? (:exit acked)))
-        (is (str/includes? (:out acked) (str "ANSWERED: " id)))
-        (is (= "done" (:status done)))
-        (is (= "Yes, 1 to 20." (:response done)))
-        (is (str/includes? (slurp (str done-file)) "response: Yes, 1 to 20.\n"))
-        (is (or (not (fs/directory? pending-requests))
-                (empty? (fs/list-dir pending-requests)))))
-      (let [unknown (run {:dir root :env {"SWARMFORGE_ROLE" "QA"} :ok? false}
-                         (script "pack_dashboard_request.sh")
-                         "answer" "clar-missing" (str ack))]
-        (is (not (zero? (:exit unknown))))
-        (is (str/includes? (str (:err unknown) (:out unknown))
-                           "Unknown pending request"))))))
+    (write-file question "Legacy question?\n")
+    (write-file pending
+                "id: clar-legacy-kept\nstatus: pending\nrole: QA\n\nLegacy\n")
+    (write-file done
+                "id: clar-legacy-done\nstatus: done\nrole: QA\n\nLegacy done\n")
+    (let [command-result (run {:dir root
+                              :env {"SWARMFORGE_ROLE" "QA"}
+                              :ok? false}
+                             (script "pack_dashboard_request.sh")
+                             "clarify" (str question))
+          answer-response
+          (direct-response root "POST"
+                           "/api/clarifications/clar-legacy-kept/answer"
+                           (json/generate-string {:text "not accepted"}))
+          state (web-state root)]
+      (is (not (zero? (:exit command-result))))
+      (is (str/includes? (str (:err command-result) (:out command-result))
+                         "Usage:"))
+      (is (= 404 (:status answer-response)))
+      (is (= "Not found" (:body answer-response)))
+      (is (= [] (:clarifications state)))
+      (is (empty? (:chat state)))
+      (is (= "id: clar-legacy-kept\nstatus: pending\nrole: QA\n\nLegacy\n"
+             (slurp (str pending))))
+      (is (= "id: clar-legacy-done\nstatus: done\nrole: QA\n\nLegacy done\n"
+             (slurp (str done)))))))
 
 (deftest pack-web-serves-the-task-body
   ;; Given New Task HTW with body
@@ -5338,28 +5280,6 @@
         body (json/parse-string (:out result) true)]
     (is (zero? (:exit result)))
     (is (< (:before body) (:after body)))))
-
-(deftest pack-web-clarification-answer-echoes-the-question
-  ;; Given QA asked a clarification
-  ;; When the operator answers
-  ;; Then the injected pane text includes the question and Clarification requested from
-  (let [root (tmp-dir)
-        argv-file (str (fs/path root "tmux.argv"))
-        question (fs/path root "tmp" "question.txt")]
-    (setup-pack! root ["QA"])
-    (write-file (fs/path root ".swarmforge/tmux-socket") (str (fs/path root "tmux.sock") "\n"))
-    (write-file question "Does the bat drop to any of 20 rooms?\n")
-    (let [id (str/trim (:out (run {:dir root :env {"SWARMFORGE_ROLE" "QA"}}
-                                  (script "pack_dashboard_request.sh")
-                                  "clarify" (str question))))]
-      (pack-web-env root {"SWARMFORGE_TMUX_STUB" argv-file}
-                    "--test-answer-clarification" (str root) id "Yes, 1 to 20.")
-      (let [argv (read-argv argv-file)
-            stdin (slurp (str argv-file ".stdin"))]
-        (is (str/includes? stdin "Clarification requested from: QA"))
-        (is (str/includes? stdin "Does the bat drop to any of 20 rooms?"))
-        (is (str/includes? stdin "Yes, 1 to 20."))
-        (is (not-any? #(str/includes? (str %) "Yes, 1 to 20.") argv))))))
 
 (defn seed-mini-forge! [root]
   (fs/create-dirs (fs/path root "projects"))
