@@ -46,12 +46,20 @@ gate. Do not create a project-named card to stand in for the routed card. If
 more than one routed card is active and the task note cannot identify one, stop
 and make the operator choose rather than guessing.
 
-When a decision is genuinely the operator's, ask in project chat with a stable
-clarification id:
-`pack_dashboard_request.sh clarify-chat clar-<stable-id> ./tmp/question.txt`.
-The question may use multiline Markdown. If the answer is insufficient, create
-a new clarification that references the earlier one instead of reopening the
-answered record.
+<!-- forgelet:typed-clarification-guidance:begin -->
+## Operator clarifications
+
+When a decision is genuinely the operator's, ask in project chat:
+
+`pack_dashboard_request.sh clarify-chat clar-<stable-id> ./tmp/question.txt`
+
+Use one stable id for the question and keep it stable across retries. The
+question file may contain multiline Markdown. Stop and wait after asking; do not
+start unrelated work while the clarification is open. If the answer is
+insufficient, create a new clarification that references the answered one with
+`--reference clar-<answered-id>` rather than reopening the answered record.
+Never use the removed legacy `clarify` command.
+<!-- forgelet:typed-clarification-guidance:end -->
 
 Work in vertical slices: one public behaviour through every gate. Tests,
 cleanup, architecture, hardening and verification are part of that slice, not

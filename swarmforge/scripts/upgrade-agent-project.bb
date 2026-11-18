@@ -51,6 +51,26 @@
        "reviewed tree.\n"
        commit-policy-end))
 
+(def clarification-begin
+  "<!-- forgelet:typed-clarification-guidance:begin -->")
+(def clarification-end
+  "<!-- forgelet:typed-clarification-guidance:end -->")
+(def clarification-block
+  (str clarification-begin "\n"
+       "## Operator clarifications\n\n"
+       "When a decision is genuinely the operator's, ask in project chat:\n\n"
+       "`pack_dashboard_request.sh clarify-chat clar-<stable-id> ./tmp/question.txt`\n\n"
+       "Use one stable id for the question and keep it stable across retries. The\n"
+       "question file may contain multiline Markdown. Stop and wait after asking; do not\n"
+       "start unrelated work while the clarification is open. If the answer is\n"
+       "insufficient, create a new clarification that references the answered one with\n"
+       "`--reference clar-<answered-id>` rather than reopening the answered record.\n"
+       "Never use the removed legacy `clarify` command.\n"
+       clarification-end))
+
+(def legacy-clarify-command-re
+  #"pack_dashboard_request\.sh\s+clarify(?:\s|$)")
+
 (def install-stage
   {:name "deploy"
    :runs [["scripts/install-snapshot.sh"]]
@@ -185,6 +205,57 @@
     (fs/create-dirs (fs/parent file))
     (spit (str file) updated)))
 
+(defn install-clarification-guidance! [file]
+  (let [text (if (fs/regular-file? file)
+               (slurp (str file))
+               (str "# " (fs/file-name file) "\n"))
+        lines (str/split-lines text)
+        kept
+        (loop [remaining lines
+               kept []
+               skipping? false]
+          (if-let [line (first remaining)]
+            (let [trimmed (str/trim line)]
+              (cond
+                (= clarification-begin trimmed)
+                (recur (next remaining) kept true)
+
+                (= clarification-end trimmed)
+                (if skipping?
+                  (recur (next remaining) kept false)
+                  (let [heading-index
+                        (->> kept
+                             (keep-indexed
+                              (fn [index value]
+                                (when (str/starts-with? (str/trim value) "## ")
+                                  index)))
+                             last)]
+                    (recur (next remaining)
+                           (if heading-index
+                             (subvec kept 0 heading-index)
+                             kept)
+                           false)))
+
+                (re-find legacy-clarify-command-re trimmed)
+                (recur (next remaining) kept skipping?)
+
+                skipping?
+                (if (str/starts-with? trimmed "## ")
+                  (recur remaining kept false)
+                  (recur (next remaining) kept true))
+
+                :else
+                (recur (next remaining) (conj kept line) false)))
+            (str/trimr (str/join "\n" kept))))]
+    (fs/create-dirs (fs/parent file))
+    (spit (str file) (str kept "\n\n" clarification-block "\n"))))
+
+(defn clarification-guidance-current? [file]
+  (and (managed-block-in-place?
+        file clarification-begin clarification-end clarification-block)
+       (not (re-find legacy-clarify-command-re
+                     (when (fs/regular-file? file) (slurp (str file)))))))
+
 (defn -main [& args]
   (let [root (fs/absolutize (or (option args "--root") "."))
         template (fs/absolutize
@@ -202,6 +273,7 @@
         template-e2e-contract (fs/path template "qa" "e2e.edn")
         template-e2e-wrapper (fs/path template "scripts" "run-qa-e2e.sh")
         template-wrapper (fs/path template "scripts" "check-documentation.sh")
+        agents-file (fs/path root "AGENTS.md")
         policy-files [(fs/path root "AGENTS.md")
                       (fs/path root "STAGES.md")]
         upgrade-source (fs/path (fs/parent (fs/absolutize *file*))
@@ -273,6 +345,8 @@
                                % commit-policy-begin commit-policy-end
                                commit-policy-block)) policy-files)
                   (conj "install single-agent commit policy")
+                  (not (clarification-guidance-current? agents-file))
+                  (conj "install typed clarification guidance")
                   (not (fs/regular-file? checker)) (conj "install check-documentation.bb")
                   (or (not (fs/regular-file? wrapper))
                       (not= (slurp (str wrapper)) (slurp (str template-wrapper))))
@@ -317,6 +391,8 @@
                      commit-policy-block)
             (install-managed-block!
              file commit-policy-begin commit-policy-end commit-policy-block)))
+        (when-not (clarification-guidance-current? agents-file)
+          (install-clarification-guidance! agents-file))
         (when-not (= (when (fs/regular-file? checker) (slurp (str checker)))
                      (slurp (str upgrade-source)))
           (fs/create-dirs (fs/parent checker))

@@ -7,7 +7,8 @@
             [clojure.string :as str]))
 
 (def pack-names ["two-pack" "four-pack" "six-pack"])
-(def shared-articles ["engineering.prompt" "workflow.prompt" "handoffs.prompt" "privacy.prompt"])
+(def shared-articles ["engineering.prompt" "workflow.prompt" "handoffs.prompt" "privacy.prompt"
+                      "stopping-without-finishing.prompt"])
 (def runtime-commit-message "Sync SwarmForge runtime")
 (def runtime-commit-marker "SWARMFORGE_MANAGED_RUNTIME_SYNC")
 (def runtime-git-name "SwarmForge Runtime")

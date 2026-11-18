@@ -10,9 +10,10 @@ Usage: get-agent-project <project-name> [--forge <forge-root>] [--profile standa
 Compose a single-agent project into an existing forge. The forge root defaults
 to the current directory when it has projects/ and swarmforge/scripts/.
 
---upgrade applies structural additions to an existing project without
-replacing its source, task, feature or existing stage definitions. --check
-reports whether the upgrade is still needed and changes nothing.
+--upgrade applies structural additions and managed AGENTS guidance to an
+existing project without replacing its source, task, feature or existing stage
+definitions. --check reports whether the upgrade is still needed and changes
+nothing.
 
 --convert plans a six-pack project's conversion to one agent. It changes
 nothing unless --apply is given.

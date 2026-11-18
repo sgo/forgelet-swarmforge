@@ -340,7 +340,10 @@ get-agent-project --upgrade <project-name-or-path> --forge <forge-root>
 only missing template structure: it preserves the project's source, tasks,
 features and existing stages, inserts a new required stage in its template
 position, and refreshes only managed helper files. It then prints the
-project-local work required to make the new gate pass.
+project-local work required to make the new gate pass. It also inserts one
+managed typed-clarification block into `AGENTS.md`, replacing partial, stale or
+duplicate copies without changing project-authored instructions outside that
+block.
 
 A six-pack project can be converted in place with:
 
