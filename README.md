@@ -134,6 +134,51 @@ Three overrides are for development rather than for choice:
 `SWARMFORGE_BRIDGE_REPO` and `SWARMFORGE_BRIDGE_REF` name another repository or
 branch, and `SWARMFORGE_SKIP_BRIDGE=1` leaves the bridge out entirely.
 
+### Check and apply a forge runtime upgrade
+
+Every successful `get-swarm-forge` composition writes
+`.swarmforge/runtime-manifest.edn` as the forge's local runtime identity. The
+manifest records the product, the canonical Forgelet source commit and a
+SHA-256 digest over the layer-owned shared files that were actually composed.
+Its file list is authoritative: it includes shared scripts, the five shared
+constitution articles, `constitution.prompt`, the layer Lieutenant prompt, root
+`swarm` and layer-carried skills. Runtime state, project trees, packs,
+`swarmforge/swarmforge.conf`, `local-lieutenant.prompt`, forge-owned skills and
+untracked local files are outside the digest.
+
+One command reports and applies the contract for a managed forge:
+
+```sh
+forge_runtime_upgrade.sh status \
+  --forge <forge-root> --source-layer <published-layer-checkout>
+
+forge_runtime_upgrade.sh apply \
+  --forge <forge-root> --source-layer <published-layer-checkout>
+```
+
+Both modes print one JSON object. Status is one of `current`, `behind`,
+`checking`, `unavailable` or `unknown`. It reports installed and available
+digests/source commits, whether all open projects are idle, bounded blockers
+naming active cards, bounded shared-file changes and the open single-agent
+projects requiring a project-template upgrade. Status also stages a disposable
+composition under the forge's runtime-upgrade state to compute the available
+identity; it never modifies the source layer or projects.
+
+Apply takes the forge-scoped lock, rechecks idleness and both identities, then
+closes the original open set through the normal forge commands, stops only that
+forge's host runtime when it was healthy, composes the published layer, runs the
+published `get-agent-project --upgrade` for each supported open project, starts
+the host again when needed, reopens the original project names through the same
+forge command and verifies host/project health plus the expected digest. A busy
+forge or failed preflight exits `3`; execution and verification failures exit
+`4`. Failures name a bounded phase, attempt recovery through the normal open
+command and remain retryable. Operation records live under
+`.swarmforge/runtime-upgrades/operations/`.
+
+The host supplies the published source checkout; it does not reconstruct
+composition or project-upgrade commands. Tailscale Serve is outside this
+contract and is never read or changed.
+
 ### Single-agent projects
 
 A forge can hold a project owned by one agent instead of a pack. From a layer

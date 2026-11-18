@@ -304,6 +304,42 @@ merge_ignore_lines() {
   done < "$src"
 }
 
+canonical_source_commit() {
+  local commit="${SWARMFORGE_SOURCE_COMMIT:-}"
+  if [[ -n "$commit" ]]; then
+    if [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+      echo "$commit"
+      return 0
+    fi
+    echo "get-swarm-forge: SWARMFORGE_SOURCE_COMMIT must be a 40-character lowercase Git commit" >&2
+    exit 1
+  fi
+  local git_dir
+  git_dir="$(local_git_dir)"
+  if [[ -n "$git_dir" && -d "$git_dir/.git" ]]; then
+    commit="$(git -C "$git_dir" rev-parse "refs/heads/$base_ref^{commit}" 2>/dev/null || true)"
+  fi
+  if [[ -z "$commit" ]]; then
+    commit="$(git ls-remote "$repo_url" "refs/heads/$base_ref" 2>/dev/null \
+      | awk 'NR == 1 { print $1 }')"
+  fi
+  if [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "$commit"
+  fi
+}
+
+write_runtime_manifest() {
+  local layer="${1:-$main_dir}"
+  local helper="$layer/swarmforge/scripts/forge_runtime_upgrade.bb"
+  [[ -f "$helper" ]] || return 0
+  local commit
+  commit="$(canonical_source_commit)"
+  [[ -n "$commit" ]] \
+    || fail_missing "canonical source commit for the composed runtime manifest"
+  bb "$helper" manifest --forge "$PWD" --source-layer "$layer" \
+    --product "$product" --source-commit "$commit"
+}
+
 install_pack_ignores() {
   local src pack_name
   for src in "$@"; do
@@ -523,6 +559,7 @@ if [[ "$product" == two-pack || "$product" == four-pack || "$product" == six-pac
     swarmforge/constitution/articles/engineering.prompt \
     swarmforge/swarmforge.conf \
     swarmforge/constitution.prompt
+  write_runtime_manifest "$host_dir"
   echo "SwarmForge pack installed from $product. Run ./swarm to start the pack."
   exit 0
 fi
@@ -594,5 +631,6 @@ require_files "${required_files[@]}"
 
 install_forgelet_bridge
 restore_layer_route_gate "$layer_dir"
+write_runtime_manifest "$layer_dir"
 
 echo "SwarmForge forge installed from $host_from. Run ./swarm to start the dashboard."

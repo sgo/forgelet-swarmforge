@@ -1729,6 +1729,47 @@
                 (zero? (:exit (process/sh {:continue true}
                                           "tmux" "-S" socket "list-sessions"))))))))
 
+(defn host-healthy? [root]
+  (let [ctx (context root)]
+    (and (forge-up? root)
+         (dashboard-running? ctx))))
+
+(defn health-command! [root]
+  (when (str/blank? root)
+    (fail! (str red "Error:" reset " --health needs a forge root")))
+  (when-not (host-healthy? root)
+    (fail! (str red "Error:" reset " forge runtime is not healthy")))
+  (println "healthy"))
+
+(defn project-health-command! [root name]
+  (when (or (str/blank? root) (str/blank? name))
+    (fail! (str red "Error:" reset
+                " --health-project needs a forge root and a project")))
+  (let [api (fs/path root "swarmforge" "scripts" "forge.bb")]
+    (when-not (fs/regular-file? api)
+      (fail! (str red "Error:" reset " forge API is missing")))
+    (load-file (str api))
+    (when-not ((requiring-resolve 'forge/runtime-ready?)
+               (fs/path root "projects" name))
+      (fail! (str red "Error:" reset " project runtime is not healthy: " name))))
+  (println "healthy"))
+
+(defn stop-forge-runtime-command! [root]
+  (when (str/blank? root)
+    (fail! (str red "Error:" reset " --stop-forge-runtime needs a forge root")))
+  (let [ctx (context root)
+        socket-file (:tmux-socket-file ctx)
+        socket (when (fs/regular-file? socket-file)
+                 (not-empty (str/trim (slurp (str socket-file)))))
+        sessions (session-names-from-file ctx)
+        cleanup (str (fs/path (:script-dir ctx) "swarm-cleanup.sh"))]
+    (stop-handoff-daemon! ctx)
+    (stop-existing-pack-web! ctx)
+    (when socket
+      (apply process/sh {:continue true}
+             (into [cleanup socket (str (:window-ids-file ctx))]
+                   sessions)))))
+
 (defn swarmforge-command [root]
   (str (fs/path root "swarmforge" "scripts" "swarmforge.sh")))
 
@@ -1932,6 +1973,9 @@
                             (mark-project! (context (second args)) (= "open" (nth args 2)))
                             (println "marked"))
     "--test-forge-up" (println (str (forge-up? (second args))))
+    "--health" (health-command! (second args))
+    "--health-project" (project-health-command! (second args) (nth args 2 nil))
+    "--stop-forge-runtime" (stop-forge-runtime-command! (second args))
     "--test-dead-agent" (println (str (dead-agent? (second args) (nth args 2 nil))))
     "--restart-role" (restart-role-command! (second args) (nth args 2 nil))
     "--restart-dead-roles" (restart-dead-roles-command! (second args))
