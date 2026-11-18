@@ -85,8 +85,31 @@ Work in `projects/forgelet-swarmforge` and the device-local forge rollout. Do no
 put credentials in tracked files, alter project-agent credential scoping, widen
 the package token to non-package roots, or change host repository administration.
 
+## Verification
+
+- `bb test`: 489 tests, 3,640 assertions, 0 failures, 0 errors; all 20 browser
+  tests and the required bounded-projection E2E passed.
+- `bb crap`: 24 coverage tests and 132 assertions passed; the complete coverage
+  and CRAP gate passed.
+- Synthetic owner-only hooks proved `GH_TOKEN` reaches the Lieutenant child,
+  ordinary forge roots receive no `GITHUB_PACKAGES_TOKEN`, malformed hooks fail
+  before launch, and no synthetic token appears in command text, runtime launch
+  scripts or output.
+- The reviewed layer was composed into Forgelet, Saibill, Innersource and
+  Ledgerhall with bridge reinstallation disabled. Only their Lieutenant
+  sessions were replaced; project runtimes were untouched.
+- All four Lieutenant agent children expose `GH_TOKEN` and do not expose
+  `GITHUB_PACKAGES_TOKEN`. `gh auth status --hostname github.com` and a
+  non-mutating `git ls-remote origin` succeed through each forge's credential
+  loader.
+- All four dashboards return `{"ok":true,"live":true}`. Runtime launch scripts
+  are owner-only mode `700`, and neither credential variable appears in tmux
+  server state.
+- A hermetic test guard now refuses restart, start, stop, direct-listener,
+  agent-runner and composition commands unless the actual fixture root or tmux
+  socket is disposable. It is committed at `8a23e11`.
+- No project agent was restarted. Operator acceptance remains pending.
+
 ## Operator acceptance
 
-- owner: operator | environment: restarted forge Lieutenants | checks: issue one
-  GitHub-backed request or push from a Lieutenant without manually sourcing
-  credentials, while no credential value appears in output | status: pending
+- owner: operator | environment: restarted forge Lieutenants | checks: issue one GitHub-backed request or push from a Lieutenant without manually sourcing credentials, while no credential value appears in output | status: pending
