@@ -17,6 +17,7 @@
 (defn test-cli! [& args]
   (case (first args)
     "--test-state" (test-state! (second args))
+    "--test-automation-state" (test-automation-state! (second args))
     "--test-state-query" (test-state-query! (second args) (nth args 2 nil))
     "--test-html" (test-html!)
     "--test-post-task" (test-post-task! (second args) (nth args 2 nil) (nth args 3 nil))
@@ -45,6 +46,9 @@
     "--test-lieutenant-activity" (test-lieutenant-activity!
                                   (second args) (nth args 2 nil)
                                   (nth args 3 nil) (nth args 4 nil))
+    "--test-lieutenant-process-activity" (test-lieutenant-process-activity!
+                                          (second args) (nth args 2 nil)
+                                          (nth args 3 nil) (nth args 4 nil))
     "--test-lieutenant-activity-timeline" (test-lieutenant-activity-timeline! (second args))
     "--test-health" (test-health!)
     "--test-health-metrics" (test-health-metrics!)

@@ -11,8 +11,13 @@
            [java.nio.file OpenOption StandardOpenOption]))
 
 (def script-dir (fs/parent *file*))
+(load-file (str (fs/path script-dir "pane_tree.bb")))
 (load-file (str (fs/path script-dir "forge.bb")))
 (load-file (str (fs/path script-dir "completed_card_report.bb")))
+(def pane-shell-command? @(requiring-resolve 'pane-tree/shell-command?))
+(def pane-classify @(requiring-resolve 'pane-tree/classify-pane))
+(def pane-observe @(requiring-resolve 'pane-tree/observe-pane))
+(def pane-alive-kind? @(requiring-resolve 'pane-tree/alive-kind?))
 
 (def usage-text
   (str "Usage:\n"
@@ -878,9 +883,6 @@
     (record-heat! (pane-cache-key root role) text backend)
     0))
 
-(def master-shells
-  #{"zsh" "bash" "sh" "dash" "ksh" "fish" "tcsh" "csh" "login" "-zsh" "-bash"})
-
 (def activity-working-pattern
   #"(?im)^\s*(?:[•*]\s*working(?:\s*\([^)\r\n]*\))?|[✢✻✽✶✳]\s*.*\((?:[^)\r\n]*\bthinking\b[^)\r\n]*|esc\s+to\s+interrupt[^)\r\n]*)\)|esc\s+to\s+interrupt(?:\s*[·.)-].*)?|waiting\s+for\s+response(?:\s+\d+(?:\.\d+)?s)?)\s*$")
 
@@ -901,13 +903,6 @@
 
 (def activity-status-max-chars 120)
 (def activity-tail-lines 8)
-
-(defn fallback-shell? [command]
-  (let [normalized (some-> command
-                           str/trim
-                           str/lower-case
-                           (str/replace #"^.*[\\/]" ""))]
-    (contains? master-shells normalized)))
 
 (defn safe-activity-line [line]
   (some-> line
@@ -1012,21 +1007,28 @@
   (if *lieutenant-activity-context*
     *lieutenant-activity-context*
     (if-let [row (master-row root)]
-      (let [alive? (try
-                     (state-session-alive? root "lieutenant" row)
-                     (catch Exception _ false))]
-        {:alive? alive?
-         :command (when alive?
-                    (state-pane-command root "lieutenant" row))})
-      {:alive? false})))
+      (let [socket (tmux-socket root)
+            pane-state (if socket
+                         (try
+                           (pane-observe
+                            socket (session-name row) (backend-name row))
+                           (catch Exception _
+                             {:kind :unknown}))
+                         {:kind :missing})]
+        {:alive? (not (contains? #{:missing :ambiguous} (:kind pane-state)))
+         :command (:current_command pane-state)
+         :pane-state pane-state})
+      {:alive? false :pane-state {:kind :missing}})))
 
 (defn activity-fingerprint [activity]
   (select-keys activity [:alive :state :status_line]))
 
 (defn lieutenant-activity-snapshot [root]
   (let [row (master-row root)
-        {:keys [alive? command]} (lieutenant-runtime-facts root)
-        available? (and alive? (not (fallback-shell? command)))
+        {:keys [alive? command pane-state]} (lieutenant-runtime-facts root)
+        available? (and alive?
+                        (pane-alive-kind? (:kind pane-state))
+                        (true? (:expected_agent_live? pane-state)))
         backend (when row (backend-name row))
         text (when available? (state-pane-text root "lieutenant" row))
         marker (when available? (activity-marker text))
@@ -3612,6 +3614,11 @@
 (defn test-state! [root]
   (println (:body (handle-request (require-root! root) {:method "GET" :uri "/api/state"}))))
 
+(defn test-automation-state! [root]
+  (println (:body (handle-request (require-root! root)
+                                  {:method "GET"
+                                   :uri "/api/automation-state"}))))
+
 (declare test-http!)
 
 (defn test-state-query! [root query]
@@ -3823,7 +3830,15 @@
   (binding [*pane-text* (or text "")
             *lieutenant-activity-context*
             (when (= "alive" alive)
-              {:alive? true :command (or command "")})]
+              {:alive? true
+               :command (or command "")
+               :pane-state
+               {:kind (if (pane-shell-command? command)
+                        :dead-shell
+                        :live)
+                :current_command command
+                :expected_agent_live?
+                (not (pane-shell-command? command))}})]
     (println (:body (handle-request root {:method "GET" :uri "/api/state"})))))
 
 (defn test-status-persist! [root first-text second-text]
@@ -3852,11 +3867,46 @@
   (reset! pane-heat {})
   (reset! lieutenant-activity-history {})
   (let [context {:alive? (= "alive" alive)
-                 :command (or command "")}
+                 :command (or command "")
+                 :pane-state
+                 {:kind (cond
+                          (not= "alive" alive) :missing
+                          (pane-shell-command? command) :dead-shell
+                          :else :live)
+                  :current_command command
+                  :expected_agent_live?
+                  (and (= "alive" alive)
+                       (not (pane-shell-command? command)))}}
         activity (activity-for-test root context text)]
     (println (json/generate-string
               {:activity activity
                :fingerprint (activity-fingerprint activity)}))))
+
+(defn test-lieutenant-process-activity!
+  [root state expected-agent text]
+  (require-root! root)
+  (reset! pane-heat {})
+  (reset! lieutenant-activity-history {})
+  (let [pane {:current_command "zsh"
+              :pane_pid 100
+              :pane_dead false}
+        processes
+        (case state
+          "live" [{:pid 100 :ppid 1 :stat "Ss" :command "zsh"}
+                  {:pid 101 :ppid 100 :stat "S+" :command expected-agent}]
+          "unrelated" [{:pid 100 :ppid 1 :stat "Ss" :command "zsh"}
+                       {:pid 101 :ppid 100 :stat "S+" :command "sleep 60"}]
+          "exited" [{:pid 100 :ppid 1 :stat "Ss" :command "zsh"}
+                    {:pid 101 :ppid 100 :stat "Z" :command expected-agent}]
+          "malformed" nil
+          [{:pid 100 :ppid 1 :stat "Ss" :command "zsh"}])
+        pane-state (pane-classify pane expected-agent processes)
+        context {:alive? true :command "zsh" :pane-state pane-state}
+        activity (activity-for-test root context text)]
+    (println (json/generate-string
+              {:activity activity
+               :pane_state (select-keys pane-state
+                                        [:kind :expected_agent_live?])}))))
 
 (defn test-lieutenant-activity-timeline! [root]
   (require-root! root)
@@ -3864,19 +3914,27 @@
   (reset! lieutenant-activity-history {})
   (let [first (activity-for-test
                root
-               {:alive? true :command "claude"}
+               {:alive? true :command "claude"
+                :pane-state {:kind :live :current_command "claude"
+                             :expected_agent_live? true}}
                "I'm reviewing the board.\nesc to interrupt · 2s\n")
         same (activity-for-test
               root
-              {:alive? true :command "claude"}
+              {:alive? true :command "claude"
+               :pane-state {:kind :live :current_command "claude"
+                            :expected_agent_live? true}}
               "I'm reviewing the board.\nesc to interrupt · 2s\n")
         changed (activity-for-test
                  root
-                 {:alive? true :command "claude"}
+                 {:alive? true :command "claude"
+                  :pane-state {:kind :live :current_command "claude"
+                               :expected_agent_live? true}}
                  "I'm reviewing two cards.\nesc to interrupt · 3s\n")
         idle (activity-for-test
               root
-              {:alive? true :command "claude"}
+              {:alive? true :command "claude"
+               :pane-state {:kind :live :current_command "claude"
+                            :expected_agent_live? true}}
               "I'm ready for your next instruction.\n? for shortcuts\n")
         stale (do
                 (swap! pane-status-lines

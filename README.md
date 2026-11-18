@@ -793,8 +793,14 @@ next state. Current Claude `✢ … thinking` output is working evidence, as are
 the older Claude spinner markers. Marker status lines are normalized,
 length-bounded and redacted before they enter `/api/state`.
 
-No recognized marker means `unknown`; it is not evidence of idleness. A missing
-session or a fallback shell remains `unavailable`.
+No recognized marker means `unknown`; it is not evidence of idleness. Lieutenant
+availability uses the same exact-pane process-tree classifier as role restart. A
+shell-backed launch wrapper remains available while it has a live descendant
+matching the configured Codex or Claude actor, even when
+`pane_current_command` names the wrapper shell. An unrelated live child, a
+malformed process tree, a missing session or a shell with no expected live
+descendant is `unavailable`, and no pane text is read for that unavailable
+state.
 
 Chat entries in `/api/state` carry an optional `proposal_id` when that request
 belongs to a proposal discussion and an optional `thread_id` when it belongs to

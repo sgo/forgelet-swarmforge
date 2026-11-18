@@ -5,6 +5,13 @@
             [babashka.process :as process]
             [clojure.string :as str]))
 
+(def script-dir (fs/parent *file*))
+(load-file (str (fs/path script-dir "pane_tree.bb")))
+(def pane-agent-shells @(requiring-resolve 'pane-tree/agent-shells))
+(def pane-shell-command? @(requiring-resolve 'pane-tree/shell-command?))
+(def pane-tmux-evidence @(requiring-resolve 'pane-tree/tmux-pane-evidence))
+(def pane-observe @(requiring-resolve 'pane-tree/observe-pane))
+
 (def session-prefix "swarmforge")
 (def agent-window "swarm")
 (def pane-history-limit 10000)
@@ -1228,8 +1235,7 @@
 ;; The role session and pane id identify the target; its live process tree says
 ;; whether anything is still running behind that pane.
 
-(def agent-shells
-  #{"zsh" "bash" "sh" "dash" "fish" "ksh" "csh" "tcsh" "login" "-zsh" "-bash"})
+(def agent-shells pane-agent-shells)
 
 (def restart-settle-ms
   "How long a pane and its process tree must remain unchanged before restart
@@ -1239,7 +1245,7 @@
 (def restart-process-timeout-ms 5000)
 
 (defn shell-command? [command]
-  (contains? agent-shells (str/lower-case (str command))))
+  (pane-shell-command? command))
 
 (defn dead-agent?
   "Whether a pane running [pane-command] means the agent [agent] has gone: the
@@ -1253,96 +1259,14 @@
                   (not= running (str agent))
                   (shell-command? running)))))
 
-(defn process-table []
-  (let [result (process/sh {:continue true}
-                           "ps" "-axo" "pid=,ppid=,stat=,command=")]
-    (when (zero? (:exit result))
-      (->> (str/split-lines (:out result))
-           (keep (fn [line]
-                   (let [[pid ppid stat command]
-                         (str/split (str/trim line) #"\s+" 4)]
-                     (when (and pid ppid stat command)
-                       {:pid (Long/parseLong pid)
-                        :ppid (Long/parseLong ppid)
-                        :stat stat
-                        :command command}))))
-           vec))))
-
-(defn live-process? [process]
-  (not (str/starts-with? (:stat process) "Z")))
-
-(defn process-descendants [processes pane-pid]
-  (loop [frontier [{:pid pane-pid :depth 0}]
-         seen #{pane-pid}
-         result []]
-    (if-let [{pid :pid depth :depth} (first frontier)]
-      (let [children (->> processes
-                          (filter #(= pid (:ppid %)))
-                          (remove #(contains? seen (:pid %)))
-                          (mapv #(assoc % :depth (inc depth))))]
-        (recur (into (subvec frontier 1) children)
-               (into seen (map :pid children))
-               (into result children)))
-      result)))
-
-(def pane-evidence-format
-  "#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_dead}|#{session_id}|#{window_id}")
-
 (defn role-pane-evidence
   "Read the one pane belonging to this role's exact tmux session. More than one
   pane is ambiguous ownership and is never guessed at."
   [ctx row]
-  (let [result (process/sh {:continue true}
-                           "tmux" "-S" (str (:tmux-socket ctx))
-                           "list-panes" "-s" "-t" (str "=" (:session row))
-                           "-F" pane-evidence-format)
-        lines (when (zero? (:exit result))
-                (->> (str/split-lines (:out result))
-                     (remove str/blank?)
-                     vec))]
-    (cond
-      (not (zero? (:exit result))) {:kind :missing}
-      (empty? lines) {:kind :missing}
-      (> (count lines) 1)
-      {:kind :ambiguous
-       :message (str "more than one pane exists in session " (:session row))}
-      :else
-      (let [[pane-id pane-pid command pane-dead session-id window-id]
-            (str/split (first lines) #"\|" -1)]
-        (if (and pane-id pane-pid command session-id window-id)
-          {:kind :present
-           :pane_id pane-id
-           :pane_pid (Long/parseLong pane-pid)
-           :current_command command
-           :pane_dead (= pane-dead "1")
-           :session_id session-id
-           :window_id window-id}
-          {:kind :unknown
-           :message "tmux returned malformed pane identity"})))))
+  (pane-tmux-evidence (:tmux-socket ctx) (:session row)))
 
 (defn role-pane-observation [ctx row]
-  (let [pane (role-pane-evidence ctx row)]
-    (if-not (= :present (:kind pane))
-      pane
-      (let [processes (process-table)
-            descendants (when processes
-                          (process-descendants processes (:pane_pid pane)))
-            live-descendants (->> descendants
-                                  (filter live-process?)
-                                  vec)]
-        (assoc pane
-               :processes processes
-               :descendants descendants
-               :live_descendants live-descendants
-               :live_pids (mapv :pid live-descendants)
-               :kind
-               (cond
-                 (:pane_dead pane) :dead-pane
-                 (nil? processes) :unknown
-                 (seq live-descendants) :live
-                 (shell-command? (:current_command pane)) :dead-shell
-                 (str/blank? (:current_command pane)) :unknown
-                 :else :live-direct))))))
+  (pane-observe (:tmux-socket ctx) (:session row) (:agent row)))
 
 (defn restart-fail! [row message]
   (fail! (str red "Error:" reset " "

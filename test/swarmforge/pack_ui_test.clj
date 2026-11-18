@@ -6227,6 +6227,125 @@
                        (str root) alive command text))
    true))
 
+(defn lieutenant-process-activity [root state agent text]
+  (json/parse-string
+   (:out (pack-web root true
+                   "--test-lieutenant-process-activity"
+                   (str root) state agent text))
+   true))
+
+(defn automation-state-via-pack-web [root]
+  (json/parse-string
+   (:out (pack-web root true "--test-automation-state" (str root)))
+   true))
+
+(deftest forge-lieutenant-wrapper-e2e-preserves-api-activity
+  ;; Given a disposable host Lieutenant launched behind a shell wrapper
+  ;; When a live Codex child exists and then is replaced by a bare shell
+  ;; Then automation state exposes activity while live and unavailable afterward
+  (let [root (tmp-dir)
+        socket (str (fs/path root ".swarmforge/tmux.sock"))
+        agent (fs/path root ".swarmforge/fake/codex")]
+    (try
+      (seed-mini-forge! root)
+      (write-file (fs/path root ".swarmforge/roles.tsv")
+                  (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tcodex\ttask\tforward-only\n"
+                          root))
+      (write-file (fs/path root ".swarmforge/tmux-socket") (str socket "\n"))
+      (write-file agent
+                  (str "#!/bin/sh\n"
+                       "printf '\\r%s\\n%s\\n' "
+                       "'• Working (4s • esc to interrupt)' "
+                       "\"I'm reviewing the board.\"\n"
+                       "sleep 120\n"))
+      (fs/set-posix-file-permissions agent "rwxr-xr-x")
+      (run {:dir root} "tmux" "-S" socket
+           "new-session" "-d" "-s" "swarmforge-lieutenant" "-n" "Lieutenant"
+           "zsh" "-f")
+      (run {:dir root} "tmux" "-S" socket
+           "send-keys" "-l" "-t" "=swarmforge-lieutenant:" "PROMPT=''")
+      (run {:dir root} "tmux" "-S" socket
+           "send-keys" "-t" "=swarmforge-lieutenant:" "Enter")
+      (run {:dir root} "tmux" "-S" socket
+           "send-keys" "-l" "-t" "=swarmforge-lieutenant:" (str agent " &"))
+      (run {:dir root} "tmux" "-S" socket
+           "send-keys" "-t" "=swarmforge-lieutenant:" "Enter")
+      (Thread/sleep 500)
+      (let [pane-text (:out (run {:dir root} "tmux" "-S" socket
+                                "capture-pane" "-p"
+                                "-t" "=swarmforge-lieutenant:"
+                                "-S" "-100"))
+            live (automation-state-via-pack-web root)
+            live-activity (:lieutenant_activity live)]
+        (is (re-find #"(?m)^• Working \(4s • esc to interrupt\)\s*$" pane-text)
+            pane-text)
+        (is (str/includes? pane-text "I'm reviewing the board.") pane-text)
+        (is (= true (:alive live-activity)))
+        (is (= "working" (:state live-activity))
+            (json/generate-string live-activity)))
+
+      (run {:dir root} "tmux" "-S" socket
+           "respawn-pane" "-k" "-t" "=swarmforge-lieutenant:")
+      (Thread/sleep 300)
+      (let [fallback (automation-state-via-pack-web root)
+            fallback-activity (:lieutenant_activity fallback)]
+        (is (= true (:alive fallback-activity)))
+        (is (= "unavailable" (:state fallback-activity)))
+        (is (nil? (:status_line fallback-activity))))
+      (finally
+        (run {:dir root :ok? false} "tmux" "-S" socket "kill-server")))))
+
+(deftest forge-lieutenant-wrapper-requires-the-expected-live-child
+  ;; Given a credential-wrapper shell whose process tree has a live Codex or Claude child
+  ;; When Lieutenant activity is read
+  ;; Then the pane text remains available; bare, unrelated, dead or unreadable trees are not
+  (let [root (tmp-dir)]
+    (seed-mini-forge! root)
+    (write-file (fs/path root ".swarmforge/roles.tsv")
+                (format "lieutenant\tmaster\t%s\tswarmforge-lieutenant\tLieutenant\tcodex\ttask\tforward-only\n"
+                        root))
+    (let [codex
+          (lieutenant-process-activity
+           root "live" "codex"
+           "• Working (4s • esc to interrupt)\n")
+          claude
+          (lieutenant-process-activity
+           root "live" "claude"
+           "I'm ready for the next request.\n? for shortcuts\n")
+          fallback (lieutenant-process-activity root "fallback" "codex" "")
+          unrelated
+          (lieutenant-process-activity
+           root "unrelated" "codex"
+           "unsafe unrelated pane text\n")
+          exited
+          (lieutenant-process-activity
+           root "exited" "codex"
+           "unsafe exited pane text\n")
+          malformed
+          (lieutenant-process-activity
+           root "malformed" "codex"
+           "unsafe unreadable pane text\n")]
+      (is (= {:kind "live" :expected_agent_live? true}
+             (:pane_state codex)))
+      (is (= {:alive true :state "working"}
+             (select-keys (:activity codex) [:alive :state])))
+      (is (= "Working (4s • esc to interrupt)"
+             (get-in codex [:activity :status_line])))
+      (is (= {:kind "live" :expected_agent_live? true}
+             (:pane_state claude)))
+      (is (= {:alive true :state "idle"}
+             (select-keys (:activity claude) [:alive :state])))
+      (doseq [[result kind] [[fallback "dead-shell"]
+                             [unrelated "live"]
+                             [exited "dead-shell"]
+                             [malformed "unknown"]]]
+        (is (= kind (get-in result [:pane_state :kind])))
+        (is (= false (boolean (get-in result [:pane_state :expected_agent_live?]))))
+        (is (= "unavailable" (get-in result [:activity :state])))
+        (is (nil? (get-in result [:activity :status_line])))
+        (is (not (str/includes? (json/generate-string (:activity result))
+                                "unsafe")))))))
+
 (deftest forge-lieutenant-runtime-activity-classifies-current-evidence
   ;; Given a configured forge Lieutenant
   ;; When its live pane is working, idle, unknown, gone or at a fallback shell
