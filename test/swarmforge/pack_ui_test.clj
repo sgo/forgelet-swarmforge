@@ -3354,6 +3354,67 @@
       (is (not (fs/exists? literal-pending)))
       (is (not (contains? row :actions))))))
 
+(deftest tell-me-confirmation-requests-require-explicit-quick-reply-metadata
+  ;; Given answers that invite a natural confirmation
+  ;; When metadata is omitted, supplied, or overridden as literal prose
+  ;; Then the reminder is case-insensitive without treating arbitrary prose as an action
+  (let [forge (tmp-dir)
+        answer (fs/path forge "tmp" "answer.txt")
+        command (script "pack_dashboard_request.sh")
+        invitation-texts [["req-tell-me" "Tell me when the device is ready.\n"]
+                          ["req-tell-me-case" "PLEASE TELL ME if it completes.\n"]]]
+    (setup-pack! forge ["specifier"])
+    (doseq [[request-id text] invitation-texts]
+      (let [pending (write-pending-chat! forge {:id request-id})]
+        (write-file answer text)
+        (let [missing (run {:dir forge :ok? false}
+                           command "answer" request-id (str answer))
+              diagnostic (str (:err missing) (:out missing))]
+          (is (not (zero? (:exit missing))))
+          (is (str/includes? diagnostic "Quick-reply action required"))
+          (is (str/includes? diagnostic "tell me"))
+          (is (str/includes? diagnostic "--reply-with"))
+          (is (str/includes? diagnostic "--without-quick-reply"))
+          (is (< (count diagnostic) 1000))
+          (is (fs/regular-file? pending)))))
+
+    (write-file answer "Tell me when the device is ready.\n")
+    (let [answered (run {:dir forge}
+                        command "answer" "req-tell-me" (str answer)
+                        "--reply-with" "Done")
+          row (get (into {} (map (juxt :id identity)
+                                 (:chat (web-state forge))))
+                   "req-tell-me")]
+      (is (zero? (:exit answered)) (:err answered))
+      (is (= "Done" (get-in row [:actions 0 :reply_text])))
+      (is (= true (get-in row [:actions 0 :available]))))
+
+    (write-file answer "PLEASE TELL ME if it completes.\n")
+    (let [literal (run {:dir forge}
+                       command "answer" "req-tell-me-case" (str answer)
+                       "--without-quick-reply")
+          row (get (into {} (map (juxt :id identity)
+                                 (:chat (web-state forge))))
+                   "req-tell-me-case")]
+      (is (zero? (:exit literal)) (:err literal))
+      (is (not (contains? row :actions))))
+
+    (write-pending-chat! forge {:id "req-tell-without-me"})
+    (write-file answer "The operator can tell the device is ready.\n")
+    (let [ordinary (run {:dir forge}
+                        command "answer" "req-tell-without-me" (str answer))
+          row (get (into {} (map (juxt :id identity)
+                                 (:chat (web-state forge))))
+                   "req-tell-without-me")]
+      (is (zero? (:exit ordinary)) (:err ordinary))
+      (is (not (contains? row :actions))))
+
+    (let [help (run {:dir forge :ok? false} command)
+          help-text (str (:err help) (:out help))]
+      (is (str/includes? help-text "`tell me` request"))
+      (is (str/includes? help-text "--reply-with"))
+      (is (str/includes? help-text "--without-quick-reply")))))
+
 (deftest quick-reply-actions-reject-invalid-and-ambiguous-flags
   ;; Given malformed quick-reply text and conflicting metadata
   ;; When any answer is attempted

@@ -794,6 +794,13 @@ Omitting both is refused with the repair flags. Reply metadata is one line,
 control-free, length-bounded and rejects paths, credentials, shell framing and
 command-like text. It never executes or sends the phrase.
 
+Answers containing the case-insensitive phrase `tell me`, including `tell me
+when`, receive the same reminder. That phrase is only an advisory trigger, not
+action authority, and the helper never extracts or infers reply text from it.
+Actionable confirmations should be phrased as `Reply with "Done"` and submitted
+with `--reply-with "Done"`; otherwise the literal-prose override is still
+required.
+
 The route approval and quick-reply action slots are mutually exclusive. A
 completed text-only answer may backfill one quick reply by retrying the identical
 response with `--reply-with`; retries are idempotent and preserve timestamps
