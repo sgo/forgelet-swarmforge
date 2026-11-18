@@ -2,7 +2,8 @@
   (:require [babashka.fs :as fs]
             [clojure.java.shell :as sh]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]))
+            [clojure.test :refer [deftest is testing]]
+            [swarmforge.hermetic :as hermetic]))
 
 (deftest dsh-acp-probe-proves-the-hermetic-runner-boundary
   (let [result (sh/sh "node" "--test"
@@ -22,6 +23,7 @@
 
 (defn run
   [{:keys [dir env ok?]} & args]
+  (hermetic/guard! dir args)
   (let [result (apply sh/sh (concat args [:dir (str dir)
                                           :env (merge {"PATH" (System/getenv "PATH")
                                                        "GIT_CONFIG_NOSYSTEM" "1"}
@@ -73,6 +75,27 @@
 
 (defn script [name]
   (str (fs/path scripts-dir name)))
+
+(declare tmp-dir)
+
+(deftest ordinary-gates-refuse-live-lifecycle-roots
+  (let [live-root "/Users/sgo/forgelet-forge"
+        fixture (tmp-dir)]
+    (try
+      (doseq [args [[(script "swarmforge.bb") "--restart-role" live-root "lieutenant"]
+                    ["tmux" "-S" (str (fs/path live-root ".swarmforge/tmux-socket"))
+                     "kill-session" "-t" "swarmforge-lieutenant"]
+                    [(str (fs/path repo-root "get-swarm-forge"))
+                     "project-manager"]]]
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (hermetic/guard! live-root args))))
+      (is (hermetic/guard!
+           fixture
+           [(script "swarmforge.bb") "--restart-role" (str fixture) "lieutenant"]))
+      (is (hermetic/guard!
+           repo-root [(script "swarmforge.bb") "--test-required-helpers"]))
+      (finally
+        (fs/delete-tree fixture)))))
 
 (defn role-launch-script [root role]
   (str/trim

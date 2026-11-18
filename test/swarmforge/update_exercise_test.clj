@@ -2,7 +2,8 @@
   (:require [babashka.fs :as fs]
             [clojure.java.shell :as sh]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is]]))
+            [clojure.test :refer [deftest is]]
+            [swarmforge.hermetic :as hermetic]))
 
 (def repo-root (fs/cwd))
 (def scripts-dir (fs/path repo-root "swarmforge" "scripts"))
@@ -13,6 +14,7 @@
 
 (defn run
   [{:keys [dir env ok?]} & args]
+  (hermetic/guard! dir args)
   (let [result (apply sh/sh (concat args [:dir (str dir)
                                           :env (merge {"PATH" (System/getenv "PATH")
                                                        "GIT_CONFIG_NOSYSTEM" "1"}

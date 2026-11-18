@@ -4,7 +4,8 @@
             [clojure.edn :as edn]
             [clojure.java.shell :as sh]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]))
+            [clojure.test :refer [deftest is testing]]
+            [swarmforge.hermetic :as hermetic]))
 
 (def repo-root (fs/cwd))
 (def stage-script (fs/path repo-root "swarmforge" "scripts" "stage.bb"))
@@ -68,6 +69,7 @@
       nil)))
 
 (defn run-script [script root & args]
+  (hermetic/guard! root (into [(str script)] args))
   (apply sh/sh
          (concat ["bb" (str script)]
                  args

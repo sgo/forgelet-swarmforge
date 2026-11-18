@@ -6,7 +6,8 @@
             [clojure.set :as set]
             [clojure.string :as str]
             [clojure.test :refer [deftest is run-tests use-fixtures]]
-            [pack-web :as web]))
+            [pack-web :as web]
+            [swarmforge.hermetic :as hermetic]))
 
 (def six-pack-roles ["specifier" "coder" "cleaner" "architect" "hardender" "QA"])
 
@@ -34,6 +35,7 @@
 
 (defn run
   [{:keys [dir env ok?]} & args]
+  (hermetic/guard! dir args)
   (let [result (apply sh/sh (concat args [:dir (str dir)
                                           :env (merge {"PATH" (System/getenv "PATH")
                                                        "GIT_CONFIG_NOSYSTEM" "1"}

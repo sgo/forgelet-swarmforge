@@ -5,7 +5,8 @@
             [clojure.edn :as edn]
             [clojure.java.shell :as sh]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]))
+            [clojure.test :refer [deftest is testing]]
+            [swarmforge.hermetic :as hermetic]))
 
 (def repo-root (fs/cwd))
 (def composer (str (fs/path repo-root "get-agent-project")))
@@ -35,10 +36,12 @@
 
 (defn run
   [dir & args]
+  (hermetic/guard! dir args)
   (apply sh/sh (concat args [:dir (str dir)])))
 
 (defn run-env
   [dir env & args]
+  (hermetic/guard! dir args)
   (apply sh/sh
          (concat args
                  [:dir (str dir)
