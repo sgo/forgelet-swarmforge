@@ -718,11 +718,39 @@
            :dependency_completed (boolean (:completed dependency))
            :completion_recorded completion-recorded)))
 
-(defn active-backlog-row? [proposal]
-  (case (proposal-status proposal)
-    "pending" true
-    "consumed" (not (valid-completion-marker? proposal))
-    false))
+(defn active-backlog-visible-ids [proposals]
+  (let [by-id (into {} (map (juxt :id identity)) proposals)
+        dependency-id (fn [proposal]
+                        (some-> (:depends-on proposal) str str/trim not-empty))
+        active-prerequisite? (fn [proposal]
+                               (and (= "consumed" (proposal-status proposal))
+                                    (not (valid-completion-marker? proposal))))
+        seeds (->> proposals
+                   (filter (fn [proposal]
+                             (case (proposal-status proposal)
+                               "pending" true
+                               "consumed"
+                               (and (dependency-id proposal)
+                                    (not (valid-completion-marker? proposal)))
+                               false)))
+                   (map :id)
+                   set)]
+    (loop [visible seeds]
+      (let [expanded
+            (reduce
+             (fn [ids proposal]
+               (if-let [prerequisite-id (dependency-id proposal)]
+                 (let [prerequisite (get by-id prerequisite-id)]
+                   (if (and prerequisite
+                            (active-prerequisite? prerequisite))
+                     (conj ids prerequisite-id)
+                     ids))
+                 ids))
+             visible
+             (keep #(get by-id %) visible))]
+        (if (= expanded visible)
+          visible
+          (recur expanded))))))
 
 (defn ensure-pending! [proposal]
   (case (proposal-status proposal)
@@ -1219,8 +1247,10 @@
 (defn machine-backlog! [args]
   (let [forge (forge-root args)
         project (project-filter args forge)
-        rows (->> (proposal-rows forge)
-                  (filter active-backlog-row?)
+        proposals (proposal-rows forge)
+        visible-ids (active-backlog-visible-ids proposals)
+        rows (->> proposals
+                  (filter #(contains? visible-ids (:id %)))
                   (filter #(or (nil? project)
                                (= project
                                   (str (fs/file-name (:resolved-project %))))))

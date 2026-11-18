@@ -548,8 +548,10 @@
               by-id (into {} (map (juxt :id identity) rows))
               actionable-list (route-json "list"
                                           "--forge-root" (str forge) "--json")]
-          (is (= [parent-id child-id free-id consumed-id]
+          (is (= [parent-id child-id free-id]
                  (mapv :id rows)))
+          (is (not (contains? by-id consumed-id)))
+          (is (fs/regular-file? consumed-file))
           (is (not (contains? (set (mapv :id (:proposals actionable-list)))
                               child-id))
               "legacy list remains pending-and-actionable only")
@@ -563,10 +565,7 @@
           (is (= "pending" (get-in by-id [child-id :dependency_status])))
           (is (= "parent-card"
                  (get-in by-id [child-id :dependency_card_name])))
-          (is (= "in-progress"
-                 (get-in by-id [consumed-id :active_lifecycle])))
-          (is (false? (get-in by-id [consumed-id :actionable])))
-          (is (false? (get-in by-id [consumed-id :completion_recorded]))))
+          (is (nil? (get-in by-id [consumed-id :active_lifecycle]))))
 
         (let [approved (approve-proposal! forge parent-id)
               in-progress (route-json "backlog"
@@ -603,6 +602,108 @@
       (finally
         (fs/delete-tree forge)))))
 
+(deftest active-proposal-backlog-hides-consumed-history-outside-dependency-work
+  (let [forge (tmp-forge)
+        project (init-project! (fs/path forge "projects" "bounded-backlog"))
+        proposal-dir (fs/path forge ".swarmforge" "route-proposals")
+        write-proposal!
+        (fn [id name created extra]
+          (write-file
+           (fs/path proposal-dir (str id ".edn"))
+           (pr-str (merge {:id id
+                           :project (str project)
+                           :name name
+                           :note (str "# " name "\n")
+                           :lane "spec"
+                           :created-at created
+                           :presentation "fixture proposal"}
+                          extra))))]
+    (try
+      (doseq [index (range 130)]
+        (let [id (format "proposal-history-%03d" index)]
+          (write-proposal!
+           id (format "history-%03d" index)
+           (format "2026-11-18T12:00:%03dZ" index)
+           {:consumed-at "2026-11-18T12:10:00Z"
+            :task-id (str "task-" id)})))
+      (write-proposal!
+       "proposal-pending-root" "pending-root"
+       "2026-11-18T13:00:00Z" {})
+      (write-proposal!
+       "proposal-consumed-prerequisite" "consumed-prerequisite"
+       "2026-11-18T13:01:00Z"
+       {:consumed-at "2026-11-18T13:01:01Z"
+        :task-id "task-consumed-prerequisite"})
+      (write-proposal!
+       "proposal-pending-dependent" "pending-dependent"
+       "2026-11-18T13:02:00Z"
+       {:depends-on "proposal-consumed-prerequisite"})
+      (write-proposal!
+       "proposal-chain-root" "chain-root"
+       "2026-11-18T13:03:00Z"
+       {:consumed-at "2026-11-18T13:03:01Z"
+        :task-id "task-chain-root"})
+      (write-proposal!
+       "proposal-chain-middle" "chain-middle"
+       "2026-11-18T13:04:00Z"
+       {:consumed-at "2026-11-18T13:04:01Z"
+        :task-id "task-chain-middle"
+        :depends-on "proposal-chain-root"})
+      (write-proposal!
+       "proposal-pending-leaf" "pending-leaf"
+       "2026-11-18T13:05:00Z"
+       {:depends-on "proposal-chain-middle"})
+      (write-proposal!
+       "proposal-completed-prerequisite" "completed-prerequisite"
+       "2026-11-18T13:06:00Z"
+       {:consumed-at "2026-11-18T13:06:01Z"
+        :task-id "task-completed-prerequisite"
+        :completed-at "2026-11-18T13:06:02Z"
+        :cleanup-complete-at "2026-11-18T13:06:03Z"
+        :completed-task-id "task-completed-prerequisite"
+        :completion-report-id "report-completed-prerequisite"
+        :cleanup-report-id "report-completed-prerequisite"})
+      (write-proposal!
+       "proposal-consumed-dependent" "consumed-dependent"
+       "2026-11-18T13:07:00Z"
+       {:consumed-at "2026-11-18T13:07:01Z"
+        :task-id "task-consumed-dependent"
+        :depends-on "proposal-completed-prerequisite"})
+      (let [backlog (route-json "backlog" "--forge-root" (str forge) "--json")
+            rows (:proposals backlog)
+            ids (mapv :id rows)
+            by-id (into {} (map (juxt :id identity) rows))
+            expected ["proposal-pending-root"
+                      "proposal-consumed-prerequisite"
+                      "proposal-pending-dependent"
+                      "proposal-chain-root"
+                      "proposal-chain-middle"
+                      "proposal-pending-leaf"
+                      "proposal-consumed-dependent"]]
+        (is (= expected ids))
+        (is (= 7 (count rows)))
+        (is (not-any? #(str/starts-with? % "proposal-history-") ids))
+        (is (not (contains? by-id "proposal-completed-prerequisite")))
+        (is (= "in-progress"
+               (get-in by-id ["proposal-consumed-prerequisite"
+                              :active_lifecycle])))
+        (is (= "in-progress"
+               (get-in by-id ["proposal-chain-root" :active_lifecycle])))
+        (is (= "in-progress"
+               (get-in by-id ["proposal-chain-middle" :active_lifecycle])))
+        (is (= "completed"
+               (get-in by-id ["proposal-consumed-dependent"
+                              :dependency_status])))
+        (is (true? (get-in by-id ["proposal-consumed-dependent"
+                                  :dependency_completed])))
+        (is (false? (get-in by-id ["proposal-consumed-dependent"
+                                   :blocked])))
+        (is (= (mapv :id
+                     (sort-by (juxt :created_at :id) rows))
+               ids)))
+      (finally
+        (fs/delete-tree forge)))))
+
 (deftest active-proposal-backlog-surfaces-dependency-errors
   (let [forge (tmp-forge)
         project (init-project! (fs/path forge "projects" "backlog-errors"))
@@ -613,6 +714,11 @@
         superseded-child
         (propose-dependent! forge project "superseded-child"
                             "# Child\n" superseded-dependency)
+        invalidated-dependency
+        (propose! forge project "invalidated-parent" "# Parent\n")
+        invalidated-child
+        (propose-dependent! forge project "invalidated-child"
+                            "# Child\n" invalidated-dependency)
         cycle-a (propose! forge project "cycle-a" "# A\n")
         cycle-b (propose-dependent! forge project "cycle-b"
                                     "# B\n" cycle-a)
@@ -623,6 +729,8 @@
       (let [missing-file (fs/path notes-dir (str missing-id ".edn"))
             superseded-file (fs/path notes-dir
                                      (str superseded-dependency ".edn"))
+            invalidated-file (fs/path notes-dir
+                                      (str invalidated-dependency ".edn"))
             cycle-a-file (fs/path notes-dir (str cycle-a ".edn"))
             cycle-b-file (fs/path notes-dir (str cycle-b ".edn"))]
         (write-file missing-file
@@ -631,6 +739,11 @@
         (write-file superseded-file
                     (pr-str (assoc (edn/read-string (slurp (str superseded-file)))
                                    :superseded-at "2026-11-14T12:00:00Z")))
+        (write-file invalidated-file
+                    (pr-str (assoc (edn/read-string
+                                    (slurp (str invalidated-file)))
+                                   :invalidated-at "2026-11-14T12:01:00Z"
+                                   :invalidated-reason "fixture invalidation")))
         (write-file cycle-a-file
                     (pr-str (assoc (edn/read-string (slurp (str cycle-a-file)))
                                    :depends-on cycle-b)))
@@ -654,6 +767,10 @@
         (is (= "superseded"
                (get-in by-id [superseded-child :dependency_status])))
         (is (false? (get-in by-id [superseded-child :actionable])))
+        (is (= "invalidated"
+               (get-in by-id [invalidated-child :dependency_status])))
+        (is (false? (get-in by-id [invalidated-child :actionable])))
+        (is (not (contains? by-id invalidated-dependency)))
         (is (= "cyclic" (get-in by-id [cycle-a :dependency_status])))
         (is (= "cyclic" (get-in by-id [cycle-b :dependency_status])))
         (is (true? (get-in by-id [cycle-a :blocked])))
@@ -1391,7 +1508,12 @@
                                               "route-proposals"
                                               (str dependent-id ".edn")))))]
             (is (= "consumed" (:status approved-dependent)))
-            (is (= prerequisite-id (:depends-on proposal))))))
+            (is (= prerequisite-id (:depends-on proposal))))
+          (let [backlog (route-json "backlog" "--forge-root" (str forge)
+                                    "--json")
+                by-id (into {} (map (juxt :id identity) (:proposals backlog)))]
+            (is (contains? by-id dependent-id))
+            (is (not (contains? by-id prerequisite-id))))))
       (finally
         (fs/delete-tree forge)))))
 

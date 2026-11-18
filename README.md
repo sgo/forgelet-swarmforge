@@ -880,14 +880,18 @@ Hosts that render a proposal forest can opt into the complete active backlog:
 route_card.sh backlog --forge-root <root> [--project <project>] [--json]
 ```
 
-`backlog` includes pending proposals, including blocked dependants, and consumed
-proposals still approved or in progress. It excludes superseded, invalidated and
-verified-completed history. Rows retain the safe detail fields and add
-`active_lifecycle`, `actionable`, `blocked`, dependency status/task/card, a
-bounded dependency error, and completion state. Missing, malformed, superseded
-or cyclic dependency evidence fails closed as an explicit error. Ordering is by
-`created-at` then proposal id; tree shape remains the host's concern. The
-existing `list` command and its actionable-only semantics are unchanged.
+`backlog` includes every pending proposal, including blocked dependants, plus
+consumed proposals that participate in active dependency work: a prerequisite
+of a pending/in-progress proposal, or an in-progress dependent. Consumed
+historical roots with no active dependency relationship are hidden, as are
+superseded, invalidated and verified-completed proposals. The projection still
+validates dependency evidence against the complete proposal store. Rows retain
+the safe detail fields and add `active_lifecycle`, `actionable`, `blocked`,
+dependency status/task/card, a bounded dependency error, and completion state.
+Missing, malformed, superseded, invalidated or cyclic dependency evidence fails
+closed as an explicit error. Ordering is by `created-at` then proposal id; tree
+shape remains the host's concern. The existing `list` command and its
+actionable-only semantics are unchanged.
 
 General Lieutenant history can be read as a bounded cursor page:
 
