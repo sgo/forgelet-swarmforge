@@ -3,6 +3,7 @@ set -euo pipefail
 
 # Usage:
 #   load-project-runtime-env.sh --check
+#   load-project-runtime-env.sh --verify
 #   load-project-runtime-env.sh "<agent command>"
 #
 # The optional $HOME/.config/forgelet/agent-credentials.sh hook is sourced into
@@ -84,7 +85,10 @@ fi
 if [[ "${1:-}" == "--check" ]]; then
   exit 0
 fi
-if [[ $# -ne 1 || -z "$1" ]]; then
+verify=0
+if [[ "${1:-}" == "--verify" ]]; then
+  verify=1
+elif [[ $# -ne 1 || -z "$1" ]]; then
   echo "load-project-runtime-env: expected an agent command" >&2
   exit 1
 fi
@@ -161,6 +165,10 @@ if [[ -n "${GH_TOKEN:-}" ]]; then
   if ! GH_TOKEN="$GH_TOKEN" command gh auth status --hostname github.com >/dev/null 2>&1; then
     credential_error "gh could not verify GitHub access for GH_TOKEN"
   fi
+fi
+
+if [[ "$verify" == 1 ]]; then
+  exit 0
 fi
 
 exec bash -c "$1"

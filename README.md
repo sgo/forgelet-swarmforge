@@ -190,16 +190,19 @@ when present. Values already present in the launcher environment win, so a
 caller can override the file. A missing file is harmless; unreadable or
 malformed content fails the launch visibly.
 
-Persistent project launches also source one optional device-local credential
-hook at `$HOME/.config/forgelet/agent-credentials.sh`. It must be owned by the
-current user, mode `600`, a regular non-symlink shell file, and it must export
-the GitHub credentials it reads from the operator's keychain. Hook output is
+Persistent project and forge-role launches also source one optional
+device-local credential hook at
+`$HOME/.config/forgelet/agent-credentials.sh`. It must be owned by the current
+user, mode `600`, a regular non-symlink shell file, and it must export the
+GitHub credentials it reads from the operator's keychain. Hook output is
 suppressed and the hook is sourced into the final agent shell, so exports
 survive without placing token values in commands, configuration, repositories
-or logs.
+or logs. Forge roles store their resolved launch command in an owner-only
+runtime script and invoke the loader with only that script path, preserving zsh
+cleanup syntax and prompt expansion outside tmux state.
 
-`GH_TOKEN` is available to every project agent. `GITHUB_PACKAGES_TOKEN` is
-available only when the project declares a package-registry need through
+`GH_TOKEN` is available to every persistent agent. `GITHUB_PACKAGES_TOKEN` is
+available only when the loaded root declares a package-registry need through
 `pom.xml`, `.mvn/`, or `swarmforge/package-registry.conf` containing
 `github-packages`. The tokens remain distinct. Explicit caller values override
 the hook; an ordinary project never receives the packages token. When

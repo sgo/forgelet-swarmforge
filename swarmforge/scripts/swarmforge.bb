@@ -592,6 +592,48 @@
                 "[ \"${LANG:-}\" = POSIX ]; then export LANG="
                 (sq lang) "; fi; ")))))
 
+(defn launch-command-file [ctx index row]
+  (fs/path (:worktree-path row)
+           ".swarmforge"
+           "launch-commands"
+           (str (:role row) "-" index ".sh")))
+
+(defn write-launch-command! [file command]
+  (fs/create-dirs (fs/parent file))
+  (let [tmp (fs/create-temp-file {:dir (fs/parent file)
+                                  :prefix ".launch-command."})]
+    (fs/set-posix-file-permissions tmp "rwx------")
+    (spit (str tmp) (str "#!/usr/bin/env zsh\n" command "\n"))
+    (fs/move tmp file {:replace-existing true :atomic-move true})
+    (fs/set-posix-file-permissions file "rwx------")
+    file))
+
+(defn credential-loader-path [ctx]
+  (fs/path (:script-dir ctx) "load-project-runtime-env.sh"))
+
+(defn credential-launch-wrapper [ctx row script]
+  (let [loader (credential-loader-path ctx)]
+    (when-not (fs/regular-file? loader)
+      (throw (ex-info (str "Project runtime environment loader not found: "
+                           loader)
+                      {:exit 1})))
+    (str "cd " (sq (str (:worktree-path row)))
+         " && exec bash " (sq (str loader))
+         " " (sq (str "zsh " (sq (str script)))))))
+
+(defn verify-role-credentials! [ctx row]
+  (let [loader (credential-loader-path ctx)]
+    (when-not (fs/regular-file? loader)
+      (fail! (str red "Error:" reset
+                  " Project runtime environment loader not found: " loader)))
+    (let [result (process/sh {:continue true
+                             :dir (str (:worktree-path row))}
+                            "bash" (str loader) "--verify")]
+      (when-not (zero? (:exit result))
+        (fail! (str red "Error:" reset " credentials failed for "
+                    (:role row) ": "
+                    (str/trim (str (:err result) "\n" (:out result)))))))))
+
 (defn launch-command [ctx index row]
   (let [role (:role row)
         agent (:agent row)
@@ -621,42 +663,49 @@
                   " && export PATH=" (sq (str local-scripts)) ":" (sq (str tool-bin)) ":"
                   (sq (str role-script-dir)) ":$PATH"
                   " && cd " (sq (str role-worktree))
-                  " && " environment-prefix)]
+                  " && " environment-prefix)
+        agent-command
+        (cond-> (str base
+                     (case agent
+                       "claude" (str (alt-screen-env agent row)
+                                     "claude --append-system-prompt-file "
+                                     (sq (str prompt-file)) " "
+                                     (yolo-flag agent row)
+                                     "-n " (sq (str "SwarmForge " display)) " "
+                                     (extra-args-prefix row)
+                                     (when initial-prompt? prompt))
+                       "codex" (str "codex -C " (sq (str role-worktree)) " "
+                                    (no-alt-screen-flag agent row)
+                                    (yolo-flag agent row)
+                                    (extra-args-prefix row)
+                                    (when initial-prompt? initial-prompt))
+                       "copilot" (str "copilot -C " (sq (str role-worktree)) " "
+                                      (no-alt-screen-flag agent row)
+                                      "--name " (sq (str "SwarmForge " display)) " "
+                                      (yolo-flag agent row)
+                                      (extra-args-prefix row)
+                                      (when initial-prompt?
+                                        (str "-i " initial-prompt)))
+                       "grok" (str "grok --cwd " (sq (str role-worktree)) " "
+                                   (grok-permission-prefix row)
+                                   (extra-args-prefix row)
+                                   "--minimal --rules " prompt
+                                   (when initial-prompt?
+                                     (str " --verbatim " prompt)))))
+          (= index 0)
+          (str "; exit_code=$?; SWARMFORGE_TERMINAL_BACKEND="
+               (sq (:terminal-backend ctx))
+               " nohup " (sq (str (fs/path (:script-dir ctx)
+                                            "swarm-cleanup.sh")))
+               " " (sq (:tmux-socket ctx))
+               " " (sq (str (:window-ids-file ctx)))
+               (apply str (map #(str " " (sq (:session %))) (:roles ctx)))
+               " --because " (sq (:role row))
+               " \"$exit_code\" >/dev/null 2>&1 &!; exit $exit_code"))
+        script (write-launch-command!
+                (launch-command-file ctx index row) agent-command)]
     (write-agent-instruction-file! ctx role prompt-file (last-pack-role? ctx role))
-    (cond-> (str base
-                (case agent
-                  "claude" (str (alt-screen-env agent row)
-                                "claude --append-system-prompt-file " (sq (str prompt-file)) " "
-                                (yolo-flag agent row) "-n " (sq (str "SwarmForge " display)) " "
-                                (extra-args-prefix row)
-                                (when initial-prompt? prompt))
-                  "codex" (str "codex -C " (sq (str role-worktree)) " "
-                               (no-alt-screen-flag agent row) (yolo-flag agent row)
-                               (extra-args-prefix row)
-                               (when initial-prompt? initial-prompt))
-                  "copilot" (str "copilot -C " (sq (str role-worktree)) " "
-                                 (no-alt-screen-flag agent row)
-                                 "--name " (sq (str "SwarmForge " display)) " "
-                                 (yolo-flag agent row) (extra-args-prefix row)
-                                 (when initial-prompt? (str "-i " initial-prompt)))
-                  "grok" (str "grok --cwd " (sq (str role-worktree)) " "
-                              (grok-permission-prefix row) (extra-args-prefix row)
-                              "--minimal --rules " prompt
-                              (when initial-prompt? (str " --verbatim " prompt)))))
-      (= index 0)
-      ;; The cleanup is the other actor that ends a project in silence, and it
-      ;; now says why - but the reason travels as two words rather than as a
-      ;; line of its own. This command is *typed into a terminal*, and a
-      ;; terminal's input line holds about a thousand characters: the form of
-      ;; this suffix that wrote its own line of prose pushed the first role's
-      ;; command past that, and the role never started. The script does the
-      ;; writing, where length costs nothing.
-      (str "; exit_code=$?; SWARMFORGE_TERMINAL_BACKEND=" (sq (:terminal-backend ctx))
-           " nohup " (sq (str (fs/path (:script-dir ctx) "swarm-cleanup.sh")))
-           " " (sq (:tmux-socket ctx))
-           " " (sq (str (:window-ids-file ctx)))
-           (apply str (map #(str " " (sq (:session %))) (:roles ctx)))
-           " --because " (sq (:role row)) " \"$exit_code\" >/dev/null 2>&1 &!; exit $exit_code"))))
+    (credential-launch-wrapper ctx row script)))
 
 (defn codex-home []
   (or (not-empty (System/getenv "CODEX_HOME"))
@@ -684,6 +733,7 @@
                    "\n" header "\ntrust_level = \"trusted\"\n"))))))
 
 (defn launch-role! [ctx index row]
+  (verify-role-credentials! ctx row)
   (when (= "codex" (:agent row))
     (ensure-codex-trust! (:worktree-path row)))
   (let [session (:session row)

@@ -74,6 +74,11 @@
 (defn script [name]
   (str (fs/path scripts-dir name)))
 
+(defn role-launch-script [root role]
+  (str/trim
+   (slurp (str (fs/path root ".swarmforge" "launch-commands"
+                       (str role "-1.sh"))))))
+
 (defn tmux-session-names [socket]
   (let [result (run {:dir repo-root :ok? false}
                     "tmux" "-S" socket "list-sessions" "-F" "#{session_name}")]
@@ -658,9 +663,11 @@
                         (str root)
                         "copilot"
                         "--yolo")
-            command (:out result)]
-        (is (str/includes? command "copilot -C "))
-        (is (re-find #"--name 'SwarmForge Coder' --yolo -i" command)))
+            command (:out result)
+            launch (role-launch-script root "coder")]
+        (is (str/includes? command "load-project-runtime-env.sh"))
+        (is (str/includes? launch "copilot -C "))
+        (is (re-find #"--name 'SwarmForge Coder' --yolo -i" launch)))
       (finally
         (fs/delete-tree root)))))
 
@@ -672,12 +679,14 @@
                         "--test-launch-command"
                         (str root)
                         "grok")
-            command (:out result)]
-        (is (str/includes? command "grok --cwd "))
-        (is (str/includes? command "--permission-mode bypassPermissions"))
-        (is (str/includes? command "--rules \"$(cat "))
-        (is (str/includes? command "--verbatim \"$(cat "))
-        (is (str/includes? command ".swarmforge/prompts/coder.md"))
+            command (:out result)
+            launch (role-launch-script root "coder")]
+        (is (str/includes? command "load-project-runtime-env.sh"))
+        (is (str/includes? launch "grok --cwd "))
+        (is (str/includes? launch "--permission-mode bypassPermissions"))
+        (is (str/includes? launch "--rules \"$(cat "))
+        (is (str/includes? launch "--verbatim \"$(cat "))
+        (is (str/includes? launch ".swarmforge/prompts/coder.md"))
         (is (fs/exists? (fs/path root ".swarmforge/prompts/coder.md"))))
       (finally
         (fs/delete-tree root)))))
@@ -1102,11 +1111,13 @@
       (let [command (:out (run {:dir root}
                                (script "swarmforge.bb")
                                "--test-lieutenant-launch-command"
-                               (str root)))]
-        (is (str/includes? command "grok --cwd "))
-        (is (str/includes? command "--minimal --rules \"$(cat "))
-        (is (str/includes? command ".swarmforge/prompts/lieutenant.md"))
-        (is (not (str/includes? command "--verbatim")))
+                               (str root)))
+            launch (role-launch-script root "lieutenant")]
+        (is (str/includes? command "load-project-runtime-env.sh"))
+        (is (str/includes? launch "grok --cwd "))
+        (is (str/includes? launch "--minimal --rules \"$(cat "))
+        (is (str/includes? launch ".swarmforge/prompts/lieutenant.md"))
+        (is (not (str/includes? launch "--verbatim")))
         (is (fs/exists? (fs/path root ".swarmforge/prompts/lieutenant.md"))))
       (finally
         (fs/delete-tree root)))))
@@ -1123,23 +1134,29 @@
       (let [codex (:out (run {:dir root}
                              (script "swarmforge.bb")
                              "--test-lieutenant-launch-command"
-                             (str root)))]
-        (is (str/includes? codex "codex -C "))
-        (is (str/includes? codex "Read swarmforge/roles/lieutenant.prompt"))
-        (is (not (str/includes? codex "$(cat "))))
+                             (str root)))
+            launch (role-launch-script root "lieutenant")]
+        (is (str/includes? codex "load-project-runtime-env.sh"))
+        (is (str/includes? launch "codex -C "))
+        (is (str/includes? launch "Read swarmforge/roles/lieutenant.prompt"))
+        (is (not (str/includes? launch "$(cat "))))
       (write-file (fs/path root "swarmforge/swarmforge.conf") "Lieutenant copilot --yolo\n")
       (let [copilot (:out (run {:dir root}
                                (script "swarmforge.bb")
                                "--test-lieutenant-launch-command"
-                               (str root)))]
-        (is (str/includes? copilot "-i \"Read swarmforge/roles/lieutenant.prompt")))
+                               (str root)))
+            launch (role-launch-script root "lieutenant")]
+        (is (str/includes? copilot "load-project-runtime-env.sh"))
+        (is (str/includes? launch "-i \"Read swarmforge/roles/lieutenant.prompt")))
       (write-file (fs/path root "swarmforge/swarmforge.conf") "Lieutenant claude --yolo\n")
       (let [claude (:out (run {:dir root}
                               (script "swarmforge.bb")
                               "--test-lieutenant-launch-command"
-                              (str root)))]
-        (is (str/includes? claude "--append-system-prompt-file "))
-        (is (not (str/includes? claude "Read swarmforge/roles/lieutenant.prompt"))))
+                              (str root)))
+            launch (role-launch-script root "lieutenant")]
+        (is (str/includes? claude "load-project-runtime-env.sh"))
+        (is (str/includes? launch "--append-system-prompt-file "))
+        (is (not (str/includes? launch "Read swarmforge/roles/lieutenant.prompt"))))
       (finally
         (fs/delete-tree root)))))
 
@@ -1153,10 +1170,12 @@
       (let [command (:out (run {:dir root}
                                (script "swarmforge.bb")
                                "--test-lieutenant-launch-command"
-                               (str root)))]
-        (is (str/includes? command "claude --append-system-prompt-file "))
-        (is (str/includes? command "--yolo"))
-        (is (not (str/includes? command "grok --cwd "))))
+                               (str root)))
+            launch (role-launch-script root "lieutenant")]
+        (is (str/includes? command "load-project-runtime-env.sh"))
+        (is (str/includes? launch "claude --append-system-prompt-file "))
+        (is (str/includes? launch "--yolo"))
+        (is (not (str/includes? launch "grok --cwd "))))
       (finally
         (fs/delete-tree root)))))
 
@@ -1193,8 +1212,10 @@
   ;; When the Lieutenant command runs
   ;; Then it gets a usable terminal, no NO_COLOR, and preserved colour locale values
   (let [root (lieutenant-host-fixture)
-        log (fs/path root "lieutenant.env")]
+        log (fs/path root "lieutenant.env")
+        home (fs/path root "home")]
     (try
+      (fs/create-dirs home)
       (fake-claude! root log)
       (doseq [[terminal expected-term]
               [["dumb" "tmux-256color"]
@@ -1202,6 +1223,7 @@
                ["tmux-256color" "tmux-256color"]]]
         (fs/delete-if-exists log)
         (let [env {"TERM" terminal
+                   "HOME" (str home)
                    "NO_COLOR" "1"
                    "COLORTERM" "truecolor"
                    "LANG" "en_US.UTF-8"
@@ -1213,7 +1235,8 @@
                                   (str root))))
               result (run {:dir root :env env} "sh" "-c" command)]
           (is (zero? (:exit result)) (:err result))
-          (is (str/includes? command "unset NO_COLOR"))
+          (is (str/includes? (role-launch-script root "lieutenant")
+                             "unset NO_COLOR"))
           (is (fs/regular-file? log))
           (let [[no-color term colorterm lang role pwd args]
                 (str/split (str/trim (slurp (str log))) #"\|" 7)]
@@ -1228,18 +1251,112 @@
       (finally
         (fs/delete-tree root)))))
 
+(deftest lieutenant-launch-loads-device-github-credentials-in-the-child
+  ;; Given an owner-only hook with synthetic credential sentinels
+  ;; When the Lieutenant launch wrapper executes
+  ;; Then GH_TOKEN reaches the child, the ordinary forge gets no package token,
+  ;; and no token value appears in the command, script, logs or output
+  (let [root (lieutenant-host-fixture)
+        home (fs/path root "home")
+        bin (fs/path root "bin")
+        hook (fs/path home ".config" "forgelet" "agent-credentials.sh")
+        agent-log (fs/path root "agent-credentials.env")
+        gh-log (fs/path root "gh-auth.log")
+        gh-token "lieutenant-gh-token-never-print"
+        packages-token "lieutenant-packages-token-never-print"
+        claude (fs/path root ".swarmforge/bin/claude")
+        gh (fs/path bin "gh")]
+    (try
+      (fs/create-dirs bin)
+      (write-file
+       hook
+       (str "export GH_TOKEN='" gh-token "'\n"
+            "export GITHUB_PACKAGES_TOKEN='" packages-token "'\n"))
+      (fs/set-posix-file-permissions hook "rw-------")
+      (write-file
+       gh
+       (str "#!/bin/sh\n"
+            "printf '%s:%s\\n' \"$*\" \"${GH_TOKEN:+present}\" >> \""
+            gh-log "\"\n"))
+      (fs/set-posix-file-permissions gh "rwxr-xr-x")
+      (write-file
+       claude
+       (str "#!/bin/sh\n"
+            "printf 'gh:%s packages:%s role:%s args:%s\\n' "
+            "\"${GH_TOKEN:+present}\" \"${GITHUB_PACKAGES_TOKEN:+present}\" "
+            "\"${SWARMFORGE_ROLE:-}\" \"$*\" > \"" agent-log "\"\n"))
+      (fs/set-posix-file-permissions claude "rwxr-xr-x")
+      (let [env {"HOME" (str home)
+                 "PATH" (str bin ":" (System/getenv "PATH"))
+                 "TERM" "xterm-kitty"}
+            command (str/trim
+                     (:out (run {:dir root :env env}
+                                (script "swarmforge.bb")
+                                "--test-lieutenant-launch-command"
+                                (str root))))
+            launch-script (role-launch-script root "lieutenant")
+            result (run {:dir root :env env} "sh" "-c" command)]
+        (is (zero? (:exit result)) (str (:err result) (:out result)))
+        (is (str/includes? command "load-project-runtime-env.sh"))
+        (is (str/includes? launch-script "claude --append-system-prompt-file "))
+        (is (str/includes? (str/trim (slurp (str gh-log)))
+                           "auth status --hostname github.com:present"))
+        (let [agent-env (str/trim (slurp (str agent-log)))]
+          (is (str/includes? agent-env "gh:present"))
+          (is (str/includes? agent-env "role:lieutenant"))
+          (is (not (str/includes? agent-env "packages:present"))))
+        (doseq [text [command launch-script (:out result) (:err result)]]
+          (is (not (str/includes? text gh-token)))
+          (is (not (str/includes? text packages-token)))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest lieutenant-restart-refuses-an-invalid-credential-hook-before-launch
+  ;; Given a malformed owner-only credential hook
+  ;; When --restart-role would repair the Lieutenant
+  ;; Then credential verification fails visibly before any agent launch
+  (let [root (lieutenant-host-fixture)
+        home (fs/path root "home")
+        hook (fs/path home ".config" "forgelet" "agent-credentials.sh")]
+    (try
+      (write-file hook "if then\n")
+      (fs/set-posix-file-permissions hook "rw-------")
+      (run {:dir root} (script "swarmforge.bb") "--test-parse" (str root))
+      (let [socket (str/trim (slurp (str (fs/path root ".swarmforge/tmux-socket"))))
+            env {"HOME" (str home)}]
+        (try
+          (run {:dir root :env env} "tmux" "-S" socket
+               "new-session" "-d" "-s" "swarmforge-lieutenant"
+               "-n" "Lieutenant")
+          (let [failed (run {:dir root :env env :ok? false}
+                            (script "swarmforge.bb")
+                            "--restart-role" (str root) "lieutenant")]
+            (is (not (zero? (:exit failed))))
+            (is (str/includes? (str (:err failed) (:out failed))
+                               "malformed shell syntax"))
+            (is (not (fs/exists?
+                      (fs/path root ".swarmforge" "launch-commands"
+                               "lieutenant-1.sh")))))
+          (finally
+            (run {:dir root :ok? false} "tmux" "-S" socket "kill-server"))))
+      (finally
+        (fs/delete-tree root)))))
+
 (deftest legacy-lieutenant-config-restarts-through-the-public-command
   ;; Given a host-started Lieutenant using the legacy configuration form
   ;; When --restart-role repairs the shell-left pane
   ;; Then it starts the configured prompt and permissions without touching a project session
   (let [root (lieutenant-host-fixture)
         log (fs/path root "restart.env")
-        project-sock (str (fs/path root "project.sock"))]
+        project-sock (str (fs/path root "project.sock"))
+        home (fs/path root "home")]
     (try
+      (fs/create-dirs home)
       (fake-claude! root log)
       (run {:dir root} (script "swarmforge.bb") "--test-parse" (str root))
       (let [socket (str/trim (slurp (str (fs/path root ".swarmforge/tmux-socket"))))
             env {"TERM" "dumb"
+                 "HOME" (str home)
                  "NO_COLOR" "1"
                  "COLORTERM" "truecolor"
                  "LANG" "en_US.UTF-8"
@@ -1255,6 +1372,12 @@
           (is (zero? (:exit restarted)) (str (:err restarted) (:out restarted)))
           (is (str/includes? (:out restarted) "started again"))
           (is (wait-for-file log 5000))
+          (let [launch (slurp (str (fs/path root ".swarmforge"
+                                            "launch-commands"
+                                            "lieutenant-0.sh")))]
+            (is (str/includes? launch "exit_code=$?"))
+            (is (str/includes? launch "swarm-cleanup.sh"))
+            (is (str/includes? launch "--because 'lieutenant'")))
           (let [[no-color term colorterm lang role pwd args]
                 (str/split (str/trim (slurp (str log))) #"\|" 7)]
             (is (= "unset" no-color))
@@ -1346,8 +1469,10 @@
                                (script "swarmforge.bb")
                                "--test-launch-command"
                                (str root)
-                               "grok"))]
-        (is (str/includes? command " --minimal ")))
+                               "grok"))
+            launch (role-launch-script root "coder")]
+        (is (str/includes? command "load-project-runtime-env.sh"))
+        (is (str/includes? launch " --minimal ")))
       (finally
         (fs/delete-tree root)))))
 
@@ -1366,8 +1491,10 @@
                                  (script "swarmforge.bb")
                                  "--test-launch-command"
                                  (str root)
-                                 agent))]
-          (is (str/includes? command needle) agent))
+                                 agent))
+              launch (role-launch-script root "coder")]
+          (is (str/includes? command "load-project-runtime-env.sh") agent)
+          (is (str/includes? launch needle) agent))
         (finally
           (fs/delete-tree root))))))
 
@@ -1380,10 +1507,12 @@
                         (str root)
                         "grok"
                         "--always-approve")
-            command (:out result)]
-        (is (str/includes? command "--permission-mode bypassPermissions"))
-        (is (str/includes? command "--always-approve"))
-        (is (not (str/includes? command "--permission-mode acceptEdits"))))
+            command (:out result)
+            launch (role-launch-script root "coder")]
+        (is (str/includes? command "load-project-runtime-env.sh"))
+        (is (str/includes? launch "--permission-mode bypassPermissions"))
+        (is (str/includes? launch "--always-approve"))
+        (is (not (str/includes? launch "--permission-mode acceptEdits"))))
       (finally
         (fs/delete-tree root)))))
 
@@ -1401,8 +1530,10 @@
                                  (script "swarmforge.bb")
                                  "--test-launch-command"
                                  (str root)
-                                 agent))]
-          (is (str/includes? command needle) agent))
+                                 agent))
+              launch (role-launch-script root "coder")]
+          (is (str/includes? command "load-project-runtime-env.sh") agent)
+          (is (str/includes? launch needle) agent))
         (finally
           (fs/delete-tree root))))))
 
@@ -1417,10 +1548,12 @@
                                (script "swarmforge.bb")
                                "--test-launch-command"
                                (str root)
-                               "codex"))]
-        (is (str/includes? command (str "swarmforge/local-scripts'")))
-        (is (< (.indexOf command "swarmforge/local-scripts")
-               (.indexOf command "swarmforge/scripts'"))))
+                               "codex"))
+            launch (role-launch-script root "coder")]
+        (is (str/includes? command "load-project-runtime-env.sh"))
+        (is (str/includes? launch (str "swarmforge/local-scripts'")))
+        (is (< (.indexOf launch "swarmforge/local-scripts")
+               (.indexOf launch "swarmforge/scripts'"))))
       (finally
         (fs/delete-tree root)))))
 
@@ -1446,8 +1579,10 @@
                                (script "swarmforge.bb")
                                "--test-launch-command"
                                (str root)
-                               "codex"))]
-        (is (str/includes? command (str ".swarmforge/bin':'"))))
+                               "codex"))
+            launch (role-launch-script root "coder")]
+        (is (str/includes? command "load-project-runtime-env.sh"))
+        (is (str/includes? launch (str ".swarmforge/bin':'"))))
       (finally
         (fs/delete-tree root)))))
 
