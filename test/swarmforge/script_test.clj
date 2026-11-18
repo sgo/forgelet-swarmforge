@@ -1222,6 +1222,22 @@
     (fs/set-posix-file-permissions file "rwxr-xr-x")
     log))
 
+(defn fake-persistent-codex! [root]
+  (let [file (fs/path root ".swarmforge/bin/codex")]
+    (write-file
+     file
+     (str "#!/bin/sh\n"
+          "if [ -n \"${GH_TOKEN:-}\" ]; then gh_status=present; else gh_status=absent; fi\n"
+          "if [ -n \"${GITHUB_PACKAGES_TOKEN:-}\" ]; then packages_status=present; "
+          "else packages_status=absent; fi\n"
+          "printf '%s|gh=%s|packages=%s|role=%s|arg=%s\\n' "
+          "\"$$\" \"$gh_status\" \"$packages_status\" "
+          "\"${SWARMFORGE_ROLE:-}\" \"${1:-}\" "
+          ">> \"${SWARMFORGE_TEST_AGENT_ENV_LOG:?}\"\n"
+          "exec sleep 120\n"))
+    (fs/set-posix-file-permissions file "rwxr-xr-x")
+    file))
+
 (defn wait-for-file [file timeout-ms]
   (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
     (loop []
@@ -1229,6 +1245,261 @@
         (fs/regular-file? file) true
         (> (System/currentTimeMillis) deadline) false
         :else (do (Thread/sleep 50) (recur))))))
+
+(defn wait-for-line-count [file target-count timeout-ms]
+  (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
+    (loop []
+      (let [lines (when (fs/regular-file? file)
+                    (->> (str/split-lines (slurp (str file)))
+                         (remove str/blank?)
+                         vec))]
+        (cond
+          (<= target-count (count lines)) lines
+          (> (System/currentTimeMillis) deadline) lines
+          :else (do (Thread/sleep 50) (recur)))))))
+
+(defn tmux-pane-identity [socket session]
+  (let [line (str/trim
+              (:out (run {:dir repo-root} "tmux" "-S" socket
+                         "list-panes" "-s" "-t" (str "=" session)
+                         "-F" "#{pane_id}|#{pane_pid}|#{pane_current_command}")))
+        [pane-id pane-pid command] (str/split line #"\|" -1)]
+    {:pane_id pane-id
+     :pane_pid (Long/parseLong pane-pid)
+     :command command}))
+
+(defn process-descendant-of? [ancestor pid]
+  (loop [current pid]
+    (cond
+      (= current ancestor) true
+      (<= current 1) false
+      :else
+      (let [result (run {:dir repo-root :ok? false}
+                        "ps" "-o" "ppid=" "-p" (str current))
+            parent (some-> (str/trim (:out result)) not-empty Long/parseLong)]
+        (if parent
+          (recur parent)
+          false)))))
+
+(defn process-running? [pid]
+  (zero? (:exit (run {:dir repo-root :ok? false}
+                     "kill" "-0" (str pid)))))
+
+(defn restart-e2e-fixture []
+  (let [root (tmp-dir)]
+    (write-file (fs/path root "swarmforge/constitution.prompt") "Read articles.\n")
+    (write-file (fs/path root "swarmforge/roles/primary.prompt") "Primary role.\n")
+    (write-file (fs/path root "swarmforge/roles/secondary.prompt") "Secondary role.\n")
+    (write-file (fs/path root "swarmforge/swarmforge.conf")
+                (str "window primary codex master\n"
+                     "window secondary codex worker\n"))
+    (fs/create-dirs (fs/path root ".worktrees/worker"))
+    (run {:dir root} (script "swarmforge.bb") "--test-parse" (str root))
+    {:root root
+     :socket (str/trim (slurp (str (fs/path root ".swarmforge/tmux-socket"))))
+     :fake (fake-persistent-codex! root)}))
+
+(deftest restart-role-replaces-only-the-stable-live-process-tree
+  ;; Given one live shell-backed TUI, one dead shell and unrelated runtimes
+  ;; When the live role is restarted
+  ;; Then only that pane is replaced and the replacement is credential-aware
+  (let [{:keys [root socket fake]} (restart-e2e-fixture)
+        project-sock (str (fs/path root "project.sock"))
+        foreign-sock (str (fs/path root "foreign.sock"))
+        home (fs/path root "home")
+        bin (fs/path root "bin")
+        hook (fs/path home ".config/forgelet/agent-credentials.sh")
+        log (fs/path root "agent-restart.log")
+        gh-log (fs/path root "gh.log")
+        gh-token "restart-gh-token-never-print"
+        packages-token "restart-packages-token-never-print"]
+    (try
+      (write-file
+       hook
+       (str "export GH_TOKEN='" gh-token "'\n"
+            "export GITHUB_PACKAGES_TOKEN='" packages-token "'\n"))
+      (fs/set-posix-file-permissions hook "rw-------")
+      (fs/create-dirs bin)
+      (write-file (fs/path bin "gh")
+                  (str "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""
+                       gh-log "\"\n"))
+      (fs/set-posix-file-permissions (fs/path bin "gh") "rwxr-xr-x")
+      (let [env {"HOME" (str home)
+                 "PATH" (str bin ":" (System/getenv "PATH"))
+                 "TERM" "xterm-256color"
+                 "SWARMFORGE_TEST_AGENT_ENV_LOG" (str log)}]
+        (run {:dir root :env env} "tmux" "-S" socket
+             "new-session" "-d" "-s" "swarmforge-primary" "-n" "Primary" "zsh" "-f")
+        (run {:dir root :env env} "tmux" "-S" socket
+             "new-session" "-d" "-s" "swarmforge-secondary" "-n" "Secondary" "zsh" "-f")
+        (run {:dir root :env env} "tmux" "-S" project-sock
+             "new-session" "-d" "-s" "project-runtime" "sleep" "120")
+        (run {:dir root :env env} "tmux" "-S" socket
+             "new-session" "-d" "-s" "unrelated" "sleep" "120")
+        (run {:dir root :env env} "tmux" "-S" socket
+             "new-session" "-d" "-s" "swarmforge-primary-other" "sleep" "120")
+        (run {:dir root :env env} "tmux" "-S" foreign-sock
+             "new-session" "-d" "-s" "swarmforge-primary" "sleep" "120")
+
+        (run {:dir root :env env} "tmux" "-S" socket
+             "send-keys" "-l" "-t" "=swarmforge-primary:"
+             (str "SWARMFORGE_ROLE=primary SWARMFORGE_TEST_AGENT_ENV_LOG="
+                  (str log) " " (str fake) " old &"))
+        (run {:dir root :env env} "tmux" "-S" socket
+             "send-keys" "-t" "=swarmforge-primary:" "Enter")
+        (let [first-lines (wait-for-line-count log 1 5000)
+              old-pid (some-> (first first-lines)
+                              (str/split #"\|")
+                              first
+                              Long/parseLong)
+              primary-before (tmux-pane-identity socket "swarmforge-primary")
+              secondary-before (tmux-pane-identity socket "swarmforge-secondary")
+              unrelated-before (tmux-pane-identity socket "unrelated")
+              prefix-before (tmux-pane-identity socket "swarmforge-primary-other")
+              foreign-before (tmux-pane-identity foreign-sock "swarmforge-primary")
+              project-before (tmux-pane-identity project-sock "project-runtime")]
+          (is (some? old-pid))
+          (is (process-running? old-pid))
+          (is (= "zsh" (:command primary-before))
+              "the live child leaves tmux naming the enclosing shell")
+
+          (let [restarted (run {:dir root :env env}
+                               (script "swarmforge.bb")
+                               "--restart-role" (str root) "primary")
+                lines (wait-for-line-count log 2 5000)
+                [new-pid gh packages role _ :as new-line]
+                (str/split (second lines) #"\|" -1)
+                new-pid (Long/parseLong new-pid)
+                primary-after (tmux-pane-identity socket "swarmforge-primary")
+                secondary-after (tmux-pane-identity socket "swarmforge-secondary")
+                unrelated-after (tmux-pane-identity socket "unrelated")
+                project-after (tmux-pane-identity project-sock "project-runtime")]
+            (is (zero? (:exit restarted)) (str (:err restarted) (:out restarted)))
+            (is (str/includes? (:out restarted) "replacing live process"))
+            (is (str/includes? (:out restarted) "replacement process"))
+            (is (str/includes? (:out restarted) "1 agent started again"))
+            (is (= 5 (count new-line)))
+            (is (= "gh=present" gh))
+            (is (= "packages=absent" packages))
+            (is (= "role=primary" role))
+            (is (not (process-running? old-pid))
+                "a successful replacement leaves no stale target process")
+            (is (process-running? new-pid))
+            (is (not= (:pane_pid primary-before) (:pane_pid primary-after)))
+            (is (= (:pane_id primary-before) (:pane_id primary-after)))
+            (is (process-descendant-of? (:pane_pid primary-after) new-pid))
+            (is (= secondary-before secondary-after))
+            (is (= unrelated-before unrelated-after))
+            (is (= prefix-before
+                   (tmux-pane-identity socket "swarmforge-primary-other")))
+            (is (= foreign-before
+                   (tmux-pane-identity foreign-sock "swarmforge-primary")))
+            (is (= project-before project-after))
+
+            (let [secondary-restarted
+                  (run {:dir root :env env}
+                       (script "swarmforge.bb")
+                       "--restart-role" (str root) "secondary")
+                  secondary-lines (wait-for-line-count log 3 5000)
+                  [secondary-pid gh packages role _]
+                  (str/split (last secondary-lines) #"\|" -1)
+                  secondary-after (tmux-pane-identity socket "swarmforge-secondary")
+                  primary-still (tmux-pane-identity socket "swarmforge-primary")]
+              (is (zero? (:exit secondary-restarted))
+                  (str (:err secondary-restarted) (:out secondary-restarted)))
+              (is (str/includes? (:out secondary-restarted)
+                                 "its agent is gone"))
+              (is (= "gh=present" gh))
+              (is (= "packages=absent" packages))
+              (is (= "role=secondary" role))
+              (is (= (:pane_id secondary-before) (:pane_id secondary-after)))
+              (is (= primary-after primary-still))
+              (is (= unrelated-before
+                     (tmux-pane-identity socket "unrelated")))
+              (is (= prefix-before
+                     (tmux-pane-identity socket "swarmforge-primary-other")))
+              (is (= foreign-before
+                     (tmux-pane-identity foreign-sock "swarmforge-primary")))
+              (is (= project-before
+                     (tmux-pane-identity project-sock "project-runtime")))
+              (let [dead-recovery
+                    (run {:dir root :env env}
+                         (script "swarmforge.bb")
+                         "--restart-dead-roles" (str root))]
+                (is (zero? (:exit dead-recovery))
+                    (str (:err dead-recovery) (:out dead-recovery)))
+                (is (str/includes? (:out dead-recovery)
+                                   "not replacing it during dead-role recovery"))
+                (is (str/includes? (:out dead-recovery)
+                                   "0 agents started again"))
+                (is (process-running? new-pid))
+                (is (process-running? (Long/parseLong secondary-pid)))
+                (is (= primary-after
+                       (tmux-pane-identity socket "swarmforge-primary")))
+                (is (= secondary-after
+                       (tmux-pane-identity socket "swarmforge-secondary")))))))
+
+          (let [primary-launch
+                (slurp (str (fs/path root ".swarmforge/launch-commands/primary-0.sh")))
+                secondary-launch
+                (slurp (str (fs/path root ".worktrees/worker/.swarmforge/launch-commands/secondary-1.sh")))
+                pane-output
+                (str (:out (run {:dir root :env env} "tmux" "-S" socket
+                                "capture-pane" "-p" "-t" "=swarmforge-primary:"
+                                "-S" "-1000"))
+                     (:out (run {:dir root :env env} "tmux" "-S" socket
+                                "capture-pane" "-p" "-t" "=swarmforge-secondary:"
+                                "-S" "-1000")))]
+            (is (str/includes? pane-output "load-project-runtime-env.sh"))
+            (doseq [text [(slurp (str log)) primary-launch secondary-launch]]
+              (is (not (str/includes? text gh-token)))
+              (is (not (str/includes? text packages-token))))))
+      (finally
+        (run {:dir repo-root :ok? false} "tmux" "-S" socket "kill-server")
+        (run {:dir repo-root :ok? false} "tmux" "-S" project-sock "kill-server")
+        (run {:dir repo-root :ok? false} "tmux" "-S" foreign-sock "kill-server")
+        (fs/delete-tree root)))))
+
+(deftest restart-role-refuses-ambiguous-pane-ownership-before-changing-it
+  ;; Given two panes in the target role's session
+  ;; When restart cannot prove which pane owns the role
+  ;; Then it fails without killing or replacing either pane
+  (let [{:keys [root socket fake]} (restart-e2e-fixture)
+        home (fs/path root "home")]
+    (try
+      (fs/create-dirs home)
+      (let [env {"HOME" (str home) "TERM" "xterm-256color"}]
+        (run {:dir root :env env} "tmux" "-S" socket
+             "new-session" "-d" "-s" "swarmforge-primary" "-n" "Primary"
+             "zsh" "-f")
+        (run {:dir root :env env} "tmux" "-S" socket
+             "split-window" "-d" "-t" "=swarmforge-primary:" "zsh" "-f")
+        (let [panes-before
+              (->> (:out (run {:dir root :env env} "tmux" "-S" socket
+                              "list-panes" "-s" "-t" "=swarmforge-primary"
+                              "-F" "#{pane_id}|#{pane_pid}"))
+                   str/split-lines
+                   sort
+                   vec)
+              failed (run {:dir root :env env :ok? false}
+                          (script "swarmforge.bb")
+                          "--restart-role" (str root) "primary")
+              diagnostic (str (:err failed) (:out failed))
+              panes-after
+              (->> (:out (run {:dir root :env env} "tmux" "-S" socket
+                              "list-panes" "-s" "-t" "=swarmforge-primary"
+                              "-F" "#{pane_id}|#{pane_pid}"))
+                   str/split-lines
+                   sort
+                   vec)]
+          (is (not (zero? (:exit failed))))
+          (is (str/includes? diagnostic "more than one pane"))
+          (is (= panes-before panes-after))
+          (is (not (fs/exists?
+                    (fs/path root ".swarmforge/launch-commands/primary-0.sh"))))))
+      (finally
+        (run {:dir repo-root :ok? false} "tmux" "-S" socket "kill-server")
+        (fs/delete-tree root)))))
 
 (deftest forge-lieutenant-launch-normalizes-a-stale-terminal
   ;; Given a forge launched from TERM=dumb and NO_COLOR=1
@@ -3069,7 +3340,13 @@
         (is (str/includes? (:out result) "Agents of"))
         (is (str/includes? (:out result)
                            "no session - a project that is not running is not a dead agent"))
-        (is (str/includes? (:out result) "0 agents started again.")))
+        (is (str/includes? (:out result) "0 agents started again."))
+        (let [explicit (run {:dir root :ok? false}
+                            (script "swarmforge.bb")
+                            "--restart-role" (str root) "coder")]
+          (is (not (zero? (:exit explicit))))
+          (is (str/includes? (str (:err explicit) (:out explicit))
+                             "no session exists to restart"))))
       (finally
         (fs/delete-tree root)))))
 

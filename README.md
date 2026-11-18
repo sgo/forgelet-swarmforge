@@ -240,6 +240,22 @@ a Lieutenant uses the same configured prompt, permission arguments and forge
 worktree. Missing prompts and unsupported agents fail before any role session
 is changed.
 
+`--restart-role` is a replacement operation for its exact role session. It
+requires one pane with a stable pane identity and process tree, verifies the
+credential loader before changing the session, and then replaces the whole pane
+process tree with its default shell before launching the role. A live child
+therefore makes the role live even when tmux reports a shell-like
+`pane_current_command`; launch text is never typed into that child. The
+replacement must leave a new process under the same pane, and a process that
+cannot be stopped or replaced fails the command. More than one pane in the role
+session is ambiguous ownership and is refused without modification.
+
+`--restart-dead-roles` keeps its recovery meaning: a stable shell with no live
+child, or a dead pane, is started again, while any live process tree is reported
+and left untouched. Both restart forms preserve other role sessions, project
+runtime sessions, pane/session identity, terminal environment and the
+credential-loader launch boundary.
+
 Single-agent cards use one active lane at a time. The first approved card enters
 `spec`; later cards wait in `queued` in creation-time/task-id order with no
 dashboard request. `stage complete` is the promotion boundary: it marks the

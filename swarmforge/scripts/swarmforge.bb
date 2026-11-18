@@ -73,7 +73,7 @@
   (fs/path worktrees-dir worktree))
 
 (defn tmux-agent-target [window pane-base-index session]
-  (str session ":" window "." pane-base-index))
+  (str "=" session ":" window "." pane-base-index))
 
 (defn tmux-option [tmux-socket option scope default-value]
   (let [args (case scope
@@ -732,30 +732,44 @@
               (str (ensure-newline text)
                    "\n" header "\ntrust_level = \"trusted\"\n"))))))
 
-(defn launch-role! [ctx index row]
+(defn configure-role-session! [ctx row]
+  (let [session (:session row)
+        terminal (role-terminal ctx session)
+        colorterm (caller-env "COLORTERM")
+        lang (caller-env "LANG")]
+    (sh "tmux" "-S" (:tmux-socket ctx)
+        "set-environment" "-t" session "TERM" terminal)
+    (sh "tmux" "-S" (:tmux-socket ctx)
+        "set-environment" "-t" session "-u" "NO_COLOR")
+    (when (and colorterm (re-matches terminal-value-re colorterm))
+      (sh "tmux" "-S" (:tmux-socket ctx)
+          "set-environment" "-t" session "COLORTERM" colorterm))
+    (when (and lang (re-matches lang-value-re lang))
+      (sh "tmux" "-S" (:tmux-socket ctx)
+          "set-environment" "-t" session "LANG" lang))))
+
+(defn prepare-role-launch! [ctx index row]
   (verify-role-credentials! ctx row)
   (when (= "codex" (:agent row))
     (ensure-codex-trust! (:worktree-path row)))
-  (let [session (:session row)
-        display (:display-name row)
-        terminal (role-terminal ctx session)
-        colorterm (caller-env "COLORTERM")
-        lang (caller-env "LANG")
-        _ (sh "tmux" "-S" (:tmux-socket ctx)
-              "set-environment" "-t" session "TERM" terminal)
-        _ (sh "tmux" "-S" (:tmux-socket ctx)
-              "set-environment" "-t" session "-u" "NO_COLOR")
-        _ (when (and colorterm (re-matches terminal-value-re colorterm))
-            (sh "tmux" "-S" (:tmux-socket ctx)
-                "set-environment" "-t" session "COLORTERM" colorterm))
-        _ (when (and lang (re-matches lang-value-re lang))
-            (sh "tmux" "-S" (:tmux-socket ctx)
-                "set-environment" "-t" session "LANG" lang))
-        command (launch-command ctx index row)]
-    (sh "tmux" "-S" (:tmux-socket ctx) "send-keys" "-t"
-        (tmux-agent-target display (:tmux-pane-base-index ctx) session)
-        command "Enter")
-    (println (str "  " cyan "[" display "]" reset " started in session " session))))
+  (launch-command ctx index row))
+
+(defn start-role-command! [ctx row command target]
+  (configure-role-session! ctx row)
+  (let [display (:display-name row)
+        session (:session row)
+        target (or target
+                   (tmux-agent-target display
+                                      (:tmux-pane-base-index ctx)
+                                      session))]
+    (sh "tmux" "-S" (:tmux-socket ctx) "send-keys" "-l" "-t"
+        target command)
+    (sh "tmux" "-S" (:tmux-socket ctx) "send-keys" "-t" target "Enter")
+    (println (str "  " cyan "[" display "]" reset
+                  " started in session " session))))
+
+(defn launch-role! [ctx index row]
+  (start-role-command! ctx row (prepare-role-launch! ctx index row) nil))
 
 (defn stop-handoff-daemon! [ctx]
   (process/sh {:continue true}
@@ -1209,83 +1223,296 @@
 ;; is actually running. Saibill's coder sat that way on 2026-10-05 while the
 ;; doorbell's wake text was typed into the shell as a command.
 ;;
-;; So what tells the two apart is read here: a shell where a known agent should
-;; be is a dead agent, and a pane running anything else is left alone, because
-;; an agent inside a tool is working rather than gone.
+;; A pane's current command alone cannot tell the two apart. Some live TUIs leave
+;; tmux reporting the enclosing shell even while their process is still there.
+;; The role session and pane id identify the target; its live process tree says
+;; whether anything is still running behind that pane.
 
 (def agent-shells
   #{"zsh" "bash" "sh" "dash" "fish" "ksh" "csh" "tcsh" "login" "-zsh" "-bash"})
 
 (def restart-settle-ms
-  "How long a pane is given to stop looking like a shell. A tool that is itself
-  a shell is over in a moment, so a shell still there after this is a dead
-  agent rather than a tool."
+  "How long a pane and its process tree must remain unchanged before restart
+  may treat the observation as safe evidence."
   1200)
+
+(def restart-process-timeout-ms 5000)
+
+(defn shell-command? [command]
+  (contains? agent-shells (str/lower-case (str command))))
 
 (defn dead-agent?
   "Whether a pane running [pane-command] means the agent [agent] has gone: the
   pane is at a shell, where the agent should be. The agent's own name is not a
-  dead agent, and neither is any other process - a tool the agent is running."
+  dead agent, and neither is any other process - a tool the agent is running.
+  Production restart decisions use the pane's process tree; this predicate
+  remains for the bounded diagnostic and legacy callers."
   [agent pane-command]
   (let [running (str/trim (str pane-command))]
     (boolean (and (seq running)
                   (not= running (str agent))
-                  (contains? agent-shells running)))))
+                  (shell-command? running)))))
 
-(defn role-pane-command
-  "What the role's pane is running now, as tmux names it, or nil when there is
-  no session to ask - a project that is not running is not a dead agent."
+(defn process-table []
+  (let [result (process/sh {:continue true}
+                           "ps" "-axo" "pid=,ppid=,stat=,command=")]
+    (when (zero? (:exit result))
+      (->> (str/split-lines (:out result))
+           (keep (fn [line]
+                   (let [[pid ppid stat command]
+                         (str/split (str/trim line) #"\s+" 4)]
+                     (when (and pid ppid stat command)
+                       {:pid (Long/parseLong pid)
+                        :ppid (Long/parseLong ppid)
+                        :stat stat
+                        :command command}))))
+           vec))))
+
+(defn live-process? [process]
+  (not (str/starts-with? (:stat process) "Z")))
+
+(defn process-descendants [processes pane-pid]
+  (loop [frontier [{:pid pane-pid :depth 0}]
+         seen #{pane-pid}
+         result []]
+    (if-let [{pid :pid depth :depth} (first frontier)]
+      (let [children (->> processes
+                          (filter #(= pid (:ppid %)))
+                          (remove #(contains? seen (:pid %)))
+                          (mapv #(assoc % :depth (inc depth))))]
+        (recur (into (subvec frontier 1) children)
+               (into seen (map :pid children))
+               (into result children)))
+      result)))
+
+(def pane-evidence-format
+  "#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_dead}|#{session_id}|#{window_id}")
+
+(defn role-pane-evidence
+  "Read the one pane belonging to this role's exact tmux session. More than one
+  pane is ambiguous ownership and is never guessed at."
   [ctx row]
   (let [result (process/sh {:continue true}
                            "tmux" "-S" (str (:tmux-socket ctx))
-                           "display-message" "-p" "-t" (:session row)
-                           "#{pane_current_command}")]
-    (when (zero? (:exit result))
-      (str/trim (:out result)))))
+                           "list-panes" "-s" "-t" (str "=" (:session row))
+                           "-F" pane-evidence-format)
+        lines (when (zero? (:exit result))
+                (->> (str/split-lines (:out result))
+                     (remove str/blank?)
+                     vec))]
+    (cond
+      (not (zero? (:exit result))) {:kind :missing}
+      (empty? lines) {:kind :missing}
+      (> (count lines) 1)
+      {:kind :ambiguous
+       :message (str "more than one pane exists in session " (:session row))}
+      :else
+      (let [[pane-id pane-pid command pane-dead session-id window-id]
+            (str/split (first lines) #"\|" -1)]
+        (if (and pane-id pane-pid command session-id window-id)
+          {:kind :present
+           :pane_id pane-id
+           :pane_pid (Long/parseLong pane-pid)
+           :current_command command
+           :pane_dead (= pane-dead "1")
+           :session_id session-id
+           :window_id window-id}
+          {:kind :unknown
+           :message "tmux returned malformed pane identity"})))))
 
-(defn dead-agent-there?
-  "Whether the role's agent has gone, read twice rather than once: a tool that
-  is itself a shell is over in a moment, so a shell that is still there the
-  second time is a dead agent."
-  [ctx row]
-  (and (dead-agent? (:agent row) (role-pane-command ctx row))
-       (do (Thread/sleep restart-settle-ms)
-           (dead-agent? (:agent row) (role-pane-command ctx row)))))
+(defn role-pane-observation [ctx row]
+  (let [pane (role-pane-evidence ctx row)]
+    (if-not (= :present (:kind pane))
+      pane
+      (let [processes (process-table)
+            descendants (when processes
+                          (process-descendants processes (:pane_pid pane)))
+            live-descendants (->> descendants
+                                  (filter live-process?)
+                                  vec)]
+        (assoc pane
+               :processes processes
+               :descendants descendants
+               :live_descendants live-descendants
+               :live_pids (mapv :pid live-descendants)
+               :kind
+               (cond
+                 (:pane_dead pane) :dead-pane
+                 (nil? processes) :unknown
+                 (seq live-descendants) :live
+                 (shell-command? (:current_command pane)) :dead-shell
+                 (str/blank? (:current_command pane)) :unknown
+                 :else :live-direct))))))
+
+(defn restart-fail! [row message]
+  (fail! (str red "Error:" reset " "
+              (:role row) " in session " (:session row) ": " message)))
+
+(defn observation-key [observation]
+  [(:kind observation)
+   (:pane_id observation)
+   (:pane_pid observation)
+   (:session_id observation)
+   (:window_id observation)
+   (:current_command observation)
+   (:live_pids observation)])
+
+(defn stable-role-pane! [ctx row]
+  (let [before (role-pane-observation ctx row)]
+    (if-not (= :present (:pane_id before))
+      before
+      (do
+        (Thread/sleep restart-settle-ms)
+        (let [after (role-pane-observation ctx row)]
+          (when-not (= (observation-key before)
+                       (observation-key after))
+            (restart-fail!
+             row
+             "the pane or its live process tree changed while restart was checking it"))
+          after)))))
+
+(defn respawn-role-pane!
+  "Replace the exact pane's whole process tree with its default shell. tmux owns
+  the atomic replacement, so the old pane id stays the restart target and no
+  launch text can reach the process being removed."
+  [ctx row observation]
+  (let [result (process/sh {:continue true}
+                           "tmux" "-S" (str (:tmux-socket ctx))
+                           "respawn-pane" "-k" "-t" (:pane_id observation))
+        deadline (+ (System/currentTimeMillis) restart-process-timeout-ms)]
+    (when-not (zero? (:exit result))
+      (restart-fail! row "tmux could not replace the target pane"))
+    (loop []
+      (let [after (role-pane-observation ctx row)]
+        (cond
+          (not= (:pane_id observation) (:pane_id after))
+          (restart-fail! row "the replacement did not stay in the target pane")
+
+          (some process-alive? (:live_pids observation))
+          (restart-fail! row "the old process tree still has a live process")
+
+          (= :dead-shell (:kind after))
+          after
+
+          (> (System/currentTimeMillis) deadline)
+          (restart-fail! row "the old pane process tree did not stop cleanly")
+
+          :else
+          (do
+            (Thread/sleep 100)
+            (recur)))))))
+
+(defn wait-for-replacement-process!
+  [ctx row pane old-pids]
+  (let [deadline (+ (System/currentTimeMillis) restart-process-timeout-ms)]
+    (loop []
+      (let [after (role-pane-observation ctx row)
+            new-pids (remove (set old-pids) (:live_pids after))]
+        (cond
+          (not= (:pane_id pane) (:pane_id after))
+          (restart-fail! row "the replacement did not stay in the target pane")
+
+          (seq new-pids)
+          {:observation after :new_pids (vec new-pids)}
+
+          (> (System/currentTimeMillis) deadline)
+          (restart-fail! row "the replacement command did not leave a live process in the target pane")
+
+          :else
+          (do
+            (Thread/sleep 100)
+            (recur)))))))
+
+(defn start-dead-role! [ctx index row observed-message]
+  (println (str "  " cyan "[" (:display-name row) "]" reset
+                " " observed-message))
+  (launch-role! ctx index row)
+  true)
+
+(defn replace-live-role! [ctx index row observation]
+  ;; Prepare the whole launch boundary before touching the process. A malformed
+  ;; prompt, credential hook or missing helper therefore leaves the old agent
+  ;; exactly where it was.
+  (let [command (prepare-role-launch! ctx index row)
+        pane observation
+        old-pids (:live_pids observation)
+        dead-shell (respawn-role-pane! ctx row observation)]
+    (println (str "  " cyan "[" (:display-name row) "]" reset
+                  " replacing live process "
+                  (str/join "," old-pids)
+                  " in session " (:session row)))
+    (start-role-command! ctx row command (:pane_id dead-shell))
+    (let [{:keys [observation new_pids]}
+          (wait-for-replacement-process! ctx row pane old-pids)]
+      (println (str "  " cyan "[" (:display-name row) "]" reset
+                    " replacement process "
+                    (str/join "," new_pids)
+                    " in session " (:session row)))
+      true)))
 
 (defn restart-role!
-  "Put a role's agent back where it has died: the role's own launch command -
-  the one the forge starts a role with, from the same `launch-command` - typed
-  into the session the role still has. Returns true when it started one and
-  false when there was nothing to start."
-  [ctx index row]
-  (let [running (role-pane-command ctx row)]
+  "Restart one role. A dead shell is launched in place. With [replace-live?],
+  a stable live process tree is replaced in the same pane; otherwise live roles
+  are only reported and left alone. Returns true when a new process started."
+  [ctx index row replace-live?]
+  (let [initial (role-pane-observation ctx row)]
     (cond
-      (dead-agent-there? ctx row)
-      (do (println (str "  " cyan "[" (:display-name row) "]" reset
-                        " its agent is gone - the pane is at a shell - starting it again"))
-          (launch-role! ctx index row)
-          true)
+      (= :missing (:kind initial))
+      (if replace-live?
+        (restart-fail! row "no session exists to restart")
+        (do (println (str "  " cyan "[" (:display-name row) "]" reset
+                          " no session - a project that is not running is not a dead agent"))
+            false))
 
-      (nil? running)
-      (do (println (str "  " cyan "[" (:display-name row) "]" reset
-                        " no session - a project that is not running is not a dead agent"))
-          false)
+      (= :ambiguous (:kind initial))
+      (restart-fail! row (:message initial))
 
-      (= running (str (:agent row)))
-      (do (println (str "  " cyan "[" (:display-name row) "]" reset " working (" running ")"))
-          false)
+      (= :unknown (:kind initial))
+      (restart-fail! row (or (:message initial)
+                             "the pane process ownership is ambiguous"))
 
       :else
-      (do (println (str "  " cyan "[" (:display-name row) "]" reset
-                        " running " running " - not a shell, so not a dead agent"))
-          false))))
+      (let [stable (stable-role-pane! ctx row)]
+        (case (:kind stable)
+          :dead-shell
+          (start-dead-role!
+           ctx index row
+           "its agent is gone - the pane is at a shell - starting it again")
+
+          :dead-pane
+          (do
+            (process/sh {:continue true}
+                        "tmux" "-S" (str (:tmux-socket ctx))
+                        "respawn-pane" "-k" "-t" (:pane_id stable))
+            (Thread/sleep 200)
+            (start-dead-role!
+             ctx index row
+             "its pane was dead - restarting it in the same session"))
+
+          :live
+          (if replace-live?
+            (replace-live-role! ctx index row stable)
+            (do (println (str "  " cyan "[" (:display-name row) "]" reset
+                              " live process "
+                              (str/join "," (:live_pids stable))
+                              " - not replacing it during dead-role recovery"))
+                false))
+
+          :live-direct
+          (restart-fail!
+           row
+           "the pane itself is a live process without a managed shell; ownership cannot be proven")
+
+          (restart-fail! row "the pane process tree could not be classified"))))))
 
 (declare lieutenant-row)
 
 (defn restart-roles!
   "Restart the dead agents among a project's roles - all of them, or the ones
-  named. Prints what it found and what it did, and returns how many it started."
-  [root wanted]
+  named. An explicitly named role may also replace a stable live process when
+  [replace-live?] is true. Prints what it found and what it did, and returns
+  how many processes it started."
+  [root wanted replace-live?]
   (check-dependency! "tmux")
   (let [ctx (-> (context root)
                 detect-tmux-base-indexes
@@ -1313,7 +1540,9 @@
                   ". Known roles: " (str/join ", " (map :role roles)))))
     (println (str "Agents of " (fs/file-name root) ":"))
     (let [started (reduce (fn [count [index row]]
-                            (if (restart-role! ctx index row) (inc count) count))
+                            (if (restart-role! ctx index row replace-live?)
+                              (inc count)
+                              count))
                           0
                           chosen)]
       (println (str "  " started " agent" (when (not= 1 started) "s") " started again."))
@@ -1322,12 +1551,12 @@
 (defn restart-dead-roles-command! [root]
   (when (str/blank? root)
     (fail! (str red "Error:" reset " --restart-dead-roles needs a project root")))
-  (restart-roles! root []))
+  (restart-roles! root [] false))
 
 (defn restart-role-command! [root role]
   (when (or (str/blank? root) (str/blank? role))
     (fail! (str red "Error:" reset " --restart-role needs a project root and a role")))
-  (restart-roles! root [role]))
+  (restart-roles! root [role] true))
 
 (defn prepare-ctx [ctx]
   (-> ctx
