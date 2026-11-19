@@ -62,7 +62,6 @@
   {:author {:login author}
    :body issue-body
    :number 7
-   :repository {:nameWithOwner "sgo/forgelet-forge"}
    :title "contract-lib: provide the thing"
    :url "https://github.com/sgo/forgelet-forge/issues/7"})
 
@@ -70,7 +69,11 @@
   (let [json-file (fs/path root "issue.json")
         gh (fs/path root "fake-gh")]
     (write-file json-file (json/generate-string issue-data))
-    (write-file gh "#!/bin/sh\ncat \"$SWARMFORGE_TEST_ISSUE_JSON\"\n")
+    (write-file gh
+                (str "#!/bin/sh\n"
+                     "case \"$*\" in *repository*) "
+                     "echo 'Unknown JSON field: \"repository\"' >&2; exit 9 ;; esac\n"
+                     "cat \"$SWARMFORGE_TEST_ISSUE_JSON\"\n"))
     (fs/set-posix-file-permissions gh "rwxr-xr-x")
     {:command (str gh) :json (str json-file)}))
 
@@ -438,6 +441,52 @@
           (is (not (zero? (:exit local))))
           (is (str/includes? (str (:err local) (:out local))
                              "wrong heading depth for Consumers waiting"))))
+      (finally
+        (fs/delete-tree root)
+        (fs/delete-tree forge)))))
+
+(deftest installed-gh-field-set-derives-identity-from-the-issue-url
+  (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-forge-gh-fields."})
+        forge (forge!)
+        url "https://github.com/sgo/forgelet-forge/issues/7"
+        title "contract-lib: provide the thing"]
+    (try
+      (let [valid (fake-gh! root (issue "sgo" body))
+            checked (validate-issue! root valid url title)
+            intake (intake! forge valid)]
+        (is (zero? (:exit checked)) (str (:err checked) (:out checked)))
+        (is (= "sgo/forgelet-forge"
+               (:repository (json/parse-string (:out checked) true))))
+        (is (zero? (:exit intake)) (str (:err intake) (:out intake))))
+
+      (let [wrong-number
+            (fake-gh! root (assoc (issue "sgo" body) :number 8))
+            checked (validate-issue! root wrong-number url title)]
+        (is (not (zero? (:exit checked))))
+        (is (str/includes? (str (:err checked) (:out checked))
+                           "number changed")))
+
+      (let [wrong-url
+            (fake-gh! root (assoc (issue "sgo" body)
+                                  :url "https://github.com/sgo/forgelet-forge/issues/8"))
+            checked (validate-issue! root wrong-url url title)]
+        (is (not (zero? (:exit checked))))
+        (is (str/includes? (str (:err checked) (:out checked))
+                           "URL does not match")))
+
+      (let [wrong-title (fake-gh! root (issue "sgo" body))
+            checked (validate-issue! root wrong-title url "different title")]
+        (is (not (zero? (:exit checked))))
+        (is (str/includes? (str (:err checked) (:out checked))
+                           "title does not match")))
+
+      (let [malformed
+            (fake-gh! root (issue "sgo"
+                                  (str/replace body #"(?m)^### Testing$" "## Testing")))
+            checked (validate-issue! root malformed url title)]
+        (is (not (zero? (:exit checked))))
+        (is (str/includes? (str (:err checked) (:out checked))
+                           "wrong heading depth for Testing")))
       (finally
         (fs/delete-tree root)
         (fs/delete-tree forge)))))

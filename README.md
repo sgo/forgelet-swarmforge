@@ -618,6 +618,12 @@ presented before its own operator approval, `bind`-ed, its consumed card is
 `link-card`-ed, and `guard` must pass immediately before execution. Pending,
 changed, reused or unlinked requests fail closed.
 
+Fetched issue identity is derived from the canonical issue URL,
+`https://github.com/<owner>/<repository>/issues/<number>`. The helper asks `gh`
+only for fields supported by the installed CLI and verifies that the returned
+URL and number agree with the requested URL before applying author, repository,
+digest or heading checks.
+
 Composition also creates repo-scoped `.agents/skills/<name>` symlinks in the forge root, pointing at
 `swarmforge/skills/<name>`. A lieutenant launched in the forge therefore discovers the shared skills
 without a user-scoped link. Project directories are separate Git repositories, so they do not

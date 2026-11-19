@@ -234,7 +234,7 @@
   (let [result (process/sh {:continue true}
                            (gh-command)
                            "issue" "view" url
-                           "--json" "author,body,number,repository,title,url")]
+                           "--json" "author,body,number,title,url")]
     (when-not (zero? (:exit result))
       (fail! (str "Could not fetch issue " url ": "
                   (str/trim (str (:err result) (:out result))))))
@@ -243,24 +243,36 @@
       (catch Exception _
         (fail! (str "GitHub returned malformed issue JSON for " url))))))
 
+(defn issue-location [url]
+  (let [[_ owner repository number] (re-matches issue-url-re (str url))]
+    (when-not owner
+      (fail! "Use a canonical GitHub issue URL"))
+    {:repository (str owner "/" repository)
+     :number number
+     :url (str "https://github.com/" owner "/" repository "/issues/" number)}))
+
+(defn validate-issue-location! [requested-url issue]
+  (let [requested (issue-location requested-url)
+        returned-url (str (:url issue))]
+    (when-not (= (:url requested) returned-url)
+      (fail! "GitHub response URL does not match the requested issue"))
+    (when-not (= (:number requested) (str (:number issue)))
+      (fail! "Issue number changed while reading"))
+    requested))
+
 (defn validate-issue! [forge url]
-  (let [[_ owner repository-name number] (if (string? url)
-                                           (re-matches issue-url-re url)
-                                           (or (re-matches issue-url-re (:url url)) []))
-        issue (if (string? url) (fetch-issue url) url)
+  (let [requested-url (if (string? url) url (:url url))
+        issue (if (string? url) (fetch-issue requested-url) url)
+        location (validate-issue-location! requested-url issue)
+        repository (:repository location)
         author (get-in issue [:author :login])
-        repository (get-in issue [:repository :nameWithOwner])
         expected-repository (logical-repository forge)]
-    (when-not (= (str owner "/" repository-name) repository)
-      (fail! "Issue URL and GitHub response name different repositories"))
     (when-not (= expected-repository repository)
       (fail! (str "Issue targets " repository ", not receiving forge "
                   expected-repository)))
     (when-not (contains? (requesters forge) (str/lower-case (or author "")))
       (fail! (str "Requester is not listed in " (fs/path forge "forge-requesters")
                   ": " author)))
-    (when-not (= (str number) (str (:number issue)))
-      (fail! "Issue number changed while reading"))
     (validate-request-body! (:body issue))
     (let [contract (or (second (re-find
                                 #"(?ms)^### Contract[ \t]*\n(.*?)(?=^### |\z)"
@@ -269,30 +281,22 @@
       {:issue issue
        :author (str author)
        :repository repository
-       :number (:number issue)
+       :number (Long/parseLong (:number location))
        :contract (str/trim contract)
-       :url (:url issue)})))
+       :url (:url location)})))
 
 (defn validate-public-issue [url expected-title]
-  (let [[_ owner repository-name number] (re-matches issue-url-re (str url))
-        _ (when-not owner (fail! "Use a canonical GitHub issue URL"))
-        issue (fetch-issue url)
-        repository (get-in issue [:repository :nameWithOwner])
-        issue-url (:url issue)]
-    (when-not (= (str owner "/" repository-name) repository)
-      (fail! "Issue URL and GitHub response name different repositories"))
-    (when-not (= (str number) (str (:number issue)))
-      (fail! "Issue number changed while reading"))
-    (when-not (= url issue-url)
-      (fail! "GitHub response URL does not match the requested issue"))
+  (let [issue (fetch-issue url)
+        location (validate-issue-location! url issue)]
     (when expected-title
       (when-not (= (validate-title! expected-title)
                    (str/trim (str (:title issue))))
         (fail! "Fetched issue title does not match the approved draft title")))
     (validate-request-body! (:body issue))
     {:status "valid"
-     :url issue-url
-     :number (:number issue)
+     :url (:url location)
+     :number (Long/parseLong (:number location))
+     :repository (:repository location)
      :title (:title issue)
      :digest (issue-digest issue)
      :headings required-headings}))
