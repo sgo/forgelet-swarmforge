@@ -894,6 +894,12 @@ Actionable confirmations should be phrased as `Reply with "Done"` and submitted
 with `--reply-with "Done"`; otherwise the literal-prose override is still
 required.
 
+Answers containing a bounded double-quoted `say "..."` instruction receive the
+same quick-reply reminder. That text is not parsed into a reply, route action or
+approval: the agent must choose the exact action text and submit it explicitly.
+Unquoted, multiline and oversized `say` text does not become a quoted reply
+invitation.
+
 The route approval and quick-reply action slots are mutually exclusive. A
 completed text-only answer may backfill one quick reply by retrying the identical
 response with `--reply-with`; retries are idempotent and preserve timestamps

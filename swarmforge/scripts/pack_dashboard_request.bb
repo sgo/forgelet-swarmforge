@@ -26,7 +26,8 @@
        "--without-route-card-action only when the response merely discusses the\n"
        "proposal and must not offer approval. Prose never selects or attaches an\n"
        "action automatically. An apparent `reply with ...` instruction or a\n"
-       "`tell me` request requires either --reply-with or --without-quick-reply.\n"
+       "`tell me` request or double-quoted `say \"...\"` instruction requires\n"
+       "either --reply-with or --without-quick-reply.\n"
        "The helper never infers reply text from prose. Only one structured action\n"
        "may be attached.\n"))
 
@@ -212,6 +213,8 @@
   #"(?i)\b(?:reply\s+with|reply|respond\s+with)\s+`([^`\r\n]{1,200})`")
 (def apparent-confirmation-request-re
   #"(?i)\btell\s+me\b")
+(def apparent-say-request-re
+  #"(?i)\bsay\s+\"[^\"\r\n]{1,200}\"")
 
 (defn quick-reply-invalid! [message]
   (exit! 1 message))
@@ -268,16 +271,24 @@
 (defn apparent-confirmation-request? [text]
   (boolean (re-find apparent-confirmation-request-re (or text ""))))
 
-(defn quick-reply-challenge! [id instruction]
+(defn apparent-say-request? [text]
+  (boolean (re-find apparent-say-request-re (or text ""))))
+
+(defn quick-reply-challenge!
+  ([id instruction]
+   (quick-reply-challenge!
+    id instruction
+    (if instruction
+      (str "The response appears to request the reply `" instruction "`.\n")
+      "The response appears to invite an operator reply with `tell me`.\n")))
+  ([id instruction message]
   (exit!
    1
    (str "Quick-reply action required before answering " id ".\n"
-        (if instruction
-          (str "The response appears to request the reply `" instruction "`.\n")
-          "The response appears to invite an operator reply with `tell me`.\n")
+        message
         "Record it explicitly with --reply-with <exact text>.\n"
         "If the wording is literal prose and must not offer an action, rerun with "
-        "--without-quick-reply.")))
+        "--without-quick-reply."))))
 
 (defn proposal-status [proposal]
   (let [raw (:status proposal)
@@ -853,9 +864,17 @@
             (response-proposal-action! text (:proposal_id route-action)))
         _ (when (and (nil? action) (not without-quick-reply))
             (let [instruction (apparent-reply-instruction text)]
-              (when (or instruction
-                        (apparent-confirmation-request? text))
-                (quick-reply-challenge! id instruction))))
+              (cond
+                instruction
+                (quick-reply-challenge! id instruction)
+
+                (apparent-confirmation-request? text)
+                (quick-reply-challenge! id nil)
+
+                (apparent-say-request? text)
+                (quick-reply-challenge!
+                 id nil
+                 "The response appears to invite an operator reply with `say \"...\"`.\n"))))
         candidates (when (and (nil? action)
                               (not without-route-card-action)
                               (nil? reply-descriptor)

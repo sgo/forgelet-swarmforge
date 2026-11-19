@@ -3415,6 +3415,75 @@
       (is (str/includes? help-text "--reply-with"))
       (is (str/includes? help-text "--without-quick-reply")))))
 
+(deftest say-quoted-instructions-require-explicit-quick-reply-metadata
+  ;; Given an answer asks the operator to say an exact quoted phrase
+  ;; When metadata is omitted, supplied, or overridden as literal prose
+  ;; Then the reminder is advisory and never infers text or route authority
+  (let [forge (tmp-dir)
+        answer (fs/path forge "tmp" "answer.txt")
+        command (script "pack_dashboard_request.sh")
+        reply-text "route fix-github-packages-token-helper, remove the calls"
+        text (str "say \"" reply-text "\"\n")]
+    (setup-pack! forge ["specifier"])
+    (write-file answer text)
+    (let [pending (write-pending-chat! forge {:id "req-say-reply"})
+          missing (run {:dir forge :ok? false}
+                       command "answer" "req-say-reply" (str answer))
+          diagnostic (str (:err missing) (:out missing))]
+      (is (not (zero? (:exit missing))))
+      (is (str/includes? diagnostic "Quick-reply action required"))
+      (is (str/includes? diagnostic "`say \"...\"`"))
+      (is (str/includes? diagnostic "--reply-with"))
+      (is (str/includes? diagnostic "--without-quick-reply"))
+      (is (not (str/includes? diagnostic reply-text))
+          "the quoted text is not inferred or echoed by the diagnostic")
+      (is (< (count diagnostic) 1000))
+      (is (fs/regular-file? pending)))
+
+    (let [answered (run {:dir forge}
+                        command "answer" "req-say-reply" (str answer)
+                        "--reply-with" reply-text)
+          done (slurp (str (fs/path forge ".swarmforge/dashboard/requests/done"
+                                    "req-say-reply.request")))
+          row (get (into {} (map (juxt :id identity)
+                                 (:chat (web-state forge))))
+                   "req-say-reply")]
+      (is (zero? (:exit answered)) (:err answered))
+      (is (str/includes? done "action: reply\n"))
+      (is (not (str/includes? done "action: approve-route-card\n")))
+      (is (= reply-text (get-in row [:actions 0 :reply_text]))))
+
+    (write-pending-chat! forge {:id "req-say-literal"})
+    (let [literal (run {:dir forge}
+                       command "answer" "req-say-literal" (str answer)
+                       "--without-quick-reply")
+          row (get (into {} (map (juxt :id identity)
+                                 (:chat (web-state forge))))
+                   "req-say-literal")]
+      (is (zero? (:exit literal)) (:err literal))
+      (is (not (contains? row :actions))))
+
+    (doseq [[id invalid]
+            [["req-say-missing-quote" "say \"route incomplete\n"]
+             ["req-say-multiline" "say \"first line\nsecond line\"\n"]
+             ["req-say-oversized" (str "say \"" (apply str (repeat 201 "a")) "\"\n")]]]
+      (write-pending-chat! forge {:id id})
+      (write-file answer invalid)
+      (let [ordinary (run {:dir forge}
+                          command "answer" id (str answer))
+            row (get (into {} (map (juxt :id identity)
+                                   (:chat (web-state forge))))
+                     id)]
+        (is (zero? (:exit ordinary)) (:err ordinary))
+        (is (not (contains? row :actions)))
+        (is (< (count (str (:err ordinary) (:out ordinary))) 1000))))
+
+    (let [help (run {:dir forge :ok? false} command)
+          help-text (str (:err help) (:out help))]
+      (is (str/includes? help-text "`say \"...\"`"))
+      (is (str/includes? help-text "--reply-with"))
+      (is (str/includes? help-text "--without-quick-reply")))))
+
 (deftest quick-reply-actions-reject-invalid-and-ambiguous-flags
   ;; Given malformed quick-reply text and conflicting metadata
   ;; When any answer is attempted
