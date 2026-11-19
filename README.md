@@ -580,6 +580,8 @@ forge's.
 
 The layer currently ships:
 
+- `operator-chat` for safe Markdown, bounded replies and Forgelet chat channel
+  semantics shared by Lieutenants and project agents.
 - `forge-requests-by-issue` for cross-forge work requests.
 - `convert-pack-project-to-single-agent` for in-place pack conversion and the
   project-specific audit that must follow the converter's dry run.

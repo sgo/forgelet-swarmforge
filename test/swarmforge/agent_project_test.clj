@@ -1358,6 +1358,10 @@
                text "Do not wait for every gate or for deployment"))
           (is (str/includes?
                text "does not\ninvalidate a stage that has passed"))))
+      (is (str/starts-with?
+           (slurp (str (fs/path project "AGENTS.md")))
+           "# Old agent instructions\n")
+          "managed upgrade guidance preserves project-authored instructions")
       (is (zero? (:exit (run repo-root composer "--forge" (str forge)
                               "--upgrade" (str project) "--check"))))
       (finally

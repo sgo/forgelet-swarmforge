@@ -2986,6 +2986,8 @@
       (write-file
        (fs/path base "swarmforge/skills/convert-pack-project-to-single-agent/SKILL.md")
        "CONVERSION-SKILL\n")
+      (write-file (fs/path base "swarmforge/skills/operator-chat/SKILL.md")
+                  "OPERATOR-CHAT-SKILL\n")
       (write-file (fs/path base "swarmforge/packs/six-pack/gitignore") "build/\n.idea/\n")
       (write-file (fs/path base "swarmforge/packs/gitignore") ".DS_Store\n")
       (write-file (fs/path base "swarmforge/packs/six-pack/language.conf") "Kotlin\n")
@@ -3066,6 +3068,8 @@
                (slurp (str (fs/path host "swarmforge/skills/forge-requests-by-issue/SKILL.md")))))
         (is (= "CONVERSION-SKILL\n"
                (slurp (str (fs/path host "swarmforge/skills/convert-pack-project-to-single-agent/SKILL.md")))))
+        (is (fs/regular-file?
+             (fs/path host "swarmforge/skills/operator-chat/SKILL.md")))
         (is (= "OWN\n" (slurp (str (fs/path host "swarmforge/skills/a-forges-own/SKILL.md")))))
         (is (= "../../swarmforge/skills/forge-requests-by-issue"
                (str/trim (:out (sh/sh "readlink"
@@ -3073,6 +3077,9 @@
         (is (= "../../swarmforge/skills/convert-pack-project-to-single-agent"
                (str/trim (:out (sh/sh "readlink"
                                       (str (fs/path host ".agents/skills/convert-pack-project-to-single-agent")))))))
+        (is (= "../../swarmforge/skills/operator-chat"
+               (str/trim (:out (sh/sh "readlink"
+                                      (str (fs/path host ".agents/skills/operator-chat")))))))
         (is (not (fs/exists? (fs/path host ".agents/skills/a-forges-own"))))
         (is (= "route_card.sh\n"
                (slurp (str (fs/path host

@@ -68,6 +68,18 @@
        "Never use the removed legacy `clarify` command.\n"
        clarification-end))
 
+(def operator-chat-begin
+  "<!-- forgelet:operator-chat-guidance:begin -->")
+(def operator-chat-end
+  "<!-- forgelet:operator-chat-guidance:end -->")
+(def operator-chat-block
+  (str operator-chat-begin "\n"
+       "## Operator chat\n\n"
+       "When replying through Forgelet app chat, use the shared `operator-chat` skill\n"
+       "for supported safe Markdown, fenced examples, channel behavior and the rule that\n"
+       "prose is not approval or execution authority.\n"
+       operator-chat-end))
+
 (def legacy-clarify-command-re
   #"pack_dashboard_request\.sh\s+clarify(?:\s|$)")
 
@@ -347,6 +359,10 @@
                   (conj "install single-agent commit policy")
                   (not (clarification-guidance-current? agents-file))
                   (conj "install typed clarification guidance")
+                  (not (managed-block-in-place?
+                        agents-file operator-chat-begin operator-chat-end
+                        operator-chat-block))
+                  (conj "install operator-chat guidance")
                   (not (fs/regular-file? checker)) (conj "install check-documentation.bb")
                   (or (not (fs/regular-file? wrapper))
                       (not= (slurp (str wrapper)) (slurp (str template-wrapper))))
@@ -393,6 +409,11 @@
              file commit-policy-begin commit-policy-end commit-policy-block)))
         (when-not (clarification-guidance-current? agents-file)
           (install-clarification-guidance! agents-file))
+        (when-not (managed-block-in-place?
+                   agents-file operator-chat-begin operator-chat-end
+                   operator-chat-block)
+          (install-managed-block!
+           agents-file operator-chat-begin operator-chat-end operator-chat-block))
         (when-not (= (when (fs/regular-file? checker) (slurp (str checker)))
                      (slurp (str upgrade-source)))
           (fs/create-dirs (fs/parent checker))

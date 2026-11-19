@@ -24,6 +24,14 @@ package-registry projects. Never print either token. Check credentials by
 variable name or successful command outcome only. Do not copy hook values into
 the project, stage state, task notes, logs or handoffs.
 
+<!-- forgelet:operator-chat-guidance:begin -->
+## Operator chat
+
+When replying through Forgelet app chat, use the shared `operator-chat` skill
+for supported safe Markdown, fenced examples, channel behavior and the rule that
+prose is not approval or execution authority.
+<!-- forgelet:operator-chat-guidance:end -->
+
 The operator gives the card. You write the task note and Gherkin, validate
 them, and record the spec bundle. It is approved automatically by default, or
 proposed for operator approval when the forge opts back into that policy. Do
