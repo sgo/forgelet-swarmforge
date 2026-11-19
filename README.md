@@ -591,12 +591,32 @@ The trial-only DeepSeek Harness ACP runner proof is documented in
 and does not change the existing Codex or project runner boundary.
 
 Cross-forge issues pass through `forge_request.sh` in the receiving forge.
-`intake` validates the repository and `forge-requesters`, records the issue
-digest under `.swarmforge/forge-requests/`, and creates no work. Only local
-operator words can `approve` that record. A local route-card proposal is then
-recorded and presented before its own operator approval, `bind`-ed, its consumed
-card is `link-card`-ed, and `guard` must pass immediately before execution.
-Pending, changed, reused or unlinked requests fail closed.
+The same helper owns one canonical six-heading request contract in both
+directions:
+
+```sh
+forge_request.sh template
+forge_request.sh render --title "<title>" --sections <sections.json> \
+  --output ./tmp/request.md
+forge_request.sh validate-body ./tmp/request.md
+forge_request.sh validate-issue <issue-url> --title "<expected title>"
+```
+
+`render` accepts a JSON or EDN map with exactly `Need`, `Contract`,
+`Boundaries`, `Testing`, `Out of scope` and `Consumers waiting`, then emits one
+`###` heading for each in order. Both validation modes use the receiving intake
+parser: fenced examples are ignored as headings; wrong depth, missing, duplicate,
+empty, unexpected or out-of-order sections are refused. Fetched-issue validation
+checks the created title when supplied and detects later body changes. These
+commands never file an issue or grant execution authority.
+
+Receiving `intake` uses that same parser, validates the repository and
+`forge-requesters`, records the issue digest under
+`.swarmforge/forge-requests/`, and creates no work. Only local operator words can
+`approve` that record. A local route-card proposal is then recorded and
+presented before its own operator approval, `bind`-ed, its consumed card is
+`link-card`-ed, and `guard` must pass immediately before execution. Pending,
+changed, reused or unlinked requests fail closed.
 
 Composition also creates repo-scoped `.agents/skills/<name>` symlinks in the forge root, pointing at
 `swarmforge/skills/<name>`. A lieutenant launched in the forge therefore discovers the shared skills

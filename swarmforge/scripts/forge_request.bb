@@ -12,6 +12,11 @@
 (def usage-text
   (str "Gate a cross-forge GitHub issue through this receiving forge.\n\n"
        "Usage:\n"
+       "  forge_request.sh template [--output <file>]\n"
+       "  forge_request.sh render --title <title> --sections <json-or-edn-file>\n"
+       "      --output <body-file>\n"
+       "  forge_request.sh validate-body <body-file>\n"
+       "  forge_request.sh validate-issue <issue-url> [--title <expected-title>]\n"
        "  forge_request.sh intake <issue-url> --forge-root <root>\n"
        "  forge_request.sh list --forge-root <root>\n"
        "  forge_request.sh detail <request-id> --forge-root <root>\n"
@@ -22,6 +27,8 @@
        "  forge_request.sh link-card <request-id> --forge-root <root> --card <name>\n"
        "  forge_request.sh guard <request-id> --forge-root <root>\n"
        "      --project-root <root> --card <name>\n\n"
+       "template, render and both validate modes use the same six-heading contract\n"
+       "as receiving intake. render and validation never file or approve an issue.\n"
        "intake writes only .swarmforge/forge-requests/<id>.edn. It creates no\n"
        "card and performs no composition, restart or deployment. Only local\n"
        "operator words can approve it. bind records the route-card proposal used\n"
@@ -54,8 +61,128 @@
     (println message))
   (System/exit 1))
 
+(declare validate-title! issue-digest request-template write-text!
+         read-structured-sections ordered-sections! render-request-body
+         validate-request-body! sha256)
+
 (defn flag-value [args flag]
   (second (drop-while #(not= flag %) args)))
+
+(def heading-line-re
+  #"^(#{1,6})[ \t]+(.+?)[ \t]*$")
+
+(defn masked-fenced-lines [body]
+  (loop [lines (str/split-lines (or body ""))
+         fence nil
+         result []]
+    (if-let [line (first lines)]
+      (let [trimmed (str/trim line)
+            marker (cond
+                     (str/starts-with? trimmed "```") "```"
+                     (str/starts-with? trimmed "~~~") "~~~")]
+        (cond
+          (and fence (= fence marker))
+          (recur (next lines) nil (conj result ""))
+
+          fence
+          (recur (next lines) fence (conj result ""))
+
+          marker
+          (recur (next lines) marker (conj result ""))
+
+          :else
+          (recur (next lines) nil (conj result line))))
+      result)))
+
+(defn headings-in-body [body]
+  (->> (masked-fenced-lines body)
+       (map-indexed
+        (fn [index line]
+          (when-let [[_ hashes title] (re-matches heading-line-re line)]
+            {:line-index index
+             :level (count hashes)
+             :title (str/trim (str/replace title #"[ \t]+#+[ \t]*$" ""))})))
+       (remove nil?)
+       vec))
+
+(defn section-text [body heading headings]
+  (let [lines (vec (str/split-lines (or body "")))
+        start (inc (:line-index heading))
+        end (or (some (fn [candidate]
+                        (when (and (> (:line-index candidate)
+                                      (:line-index heading))
+                                   (<= (:level candidate) 3))
+                          (:line-index candidate)))
+                      headings)
+                (count lines))]
+    (str/trim (str/join "\n" (subvec lines start (max start end))))))
+
+(defn request-body-errors [body]
+  (let [headings (headings-in-body body)
+        required-set (set required-headings)
+        unexpected (->> headings
+                        (filter #(= 3 (:level %)))
+                        (map :title)
+                        (remove required-set)
+                        distinct)
+        named (filter #(contains? required-set (:title %)) headings)
+        duplicates (->> named
+                        (group-by :title)
+                        (keep (fn [[title entries]]
+                                (when (> (count entries) 1)
+                                  (str "duplicate section: " title))))
+                        sort)
+        missing (->> required-headings
+                     (remove #(some (fn [heading] (= % (:title heading))) named)))
+        wrong-depth (->> required-headings
+                         (keep (fn [title]
+                                 (when-let [heading
+                                            (first (filter #(= title (:title %))
+                                                           named))]
+                                   (when-not (= 3 (:level heading))
+                                     (str "wrong heading depth for " title
+                                          ": expected ###, found "
+                                          (apply str (repeat (:level heading) "#")))))))
+                         vec)
+        positions (->> required-headings
+                       (keep (fn [title]
+                               (when-let [heading
+                                          (first (filter #(= title (:title %))
+                                                         named))]
+                                 (:line-index heading)))))
+        out-of-order? (and (= (count required-headings) (count positions))
+                           (not (apply < positions)))
+        empty (->> required-headings
+                   (keep (fn [title]
+                           (when-let [heading
+                                      (first (filter #(and (= title (:title %))
+                                                           (= 3 (:level %)))
+                                                     named))]
+                             (when (str/blank? (section-text body heading headings))
+                               (str "empty section: " title)))))
+                   vec)]
+    (cond-> []
+      (seq unexpected)
+      (conj (str "unexpected level-three heading: "
+                 (str/join ", " unexpected)))
+      (seq missing)
+      (into (map #(str "missing section: " %) missing))
+      (seq duplicates)
+      (into duplicates)
+      (seq wrong-depth)
+      (into wrong-depth)
+      out-of-order?
+      (conj (str "sections are out of order: "
+                 (str/join " -> " required-headings)))
+      (seq empty)
+      (into empty))))
+
+(defn validate-request-body! [body]
+  (let [errors (request-body-errors body)]
+    (when (seq errors)
+      (fail! (str "Invalid cross-forge request body: "
+                  (str/join "; " (take 8 errors)))))
+    true))
 
 (defn forge-root [args]
   (let [given (or (flag-value args "--forge-root")
@@ -116,11 +243,6 @@
       (catch Exception _
         (fail! (str "GitHub returned malformed issue JSON for " url))))))
 
-(defn heading-present? [body heading]
-  (boolean (re-find (re-pattern (str "(?m)^### " (java.util.regex.Pattern/quote heading)
-                                    "[ \\t]*$"))
-                    (or body ""))))
-
 (defn validate-issue! [forge url]
   (let [[_ owner repository-name number] (if (string? url)
                                            (re-matches issue-url-re url)
@@ -139,9 +261,7 @@
                   ": " author)))
     (when-not (= (str number) (str (:number issue)))
       (fail! "Issue number changed while reading"))
-    (doseq [heading required-headings]
-      (when-not (heading-present? (:body issue) heading)
-        (fail! (str "Issue is missing required heading: " heading))))
+    (validate-request-body! (:body issue))
     (let [contract (or (second (re-find
                                 #"(?ms)^### Contract[ \t]*\n(.*?)(?=^### |\z)"
                                 (:body issue)))
@@ -153,6 +273,79 @@
        :contract (str/trim contract)
        :url (:url issue)})))
 
+(defn validate-public-issue [url expected-title]
+  (let [[_ owner repository-name number] (re-matches issue-url-re (str url))
+        _ (when-not owner (fail! "Use a canonical GitHub issue URL"))
+        issue (fetch-issue url)
+        repository (get-in issue [:repository :nameWithOwner])
+        issue-url (:url issue)]
+    (when-not (= (str owner "/" repository-name) repository)
+      (fail! "Issue URL and GitHub response name different repositories"))
+    (when-not (= (str number) (str (:number issue)))
+      (fail! "Issue number changed while reading"))
+    (when-not (= url issue-url)
+      (fail! "GitHub response URL does not match the requested issue"))
+    (when expected-title
+      (when-not (= (validate-title! expected-title)
+                   (str/trim (str (:title issue))))
+        (fail! "Fetched issue title does not match the approved draft title")))
+    (validate-request-body! (:body issue))
+    {:status "valid"
+     :url issue-url
+     :number (:number issue)
+     :title (:title issue)
+     :digest (issue-digest issue)
+     :headings required-headings}))
+
+(defn template-command! [args]
+  (let [body (request-template)
+        output (flag-value args "--output")]
+    (if output
+      (do
+        (write-text! (fs/absolutize output) body)
+        (println body))
+      (do
+        (print body)
+        (flush)))))
+
+(defn render-command! [args]
+  (let [title (validate-title! (flag-value args "--title"))
+        sections-file (flag-value args "--sections")
+        output (or (flag-value args "--output")
+                   (fail! "render needs --output"))
+        sections (ordered-sections! (read-structured-sections sections-file))
+        body (render-request-body sections)
+        _ (validate-request-body! body)
+        file (fs/absolutize output)]
+    (write-text! file body)
+    (println
+     (json/generate-string
+      {:status "valid"
+       :title title
+       :body_sha256 (sha256 body)
+       :output (str file)
+       :headings required-headings}))))
+
+(defn validate-body-command! [args]
+  (let [file (first args)]
+    (when-not (and file (fs/regular-file? file))
+      (fail! "Body file not found"))
+    (let [body (slurp (str file))]
+      (validate-request-body! body)
+      (println
+       (json/generate-string
+        {:status "valid"
+         :body_sha256 (sha256 body)
+         :headings required-headings})))))
+
+(defn validate-public-issue-command! [args]
+  (let [url (first args)]
+    (when-not url
+      (fail! "validate-issue needs a GitHub issue URL"))
+    (println
+     (json/generate-string
+      (validate-public-issue url (flag-value args "--title"))))))
+
 (defn sha256 [text]
   (let [digest (MessageDigest/getInstance "SHA-256")]
     (format "%064x"
@@ -162,6 +355,75 @@
   (sha256 (str (str/trim (or (:title issue) ""))
                "\n"
                (str/trimr (or (:body issue) "")))))
+
+(defn normalize-section-key [key]
+  (-> (if (keyword? key) (name key) (str key))
+      str/lower-case
+      (str/replace #"[\s_-]+" "")))
+
+(defn section-map [value]
+  (if (map? value)
+    value
+    (fail! "Sections must be a JSON object or EDN map")))
+
+(defn read-structured-sections [file]
+  (when-not (fs/regular-file? file)
+    (fail! (str "Sections file not found: " file)))
+  (let [text (slurp (str file))]
+    (try
+      (json/parse-string text true)
+      (catch Exception _
+        (try
+          (edn/read-string text)
+          (catch Exception _
+            (fail! "Sections file is not valid JSON or EDN")))))))
+
+(defn ordered-sections! [value]
+  (let [entries (into {}
+                      (map (fn [[key body]]
+                             [(normalize-section-key key) body]))
+                      (section-map value))
+        expected (mapv normalize-section-key required-headings)
+        extras (->> (keys entries)
+                    (remove (set expected))
+                    sort)]
+    (when (seq extras)
+      (fail! (str "Unknown structured sections: " (str/join ", " extras))))
+    (mapv (fn [heading]
+            (let [body (get entries (normalize-section-key heading))
+                  body (str/trim (str (or body "")))]
+              (when (str/blank? body)
+                (fail! (str "Structured section is empty: " heading)))
+              [heading body]))
+          required-headings)))
+
+(defn render-request-body [sections]
+  (str (str/join "\n\n"
+                 (map (fn [[heading body]]
+                        (str "### " heading "\n\n" body))
+                      sections))
+       "\n"))
+
+(defn request-template []
+  (render-request-body
+   (mapv (fn [heading] [heading "none"]) required-headings)))
+
+(defn validate-title! [title]
+  (let [title (str/trim (str (or title "")))]
+    (when (str/blank? title)
+      (fail! "Issue title is required"))
+    (when (> (count title) 240)
+      (fail! "Issue title is too long"))
+    (when (re-find #"[\p{Cc}\p{Cf}\r\n]" title)
+      (fail! "Issue title must be one safe line"))
+    title))
+
+(defn write-text! [file text]
+  (fs/create-dirs (fs/parent file))
+  (let [tmp (fs/create-temp-file {:dir (fs/parent file) :prefix ".forge-request."})]
+    (spit (str tmp) text)
+    (fs/move tmp file {:replace-existing true :atomic-move true}))
+  file)
 
 (defn requests-dir [forge]
   (fs/path forge ".swarmforge" "forge-requests"))
@@ -438,6 +700,10 @@
     (println usage-text)
     (System/exit 0))
   (case (first args)
+    "template" (template-command! (rest args))
+    "render" (render-command! (rest args))
+    "validate-body" (validate-body-command! (rest args))
+    "validate-issue" (validate-public-issue-command! (rest args))
     "intake" (intake! (rest args))
     "approve" (approve! (rest args))
     "bind" (bind! (rest args))

@@ -66,6 +66,26 @@ What the first version deliberately does not do.
 
 The cards or projects held until this closes, and their forge.
 
+Use the helper to avoid transcribing heading depth:
+
+```sh
+forge_request.sh template
+forge_request.sh render --title "<title>" --sections <sections.json> \
+  --output ./tmp/request.md
+forge_request.sh validate-body ./tmp/request.md
+```
+
+The sections file is JSON or EDN with exactly the six heading names above as
+keys. Renderer and receiver use one parser. After operator approval and filing,
+validate the created issue before announcing it:
+
+```sh
+forge_request.sh validate-issue <issue-url> --title "<expected title>"
+```
+
+These commands check format only. They neither file nor approve an issue, and
+the resulting issue remains a request rather than execution authority.
+
 ## Closing
 
 An issue closes only with a final comment headed `Delivered`, written by the
@@ -99,8 +119,9 @@ live under `.swarmforge/forge-requests/`; they are runtime state, not cards.
 
    Intake checks the issue repository against the forge's logical GitHub
    repository, checks the author against `forge-requesters`, requires the six
-   headings, and records the title/body digest as `pending-approval`. It creates
-   no card, route proposal, runtime or project operation.
+   the same complete heading parser used by `validate-body` and
+   `validate-issue`, and records the title/body digest as `pending-approval`.
+   It creates no card, route proposal, runtime or project operation.
 
 2. Ask this forge's operator to inspect the issue and approve local work. A
    dashboard answer can be named with `--approval <request-id>`; exact local

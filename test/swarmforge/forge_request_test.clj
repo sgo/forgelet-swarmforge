@@ -4,11 +4,14 @@
             [cheshire.core :as json]
             [clojure.java.shell :as sh]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]))
+            [clojure.test :refer [deftest is testing]]
+            [forge-request :as request]))
 
 (def repo-root (fs/cwd))
 (def helper (fs/path repo-root "swarmforge" "scripts" "forge_request.bb"))
 (def route-helper (fs/path repo-root "swarmforge" "scripts" "route_card.bb"))
+(def required-headings
+  ["Need" "Contract" "Boundaries" "Testing" "Out of scope" "Consumers waiting"])
 
 (defn write-file [path text]
   (fs/create-dirs (fs/parent path))
@@ -76,6 +79,30 @@
                "SWARMFORGE_TEST_ISSUE_JSON" (:json fake)}
         "intake" "https://github.com/sgo/forgelet-forge/issues/7"
         "--forge-root" (str forge)))
+
+(defn render! [root title sections output]
+  (run! root {} "render" "--title" title
+        "--sections" (str sections) "--output" (str output)))
+
+(defn validate-body! [root file]
+  (run! root {} "validate-body" (str file)))
+
+(defn validate-issue! [root fake url & [title]]
+  (apply run! root
+         {"SWARMFORGE_GH_COMMAND" (:command fake)
+          "SWARMFORGE_TEST_ISSUE_JSON" (:json fake)}
+         "validate-issue" url
+         (cond-> [] title (into ["--title" title]))))
+
+(def six-sections
+  {"Need" "Consumer app cannot request this today."
+   "Contract" (str "A stable request surface.\n\n"
+                   "```markdown\n### Need\nThis fenced example is not a heading.\n```\n\n"
+                   "#### Details\n\nFixed: JSON output.")
+   "Boundaries" "Only the receiver changes its project."
+   "Testing" "Use an in-memory fake."
+   "Out of scope" "none"
+   "Consumers waiting" "consumer-app in the requesting forge."})
 
 (defn request-id [result]
   (second (re-find #"PENDING-APPROVAL:(\S+)" (:out result))))
@@ -294,4 +321,123 @@
                   "--proposal" "proposal-20261108T180000Z")]
         (is (not (zero? (:exit missing-target)))))
       (finally
+        (fs/delete-tree forge)))))
+
+(deftest request-template-and-renderer-use-one-exact-heading-contract
+  (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-forge-render."})
+        template (run! root {} "template")
+        sections (fs/path root "sections.json")
+        output (fs/path root "body.md")]
+    (try
+      (write-file sections (json/generate-string six-sections))
+      (let [rendered (render! root "contract-lib: provide requests" sections output)
+            body (slurp (str output))
+            headings (->> (request/headings-in-body body)
+                          (filter #(= 3 (:level %)))
+                          (mapv #(str "### " (:title %))))]
+        (is (zero? (:exit template)) (:err template))
+        (is (= (mapv #(str "### " %) required-headings)
+               (->> (str/split-lines (:out template))
+                    (filter #(str/starts-with? % "### ")))))
+        (is (zero? (:exit rendered)) (str (:err rendered) (:out rendered)))
+        (is (= (mapv #(str "### " %) required-headings) headings))
+        (is (= 6 (count headings)))
+        (is (str/includes? body "### Need\nThis fenced example is not a heading."))
+        (is (str/includes? body "#### Details\n\nFixed: JSON output.")))
+      (finally
+        (fs/delete-tree root)))))
+
+(defn invalid-body-fixture! [root rendered]
+  (let [variants
+        {"level-two" (str/replace rendered #"(?m)^### Need$" "## Need")
+         "missing" (str/replace rendered #"(?ms)^### Out of scope\n.*?(?=^### )" "")
+         "duplicate" (str rendered "\n### Contract\n\nDuplicate.\n")
+         "out-of-order" (str/replace rendered #"(?ms)^### Need\n\n(.*?)\n\n### Contract\n\n(.*?)\n\n### Boundaries"
+                                    "### Contract\n\n$2\n\n### Need\n\n$1\n\n### Boundaries")
+         "empty" (str/replace rendered #"(?ms)(^### Need\n\n).*?(?=^### Contract)"
+                                "$1")}]
+    (into {}
+          (map (fn [[name body]]
+                 (let [file (fs/path root (str name ".md"))]
+                   (write-file file body)
+                   [name file])))
+          variants)))
+
+(deftest malformed-request-bodies-are-refused-before-filing
+  (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-forge-invalid."})
+        sections (fs/path root "sections.json")
+        output (fs/path root "body.md")]
+    (try
+      (write-file sections (json/generate-string six-sections))
+      (is (zero? (:exit (render! root "contract-lib: provide requests"
+                                sections output))))
+      (let [rendered (slurp (str output))
+            invalid (invalid-body-fixture! root rendered)]
+        (doseq [[name file] invalid]
+          (let [checked (validate-body! root file)
+                diagnostic (str (:err checked) (:out checked))]
+            (is (not (zero? (:exit checked))) name)
+            (is (< (count diagnostic) 1000) name)
+            (is (str/includes? diagnostic "Invalid cross-forge request body")
+                name)))
+        (let [checked (validate-body! root output)]
+          (is (zero? (:exit checked)) (str (:err checked) (:out checked)))
+          (is (= "valid" (:status (json/parse-string (:out checked) true))))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest receiving-intake-accepts-only-the-rendered-contract
+  (let [forge (forge!)
+        root (fs/path forge "draft")
+        sections (fs/path root "sections.json")
+        output (fs/path root "body.md")]
+    (try
+      (write-file sections (json/generate-string six-sections))
+      (is (zero? (:exit (render! root "contract-lib: provide requests"
+                                sections output))))
+      (let [rendered (slurp (str output))
+            accepted (fake-gh! forge (issue "sgo" rendered))
+            accepted-intake (intake! forge accepted)]
+        (is (zero? (:exit accepted-intake))
+            (str (:err accepted-intake) (:out accepted-intake)))
+        (let [invalid (str/replace rendered #"(?m)^### Contract$" "## Contract")
+              refused (fake-gh! forge (issue "sgo" invalid))
+              refused-intake (intake! forge refused)]
+          (is (not (zero? (:exit refused-intake))))
+          (is (str/includes? (str (:err refused-intake) (:out refused-intake))
+                             "wrong heading depth for Contract"))))
+      (finally
+        (fs/delete-tree forge)))))
+
+(deftest fetched-issue-validation-round-trips-and-detects-heading-drift
+  (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-forge-fetch."})
+        forge (forge!)
+        sections (fs/path root "sections.json")
+        output (fs/path root "body.md")
+        url "https://github.com/sgo/forgelet-forge/issues/7"
+        title "contract-lib: provide the thing"]
+    (try
+      (write-file sections (json/generate-string six-sections))
+      (is (zero? (:exit (render! root title sections output))))
+      (let [rendered (slurp (str output))
+            live (fake-gh! root (issue "sgo" rendered))
+            valid (validate-issue! root live url title)]
+        (is (zero? (:exit valid)) (str (:err valid) (:out valid)))
+        (is (= "valid" (:status (json/parse-string (:out valid) true))))
+        (let [changed-body (str/replace rendered
+                                        #"(?m)^### Consumers waiting$"
+                                        "## Consumers waiting")
+              changed (fake-gh! root (issue "sgo" changed-body))
+              fetched (validate-issue! root changed url title)
+              local (let [file (fs/path root "changed.md")]
+                      (write-file file changed-body)
+                      (validate-body! root file))]
+          (is (not (zero? (:exit fetched))))
+          (is (str/includes? (str (:err fetched) (:out fetched))
+                             "wrong heading depth for Consumers waiting"))
+          (is (not (zero? (:exit local))))
+          (is (str/includes? (str (:err local) (:out local))
+                             "wrong heading depth for Consumers waiting"))))
+      (finally
+        (fs/delete-tree root)
         (fs/delete-tree forge)))))
