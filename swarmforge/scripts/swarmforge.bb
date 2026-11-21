@@ -436,15 +436,14 @@
 
 (def aps-tool-purpose
   {"gherkin-parser" "APS parsing"
-   "ir-dry-checker" "IR DRY"
-   "gherkin-mutator" "Gherkin mutation"})
+   "ir-dry-checker" "IR DRY"})
 
 (def role-required-tools
   {"specifier" ["gherkin-parser" "ir-dry-checker"]
    "coder" ["gherkin-parser"]
    "refactorer" ["gherkin-parser"]
-   "hardender" ["gherkin-parser" "gherkin-mutator"]
-   "architect" ["gherkin-parser" "gherkin-mutator"]
+   "hardender" ["gherkin-parser"]
+   "architect" ["gherkin-parser"]
    "QA" ["gherkin-parser"]})
 
 (defn require-ensure-lines [tools]

@@ -1,0 +1,188 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>sgo.forgelet</groupId>
+  <artifactId>__PROJECT_ARTIFACT__</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <name>__PROJECT_NAME__</name>
+
+  <repositories>
+    <repository>
+      <id>github</id>
+      <name>Gherkin mutation GitHub Packages releases</name>
+      <url>https://maven.pkg.github.com/sgo/gherkin-mutation</url>
+      <releases>
+        <enabled>true</enabled>
+        <updatePolicy>never</updatePolicy>
+      </releases>
+      <snapshots>
+        <enabled>false</enabled>
+      </snapshots>
+    </repository>
+  </repositories>
+
+  <pluginRepositories>
+    <pluginRepository>
+      <id>github</id>
+      <name>Gherkin mutation GitHub Packages plugins</name>
+      <url>https://maven.pkg.github.com/sgo/gherkin-mutation</url>
+      <releases>
+        <enabled>true</enabled>
+        <updatePolicy>never</updatePolicy>
+      </releases>
+      <snapshots>
+        <enabled>false</enabled>
+      </snapshots>
+    </pluginRepository>
+  </pluginRepositories>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.release>25</maven.compiler.release>
+    <maven.compiler.parameters>true</maven.compiler.parameters>
+    <pitest.version>1.22.1</pitest.version>
+    <pitest-junit5-plugin.version>1.2.3</pitest-junit5-plugin.version>
+    <gherkin-mutation.version>0.1.0</gherkin-mutation.version>
+    <forgelet.gherkin-mutation-adapter>managed-v1</forgelet.gherkin-mutation-adapter>
+    <skipTests>true</skipTests>
+    <skipPitest>true</skipPitest>
+  </properties>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.pitest</groupId>
+          <artifactId>pitest-maven</artifactId>
+          <version>${pitest.version}</version>
+          <dependencies>
+            <dependency>
+              <groupId>org.pitest</groupId>
+              <artifactId>pitest-junit5-plugin</artifactId>
+              <version>${pitest-junit5-plugin.version}</version>
+            </dependency>
+          </dependencies>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.6.1</version>
+        <configuration>
+          <skipTests>${skipTests}</skipTests>
+          <failIfNoTests>true</failIfNoTests>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.14.1</version>
+        <configuration>
+          <release>${maven.compiler.release}</release>
+          <parameters>${maven.compiler.parameters}</parameters>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>sgo.innersource</groupId>
+        <artifactId>gherkin-mutation-maven-adapter</artifactId>
+        <version>${gherkin-mutation.version}</version>
+        <configuration>
+          <featureRoots>
+            <featureRoot>${project.basedir}/features</featureRoot>
+          </featureRoots>
+          <runnerCommand>
+            <argument>${project.basedir}/acceptance/runner-worker.sh</argument>
+          </runnerCommand>
+          <generatedDirectory>${project.build.directory}/gherkin-mutation/work/generated</generatedDirectory>
+          <workRoot>${project.build.directory}/gherkin-mutation/work</workRoot>
+          <reportDirectory>${project.build.directory}/gherkin-mutation/reports</reportDirectory>
+          <cacheRoot>${project.build.directory}/gherkin-mutation/cache</cacheRoot>
+          <level>hard</level>
+          <workers>4</workers>
+          <projectId>${project.groupId}:${project.artifactId}:single-agent</projectId>
+          <generatedImplementationIdentity>forgelet-agent-acceptance-v1</generatedImplementationIdentity>
+          <dependencyFingerprints>
+            <acceptance.runner>forgelet-agent-acceptance-runner-v1</acceptance.runner>
+            <acceptance.harness>forgelet-agent-acceptance-harness-v1</acceptance.harness>
+            <java.release>${maven.compiler.release}</java.release>
+          </dependencyFingerprints>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <profile>
+      <id>swarm-mode</id>
+      <activation>
+        <activeByDefault>true</activeByDefault>
+      </activation>
+      <properties>
+        <skipTests>true</skipTests>
+        <skipPitest>true</skipPitest>
+      </properties>
+    </profile>
+
+    <profile>
+      <id>with-unit-tests</id>
+      <properties>
+        <skipTests>false</skipTests>
+      </properties>
+    </profile>
+
+    <profile>
+      <id>with-property-tests</id>
+      <properties>
+        <skipTests>false</skipTests>
+      </properties>
+    </profile>
+
+    <profile>
+      <id>with-release-tests</id>
+      <properties>
+        <skipTests>false</skipTests>
+      </properties>
+    </profile>
+
+    <profile>
+      <id>with-mutation-tests</id>
+      <properties>
+        <skipTests>false</skipTests>
+        <skipPitest>false</skipPitest>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.pitest</groupId>
+            <artifactId>pitest-maven</artifactId>
+            <executions>
+              <execution>
+                <id>mutation-tests</id>
+                <phase>verify</phase>
+                <goals>
+                  <goal>mutationCoverage</goal>
+                </goals>
+              </execution>
+            </executions>
+            <configuration>
+              <skip>${skipPitest}</skip>
+              <failWhenNoMutations>true</failWhenNoMutations>
+              <outputFormats>
+                <param>XML</param>
+                <param>HTML</param>
+              </outputFormats>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>

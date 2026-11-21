@@ -185,10 +185,10 @@
              (fs/path project "scripts" "run-acceptance-tests.sh")))
         (is (fs/executable?
              (fs/path project "scripts" "run-acceptance-tests.sh")))
-        (is (fs/regular-file?
-             (fs/path project "scripts" "run-acceptance-mutation.sh")))
-        (is (fs/executable?
-             (fs/path project "scripts" "run-acceptance-mutation.sh")))
+        (is (not (fs/exists?
+                  (fs/path project "scripts" "run-acceptance-mutation.sh"))))
+        (is (fs/regular-file? (fs/path project "pom.xml")))
+        (is (fs/regular-file? (fs/path project ".mvn" "settings.xml")))
         (is (fs/executable?
              (fs/path project "scripts" "install-snapshot.sh")))
         (is (not (fs/exists?
@@ -220,12 +220,19 @@
         (is (str/includes?
              (slurp (str (fs/path project "stages.edn")))
              "target/acceptance/acceptance.log"))
-        (is (str/includes?
-             (slurp (str (fs/path project "stages.edn")))
-             "scripts/run-acceptance-mutation.sh"))
-        (is (str/includes?
-             (slurp (str (fs/path project "stages.edn")))
-             "target/acceptance-mutation/mutation.log"))
+        (let [stage-text (slurp (str (fs/path project "stages.edn")))
+              pom-text (slurp (str (fs/path project "pom.xml")))]
+          (is (str/includes? stage-text "gherkin-mutation:check"))
+          (is (str/includes?
+               stage-text "target/gherkin-mutation/reports/mutation-report.json"))
+          (is (not (str/includes? stage-text "run-acceptance-mutation.sh")))
+          (is (str/includes?
+               pom-text "<artifactId>gherkin-mutation-maven-adapter</artifactId>"))
+          (is (str/includes? pom-text "<gherkin-mutation.version>0.1.0</gherkin-mutation.version>"))
+          (is (str/includes? pom-text
+                             "https://maven.pkg.github.com/sgo/gherkin-mutation"))
+          (is (str/includes? pom-text "<level>hard</level>"))
+          (is (str/includes? pom-text "<workers>4</workers>")))
         (is (= "Java\n" (slurp (str (fs/path project "swarmforge" "language.conf")))))
         (is (str/includes?
              (slurp (str (fs/path project ".swarmforge" "roles.tsv")))
@@ -1005,7 +1012,10 @@
           (is (= [["scripts/install-snapshot.sh"]] (:runs deploy))))
         (is (str/includes? stages "scripts/run-acceptance-tests.sh"))
         (is (str/includes? stages "target/acceptance/acceptance.log"))
-        (is (str/includes? stages "scripts/run-acceptance-mutation.sh"))
+        (is (str/includes? stages "gherkin-mutation:check"))
+        (is (str/includes?
+             stages "target/gherkin-mutation/reports/mutation-report.json"))
+        (is (not (str/includes? stages "scripts/run-acceptance-mutation.sh")))
         (is (not (str/includes? stages ":name \"qa\""))))
       (let [listing (run-stage project "list")]
         (is (zero? (:exit listing)) (:err listing))
@@ -1016,6 +1026,112 @@
       (finally
         (stop-agent-session! project)
         (delete-tree! forge)))))
+
+(deftest generated-java-harden-uses-the-maven-adapter-without-a-global-mutator
+  (doseq [profile ["standard" "library"]]
+    (let [forge (fixture-forge)
+          name (str "agent-" profile)
+          project (fs/path forge "projects" name)
+          profile-args (if (= "library" profile) ["--profile" "library"] [])]
+      (try
+        (is (zero? (:exit
+                    (apply run repo-root composer
+                           (concat ["--forge" (str forge)] profile-args [name])))))
+        (let [stages-file (fs/path project "stages.edn")
+              config (edn/read-string (slurp (str stages-file)))
+              harden (some #(when (= "harden" (:name %)) %)
+                           (:stages config))
+              feature (fs/path project "features" "agent.feature")
+              feature-text
+              "Feature: agent\n\n  Scenario: exact text\n    Given a value\n    Then it remains unchanged\n"
+              bin (fs/path forge "harden-bin")
+              mvn (fs/path bin "mvn")
+              parser (fs/path bin "gherkin-parser")
+              javac (fs/path bin "javac")
+              call-log (fs/path forge "harden-calls.log")
+              count-file (fs/path forge "harden-count")
+              clean-path (str bin ":/usr/bin:/bin:/usr/sbin:/sbin")
+              stage-script (fs/path project "swarmforge" "scripts" "stage.bb")]
+          (write-file feature feature-text)
+          (write-file count-file "0\n")
+          (write-file
+           mvn
+           (str "#!/bin/sh\n"
+                "if command -v gherkin-mutator >/dev/null 2>&1; then\n"
+                "  echo 'unexpected global gherkin-mutator on PATH' >&2\n"
+                "  exit 99\n"
+                "fi\n"
+                "printf '%s\\n' \"$*\" >> \"$HARDEN_CALL_LOG\"\n"
+                "case \" $* \" in\n"
+                "  *\" gherkin-mutation:check \"*)\n"
+                "    mkdir -p target/gherkin-mutation/reports\n"
+                "    printf '{\"survivors\":[]}\\n' "
+                "> target/gherkin-mutation/reports/mutation-report.json\n"
+                "    count=$(cat \"$HARDEN_COUNT_FILE\")\n"
+                "    count=$((count + 1))\n"
+                "    printf '%s\\n' \"$count\" > \"$HARDEN_COUNT_FILE\"\n"
+                "    if [ \"$count\" -eq 1 ]; then\n"
+                "      echo 'deliberate survivor' >&2\n"
+                "      exit 1\n"
+                "    fi\n"
+                "    ;;\n"
+                "  *\" -Pwith-mutation-tests \"*)\n"
+                "    mkdir -p target/pit-reports\n"
+                "    printf '<mutations/>\\n' > target/pit-reports/mutations.xml\n"
+                "    ;;\n"
+                "  *\" dependency:build-classpath \"*)\n"
+                "    mkdir -p target\n"
+                "    : > target/acceptance-classpath.txt\n"
+                "    ;;\n"
+                "esac\n"
+                "exit 0\n"))
+          (write-file parser "#!/bin/sh\nexit 0\n")
+          (write-file javac "#!/bin/sh\nexit 0\n")
+          (doseq [script [mvn parser javac]]
+            (fs/set-posix-file-permissions script "rwxr-xr-x"))
+          (write-file stages-file
+                      (pr-str {:task name :stages [harden]}))
+          (let [run-check
+                (fn []
+                  (sh/sh (str (fs/which "bb")) (str stage-script)
+                         "check" "harden" "--root" (str project)
+                         :dir (str project)
+                         :env {"PATH" clean-path
+                               "HARDEN_CALL_LOG" (str call-log)
+                               "HARDEN_COUNT_FILE" (str count-file)}))
+                survivor (run-check)]
+            (is (not (zero? (:exit survivor))))
+            (is (str/includes? (str (:out survivor) (:err survivor))
+                               "deliberate survivor"))
+            (is (= ["-Pwith-mutation-tests -DoutputFormats=XML,HTML verify"
+                    "-q test-compile"
+                    (str "-q -DincludeScope=test dependency:build-classpath "
+                         "-Dmdep.outputFile=target/acceptance-classpath.txt")
+                    "-q gherkin-mutation:check"]
+                   (str/split-lines (slurp (str call-log)))))
+            (let [clean (run-check)
+                  calls (str/split-lines (slurp (str call-log)))
+                  first-check (.indexOf calls "-q gherkin-mutation:check")
+                  second-check (.lastIndexOf calls "-q gherkin-mutation:check")]
+              (is (zero? (:exit clean)) (:err clean))
+              (is (= 3 first-check))
+              (is (= 7 second-check))
+              (is (fs/regular-file?
+                   (fs/path project "target" "gherkin-mutation" "reports"
+                            "mutation-report.json")))
+              (is (= feature-text (slurp (str feature))))
+              (let [stage-state
+                    (get-in
+                     (edn/read-string
+                      (slurp (str (fs/path project ".swarmforge"
+                                           "stages" (str name ".edn")))))
+                     [:stages "harden"])]
+                (is (string? (:input_hash stage-state)))
+                (is (some #(= "target/gherkin-mutation/reports/mutation-report.json"
+                              (:path %))
+                          (:evidence stage-state)))))))
+        (finally
+          (delete-tree! forge))))))
 
 (deftest standard-e2e-runs-the-card-procedure-and-redacts-inputs
   (let [forge (fixture-forge)
@@ -1273,6 +1389,132 @@
         (stop-agent-session! project)
         (delete-tree! forge)))))
 
+(deftest existing-java-projects-adopt-gherkin-mutation-only-after-opt-in
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent-lib")
+        stages-file (fs/path project "stages.edn")
+        pom-file (fs/path project "pom.xml")
+        agents-file (fs/path project "AGENTS.md")
+        legacy-script (fs/path project "scripts" "run-acceptance-mutation.sh")
+        marker
+        "<forgelet.gherkin-mutation-adapter>managed-v1</forgelet.gherkin-mutation-adapter>"
+        adapter
+        (str "        <groupId>sgo.innersource</groupId>\n"
+             "        <artifactId>gherkin-mutation-maven-adapter</artifactId>")
+        placeholder
+        (str "        <groupId>sgo.innersource</groupId>\n"
+             "        <artifactId>legacy-adapter-placeholder</artifactId>")
+        legacy-harden
+        {:name "harden"
+         :runs [["mvn" "-Pwith-mutation-tests"
+                 "-DoutputFormats=XML,HTML" "verify"]
+                ["scripts/project-acceptance-mutation.sh"]]
+         :evidence ["target/pit-reports/mutations.xml"
+                    "target/acceptance-mutation/mutation.log"]
+         :stamp [:features :sources "acceptance"
+                 "scripts/run-acceptance-tests.sh"
+                 "scripts/project-acceptance-mutation.sh"]}
+        expected-harden
+        {:name "harden"
+         :runs [["mvn" "-Pwith-mutation-tests"
+                 "-DoutputFormats=XML,HTML" "verify"]
+                ["scripts/run-acceptance-tests.sh" "--prepare"]
+                ["mvn" "-q" "gherkin-mutation:check"]]
+         :evidence ["target/pit-reports/mutations.xml"
+                    "target/gherkin-mutation/reports/mutation-report.json"]
+         :stamp [:features :sources "acceptance"
+                 "scripts/run-acceptance-tests.sh"
+                 "pom.xml"]}
+        add-marker
+        (fn [pom]
+          (str/replace
+           pom
+           "    <gherkin-mutation.version>0.1.0</gherkin-mutation.version>\n"
+           (str "    <gherkin-mutation.version>0.1.0</gherkin-mutation.version>\n"
+                "    " marker "\n")))]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge)
+                            "--profile" "library" "agent-lib"))))
+      (let [modern-pom (slurp (str pom-file))
+            custom-pom
+            (-> modern-pom
+                (str/replace (str "    " marker "\n") "")
+                (str/replace adapter placeholder)
+                (str/replace
+                 "${project.basedir}/acceptance/runner-worker.sh"
+                 "${project.basedir}/acceptance/project-owned-runner.sh"))
+            config (edn/read-string (slurp (str stages-file)))]
+        (write-file pom-file custom-pom)
+        (write-file
+         stages-file
+         (pr-str (update config :stages
+                         #(mapv (fn [stage]
+                                  (if (= "harden" (:name stage))
+                                    legacy-harden
+                                    stage))
+                                %))))
+        (write-file legacy-script "#!/bin/sh\nexit 0\n")
+        (fs/set-posix-file-permissions legacy-script "rwxr-xr-x")
+
+        (testing "an unmarked project remains on its existing mutation path"
+          (let [check (run repo-root composer "--forge" (str forge)
+                           "--upgrade" (str project) "--check")]
+            (is (not (zero? (:exit check))))
+            (is (not (str/includes? (:out check)
+                                    "adopt Gherkin mutation Maven plugin")))
+            (is (not (str/includes? (:out check)
+                                    "remove legacy acceptance mutation script")))
+            (is (fs/regular-file? legacy-script))
+            (is (= legacy-harden
+                   (some #(when (= "harden" (:name %)) %)
+                         (:stages (edn/read-string
+                                   (slurp (str stages-file)))))))))
+
+        (testing "the marker and adapter artifact are both required to opt in"
+          (let [marked-pom (add-marker custom-pom)]
+            (write-file pom-file marked-pom)
+            (let [check (run repo-root composer "--forge" (str forge)
+                             "--upgrade" (str project) "--check")]
+              (is (not (zero? (:exit check))))
+              (is (not (str/includes? (:out check)
+                                      "adopt Gherkin mutation Maven plugin")))
+              (is (not (str/includes? (:out check)
+                                      "remove legacy acceptance mutation script")))
+              (is (fs/regular-file? legacy-script)))))
+
+        (write-file agents-file
+                    (str (slurp (str agents-file))
+                         "\nPROJECT-OWNED AGENT INSTRUCTION\n"))
+        (let [adopted-pom (str/replace (add-marker custom-pom)
+                                       placeholder adapter)]
+          (write-file pom-file adopted-pom)
+          (let [check (run repo-root composer "--forge" (str forge)
+                           "--upgrade" (str project) "--check")]
+            (is (not (zero? (:exit check))))
+            (is (str/includes? (:out check)
+                               "adopt Gherkin mutation Maven plugin"))
+            (is (str/includes? (:out check)
+                               "remove legacy acceptance mutation script")))
+          (let [upgrade (run repo-root composer "--forge" (str forge)
+                             "--upgrade" (str project))
+                adopted-stages
+                (edn/read-string (slurp (str stages-file)))]
+            (is (zero? (:exit upgrade)) (:err upgrade))
+            (is (= expected-harden
+                   (some #(when (= "harden" (:name %)) %)
+                         (:stages adopted-stages))))
+            (is (not (fs/exists? legacy-script)))
+            (is (= adopted-pom (slurp (str pom-file))))
+            (is (str/includes? (slurp (str pom-file))
+                               "${project.basedir}/acceptance/project-owned-runner.sh"))
+            (is (str/includes? (slurp (str agents-file))
+                               "PROJECT-OWNED AGENT INSTRUCTION"))
+            (is (zero? (:exit
+                        (run repo-root composer "--forge" (str forge)
+                             "--upgrade" (str project) "--check")))))))
+      (finally
+        (delete-tree! forge)))))
+
 (deftest an-existing-project-can-adopt-the-documentation-gate
   (let [forge (fixture-forge)
         project (fs/path forge "projects" "agent-lib")
@@ -1280,6 +1522,18 @@
     (try
       (is (zero? (:exit (run repo-root composer "--forge" (str forge)
                             "--profile" "library" "agent-lib"))))
+      (let [stage-text (slurp (str stages-file))
+            pom-text (slurp (str (fs/path project "pom.xml")))]
+        (is (= "library\n"
+               (slurp (str (fs/path project ".swarmforge" "profile")))))
+        (is (str/includes? stage-text "gherkin-mutation:check"))
+        (is (str/includes?
+             stage-text "target/gherkin-mutation/reports/mutation-report.json"))
+        (is (not (str/includes? stage-text "run-acceptance-mutation.sh")))
+        (is (str/includes?
+             pom-text "<artifactId>gherkin-mutation-maven-adapter</artifactId>"))
+        (is (not (fs/exists?
+                  (fs/path project "scripts" "run-acceptance-mutation.sh")))))
       ;; Make the project look like one composed before the docs gate existed.
       (let [config (edn/read-string (slurp (str stages-file)))]
         (write-file stages-file

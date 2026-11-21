@@ -113,8 +113,13 @@ evidence; run `stage check code` when the implementation is ready.
 Approved Gherkin is executable. Every step has a handler under `acceptance/src`
 that calls the public API, and `scripts/run-acceptance-tests.sh` must pass.
 Hand-written JUnit is unit coverage, not acceptance evidence.
-The harden gate also runs `scripts/run-acceptance-mutation.sh`, which mutates
-Gherkin example values and fails on a survivor or infrastructure error.
+The harden gate runs PIT and then the explicit
+`gherkin-mutation:check` Maven-plugin goal from the pinned Innersource release.
+The plugin uses `acceptance/runner-worker.sh`, hard level, four workers and
+`target/gherkin-mutation/reports/mutation-report.json` as structured evidence.
+It is not bound to ordinary compile, test or package phases. The project POM
+sets the fixed adapter version, GitHub package repository, feature roots,
+project identity and dependency fingerprints. No global mutator is required.
 Write value-driven behaviour as Scenario Outlines with example tables. A plain
 scenario has no mutable cells, so it is not acceptance-mutation evidence; a
 boolean scenario may stay plain, with that choice recorded in the task note.

@@ -89,6 +89,21 @@
    :evidence []
    :stamp [:sources "scripts/install-snapshot.sh" "pom.xml" ".mvn"]})
 
+(def gherkin-mutation-harden-stage
+  {:name "harden"
+   :runs [["mvn" "-Pwith-mutation-tests"
+           "-DoutputFormats=XML,HTML" "verify"]
+          ["scripts/run-acceptance-tests.sh" "--prepare"]
+          ["mvn" "-q" "gherkin-mutation:check"]]
+   :evidence ["target/pit-reports/mutations.xml"
+              "target/gherkin-mutation/reports/mutation-report.json"]
+   :stamp [:features :sources "acceptance"
+           "scripts/run-acceptance-tests.sh"
+           "pom.xml"]})
+
+(def gherkin-mutation-marker-re
+  #"(?s)<forgelet\.gherkin-mutation-adapter>\s*managed-v1\s*</forgelet\.gherkin-mutation-adapter>")
+
 (defn fail! [message]
   (binding [*out* *err*]
     (println (str "get-agent-project: " message)))
@@ -161,6 +176,22 @@
                        %)
                     stages)))
     (update config :stages insert-before install-stage #{"release"})))
+
+(defn gherkin-mutation-adopted? [root]
+  (let [pom (fs/path root "pom.xml")]
+    (and (fs/regular-file? pom)
+         (let [text (slurp (str pom))]
+           (and (re-find gherkin-mutation-marker-re text)
+                (str/includes? text
+                               "<artifactId>gherkin-mutation-maven-adapter</artifactId>"))))))
+
+(defn ensure-gherkin-mutation-harden-stage [config]
+  (update config :stages
+          (fn [stages]
+            (mapv #(if (= "harden" (:name %))
+                     gherkin-mutation-harden-stage
+                     %)
+                  stages))))
 
 (defn excluded-maven-config? [root file]
   (let [parts (set (map str (fs/components (fs/relativize root file))))]
@@ -294,6 +325,9 @@
                                     "check-e2e.bb")
         maven? (or (fs/regular-file? (fs/path root "pom.xml"))
                    (fs/regular-file? (fs/path root ".mvn" "maven.config")))
+        gherkin-mutation-adopted? (gherkin-mutation-adopted? root)
+        legacy-mutation-script
+        (fs/path root "scripts" "run-acceptance-mutation.sh")
         release-target (configured-release-target root)
         release-file (fs/path root "swarmforge" "release.conf")
         legacy-deploy-file (fs/path root "swarmforge" "deploy.conf")
@@ -312,13 +346,22 @@
                                  (.getMessage cause))))))
         _ (when-not config
             (fail! (str "stages.edn is missing under " root)))
-        with-deploy (if (and config maven?)
-                      (ensure-deploy-stage config)
+        with-harden (if (and config gherkin-mutation-adopted?)
+                      (ensure-gherkin-mutation-harden-stage config)
                       config)
+        with-deploy (if (and with-harden maven?)
+                      (ensure-deploy-stage with-harden)
+                      with-harden)
         with-e2e (when with-deploy (ensure-e2e-stage with-deploy))
         upgraded (when with-e2e (ensure-docs-stage with-e2e))
         standard? (some #(= "qa" (:name %)) (:stages config))
         pending (cond-> []
+                  (and gherkin-mutation-adopted?
+                       (not= config with-harden))
+                  (conj "adopt Gherkin mutation Maven plugin")
+                  (and gherkin-mutation-adopted?
+                       (fs/exists? legacy-mutation-script))
+                  (conj "remove legacy acceptance mutation script")
                   (and maven? (not= config with-deploy))
                   (conj "install local-snapshot deploy stage")
                   (and upgraded (not= with-e2e upgraded))
@@ -379,6 +422,9 @@
       (do
         (when (and config (not= config upgraded))
           (write-stages! stages-file upgraded))
+        (when (and gherkin-mutation-adopted?
+                   (fs/exists? legacy-mutation-script))
+          (fs/delete legacy-mutation-script))
         (when rename-release-file?
           (fs/move legacy-deploy-file release-file))
         (when (and maven?

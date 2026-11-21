@@ -147,6 +147,11 @@ fi
 
 mkdir -p "$dest"
 cp -R "$template_dir/." "$dest/"
+artifact_name="${name##*/}"
+artifact_name="$(printf '%s' "$artifact_name" | sed 's#/#-#g')"
+sed "s/__PROJECT_ARTIFACT__/$artifact_name/g; s/__PROJECT_NAME__/$artifact_name/g" \
+  "$dest/pom.xml" > "$dest/pom.xml.tmp"
+mv "$dest/pom.xml.tmp" "$dest/pom.xml"
 if [[ "$profile" == "library" ]]; then
   mv "$dest/stages.library.edn" "$dest/stages.edn"
   mv "$dest/STAGES.library.md" "$dest/STAGES.md"

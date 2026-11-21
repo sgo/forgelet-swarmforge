@@ -88,13 +88,18 @@ A bootstrap feature is waived only by naming it, with a reason, in
 `acceptance/waived-features.txt`. The runner prints the waiver, so a skipped
 feature is visible in the gate log rather than silently ignored.
 
-`harden` runs PIT and then `scripts/run-acceptance-mutation.sh`, which mutates
-the example values in every non-waived feature through the same runner. A
-survivor or an infrastructure error fails the gate. The mutator works on
-copies under `tmp/`, so it never rewrites the approved feature files.
-`gherkin-mutator` mutates example cells only: value-driven scenarios must be
-Scenario Outlines, and a non-waived feature that reports zero mutations must be
-parameterized or have its exemption recorded in the task note.
+`harden` runs PIT and then the explicit `gherkin-mutation:check` Maven-plugin
+goal from the pinned Innersource release. The plugin uses the persistent
+`acceptance/runner-worker.sh` boundary and writes structured evidence to
+`target/gherkin-mutation/reports/mutation-report.json`. A survivor or an
+infrastructure error fails the gate. The plugin mutates copies, so it never
+rewrites approved feature files. The project POM controls feature roots, runner
+command, hard level, four workers, project identity and dependency fingerprints;
+the goal is not bound to ordinary lifecycle phases. No global mutator or legacy
+mutation shell script is required. The adapter mutates example cells only:
+value-driven scenarios must be Scenario Outlines, and a non-waived feature that
+reports zero mutations must be parameterized or have its exemption recorded in
+the task note.
 
 - **spec**: the approved feature bundle. `stage propose spec <file>...` prints
   it; `stage approve <id> --words "<their
@@ -110,9 +115,10 @@ parameterized or have its exemption recorded in the task note.
 - **code**: `mvn -Pwith-unit-tests verify`.
 - **clean**: CRAP at or below 6 and DRY deltas against the task's base commit.
 - **architect**: invariant tests plus `ARCHITECTURE.md`; refactoring only.
-- **harden**: PIT with XML output, then Gherkin acceptance mutation. A PIT
-  survivor on a touched line blocks unless the project records why it is
-  equivalent; a Gherkin survivor or error blocks.
+- **harden**: PIT with XML output, acceptance preparation, then the explicit
+  `gherkin-mutation:check` Maven goal. A PIT survivor on a touched line blocks
+  unless the project records why it is equivalent; a Gherkin survivor or error
+  blocks.
 - **clean-final**: the same clean check on the hardened tree.
 - **verify**: property tests and the Gherkin acceptance suite.
   `scripts/run-acceptance-tests.sh` parses every feature and dispatches every

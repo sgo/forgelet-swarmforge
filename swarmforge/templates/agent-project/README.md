@@ -78,17 +78,18 @@ and fails on an unhandled or ambiguous step.
 Gherkin mutation runs in `harden`:
 
 ```sh
-scripts/run-acceptance-mutation.sh
+scripts/run-acceptance-tests.sh --prepare
+mvn -q gherkin-mutation:check
 ```
 
-It mutates example values through the same runner and writes
-`target/acceptance-mutation/mutation.log`. The mutator rewrites features with
-its manifest, so the script works on copies under `tmp/`; approved feature
-files are untouched.
-
-Projects with custom value formats add `acceptance/value-adapter.sh`; the
-mutation script passes it as `--value-adapter`. The adapter and the step
-handlers must share the same parser, so a mutated value is still executable.
+The project POM pins `sgo.innersource:gherkin-mutation-maven-adapter:0.1.0`,
+declares its GitHub package repository, and configures the feature roots,
+`acceptance/runner-worker.sh`, hard level, four workers, project identity and
+initial dependency fingerprints. The plugin writes
+`target/gherkin-mutation/reports/mutation-report.json` and mutates copies, so
+approved feature files are untouched. It is invoked explicitly after PIT and is
+not bound to compile, test or package. No global mutator or legacy mutation
+shell script is required.
 
 ## End-to-end QA
 

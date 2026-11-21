@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Persistent runner adapter for gherkin-mutator. The mutator starts this
-# command once per worker and sends newline-delimited JSON jobs on stdin.
+# Persistent runner adapter for the Innersource Gherkin mutation Maven plugin.
+# The plugin starts this command once per worker and sends newline-delimited
+# JSON jobs on stdin.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
