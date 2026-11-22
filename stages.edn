@@ -5,6 +5,7 @@
    :spec ["tasks/*.md" "features/*.feature"]
    :stamp ["tasks" "features"]}
   {:name "code"
+   :detached true
    :runs [["bb" "test"]]
    :evidence []
    :stamp [".gitignore"

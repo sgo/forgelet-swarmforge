@@ -149,6 +149,15 @@ Each `stage check` moves the project's card on `.swarmforge/board/tasks.tsv`,
 which is what the phone's activity room reads. `stage complete` moves it to
 `done`.
 
+Stages marked `:detached true` start one durable supervisor job and return its
+id immediately. The agent must end its turn without polling. The supervisor
+records heartbeat, progress and a bounded exit record, then queues one
+`Work complete for stage job <id>` request. On the next status or check call,
+the stage validates exit, evidence and source stamps and records completion
+once without rerunning the command. `stage job`, `stage jobs`, `stage cancel`
+and `stage retry` are the bounded inspection and recovery commands. A running
+or unconsumed job keeps the project non-idle.
+
 <!-- forgelet:single-agent-correction-policy:begin -->
 ## Spec corrections after the first approval
 

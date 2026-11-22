@@ -39,6 +39,15 @@ to executable examples. `scripts/check-documentation.sh` checks the documents,
 headings, API ownership, local links and example output. A section without an
 example must be explicitly conceptual and carry its reason.
 
+## Long-running stage jobs
+
+A stage marked `:detached true` returns one durable job id instead of holding
+the agent turn open. End the turn without polling when that happens. The
+supervisor writes a bounded exit record and queues exactly one completion
+request; the next `stage status --json` or `stage check <stage>` reconciles the
+exit, evidence and source stamps. Use `stage job <id>`, `stage jobs`,
+`stage cancel <id>` and `stage retry <id>` for bounded inspection and recovery.
+
 ## Snapshot installation and deployment
 
 A completed card installs its current `-SNAPSHOT` after every quality gate and

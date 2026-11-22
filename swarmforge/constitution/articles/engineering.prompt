@@ -69,6 +69,12 @@
   corrections to the same unfinished card remain automatically approved after the first decision.
 - A spec-only or bootstrap task is not a slice that skips gates. It needs an explicit waiver in its
   approved spec (and a `waived` record where the tool supports one), never a deferred gate.
+- A stage marked `:detached true`, or checked with `--detach`, returns one stable stage-job id and
+  ends the caller's responsibility for that process. End the turn immediately; do not sleep, poll,
+  or watch the log. A completion request wakes a later turn to run `stage status --json` or
+  `stage check <name>`. Reconciliation validates the exit record, evidence and source stamps and
+  records the stage exactly once. Use `stage job`, `stage jobs`, `stage cancel` and `stage retry`
+  for bounded inspection, cancellation and explicit retry. Short stages keep the foreground path.
 
 ## Java Gate Tasks
 - A Java project provides its gates as Maven profiles, and the profiles are the contract every role uses:

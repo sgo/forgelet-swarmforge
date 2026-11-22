@@ -78,6 +78,14 @@
 (defn run-stage [root & args]
   (apply run-script stage-script root args))
 
+(defn run-stage-env [root env & args]
+  (hermetic/guard! root (into [(str stage-script)] args))
+  (apply sh/sh
+         (concat ["bb" (str stage-script)]
+                 args
+                 [:dir (str root)
+                  :env (merge {"PATH" (System/getenv "PATH")} env)])))
+
 (defn run-pack-web-test [root & args]
   (apply run-script pack-web-test root args))
 
@@ -94,6 +102,61 @@
             (let [[row-name lane] (str/split line #"\t" -1)]
               (when (= row-name name) lane)))
           (str/split-lines (slurp (str file))))))
+
+(defn wait-until [predicate timeout-ms]
+  (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
+    (loop []
+      (cond
+        (predicate) true
+        (> (System/currentTimeMillis) deadline) false
+        :else (do (Thread/sleep 25) (recur))))))
+
+(defn stage-job-id-from-output [result]
+  (some-> (re-find #"stage job (stage-job-[A-Za-z0-9._-]+):"
+                   (str (:out result) (:err result)))
+          second))
+
+(defn stage-job-file [root id]
+  (fs/path root ".swarmforge" "stage-jobs" (str id ".edn")))
+
+(defn stage-job-exit-file [root id]
+  (fs/path root ".swarmforge" "stage-jobs" (str id ".exit.edn")))
+
+(defn stage-job [root id]
+  (edn/read-string (slurp (str (stage-job-file root id)))))
+
+(defn stage-job-exit [root id]
+  (edn/read-string (slurp (str (stage-job-exit-file root id)))))
+
+(declare fixture-at commit-change!)
+
+(defn short-job-env []
+  {"STAGE_JOB_HEARTBEAT_MS" "50"
+   "STAGE_JOB_POLL_MS" "20"
+   "STAGE_JOB_HEARTBEAT_STALE_MS" "500"
+   "STAGE_JOB_LAUNCH_GRACE_MS" "1000"})
+
+(defn detached-fixture
+  ([root command] (detached-fixture root command {}))
+  ([root command stage-options]
+   (fs/create-dirs root)
+   (fixture-at root)
+   (write-file
+    (fs/path root "stages.edn")
+    (pr-str {:task "fixture"
+             :stages
+             [(merge {:name "work"
+                      :detached true
+                      :runs [command]
+                      :evidence ["target/result.txt"]
+                      :stamp ["source.txt"]}
+                     stage-options)]}))
+   (write-file (fs/path root ".swarmforge" "single-agent") "agent\n")
+   (write-file (fs/path root ".swarmforge" "board" "tasks.tsv")
+               "fixture-card\twork\t2026-11-07T00:00:00Z\t2026-11-07T00:00:00Z\tfixture-task\t0\n")
+   (write-file (fs/path root "source.txt") "source\n")
+   (commit-change! root "detached stage fixture")
+   root))
 
 (defn fixture-at [root]
   (sh/sh "git" "init" "-q" :dir (str root))
@@ -348,7 +411,9 @@
         (doseq [stage ["code" "clean" "architect" "harden" "qa"]]
           (let [result (run-stage root "check" stage)]
             (is (zero? (:exit result))
-                (str stage " failed: " (:err result))))))
+                (str stage " failed: " (:err result)))))
+        (is (empty? (stage-jobs/jobs root))
+            "short stages stay in the foreground and create no detached job"))
 
       (testing "list names the discovered reactor inputs"
         (let [result (run-stage root "list")]
@@ -374,6 +439,333 @@
                  (get-in parsed [:operator_acceptance :status])))))
       (finally
         (fs/delete-tree root)))))
+
+(deftest detached-stage-job-reconciles-once-after-client-disconnect
+  (let [forge (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-job-forge."})
+        root (fs/path forge "projects" "fixture")
+        command ["sh" "-c"
+                 (str "mkdir -p target; "
+                      "printf 'run\\n' >> target/count.txt; "
+                      "sleep 1; "
+                      "printf 'passed\\n' > target/result.txt")]
+        started (System/nanoTime)]
+    (try
+      (detached-fixture root command)
+      (write-file (fs/path forge ".swarmforge" "open-projects") "fixture\n")
+
+      (let [launch (run-stage-env root (short-job-env) "check" "work")
+            launch-ms (/ (- (System/nanoTime) started) 1000000.0)
+            id (stage-job-id-from-output launch)]
+        (is (zero? (:exit launch)) (:err launch))
+        (is (string? id))
+        (is (< launch-ms 3000.0)
+            (format "detached launch blocked for %.0f ms" launch-ms))
+        (is (wait-until
+             #(let [job (stage-job root id)]
+                (and (:pid job) (:process_start_identity job)
+                     (fs/regular-file? (stage-jobs/log-file root id))))
+             2000))
+        (let [job-output (run-stage-env root (short-job-env) "job" id "--json")
+              jobs-output (run-stage-env root (short-job-env) "jobs" "--json")]
+          (is (zero? (:exit job-output)) (:err job-output))
+          (is (zero? (:exit jobs-output)) (:err jobs-output))
+          (is (= id (:id (json/parse-string (:out job-output) true))))
+          (is (some #(= id (:id %))
+                    (json/parse-string (:out jobs-output) true))))
+
+        (let [running (stage-jobs/view root id)
+              running-job (:job running)
+              snapshot (-> (run-pack-web-test root "--test-state" (str root))
+                           :out
+                           (json/parse-string true))]
+          (is (= "waiting-for-job" (:status running)))
+          (is (string? (:process_start_identity running-job)))
+          (is (string? (:heartbeat_at running-job)))
+          (is (string? (:command_fingerprint running-job)))
+          (is (= 86400 (:timeout_seconds running-job)))
+          (is (= "work" (:requested_lane running-job)))
+          (is (fs/regular-file? (stage-jobs/log-file root id)))
+          (is (false? (:idle snapshot)))
+          (is (= "waiting-for-job"
+                 (get-in snapshot [:work_in_flight 0 :state])))
+          (is (= id (get-in snapshot [:work_in_flight 0 :stage_job :id])))
+          (is (= "fixture-card"
+                 (get-in snapshot [:work_in_flight 0 :stage_job :card])))
+          (is (string?
+               (get-in snapshot [:work_in_flight 0 :stage_job :progress])))
+          (is (integer?
+               (get-in snapshot [:work_in_flight 0 :stage_job
+                                 :elapsed_seconds])))
+          (is (= id (get-in snapshot [:stage_jobs 0 :id])))
+          (is (str/starts-with?
+               (get-in snapshot [:tasks 0 :status])
+               (str "Waiting for " id)))
+          (is (false?
+               (:idle ((requiring-resolve
+                        'forge-runtime-upgrade/idle-state)
+                       forge))))
+          (is (= "waiting-for-job"
+                 (:status (stage-jobs/view root id)))))
+
+        (spit (str (fs/path root ".swarmforge" "board" "tasks.tsv"))
+              "next-card\tqueued\t2026-11-07T00:00:00Z\t2026-11-07T00:00:00Z\tnext-task\t0\n"
+              :append true)
+        (let [promotion (run-script
+                         (fs/path repo-root "swarmforge" "scripts" "pack_board.bb")
+                         root "complete-promote"
+                         "--name" "fixture-card" "--root" (str root))]
+          (is (zero? (:exit promotion)) (:err promotion))
+          (is (str/includes? (:out promotion) "WAITING_STAGE_JOB"))
+          (is (= "queued" (board-lane root "next-card"))))
+
+        (is (wait-until #(fs/regular-file? (stage-job-exit-file root id)) 5000))
+        (let [exit-record (stage-job-exit root id)
+              before-count (slurp (str (fs/path root "target" "count.txt")))
+              reconciled (run-stage-env root (short-job-env) "status" "--json")
+              parsed (json/parse-string (:out reconciled) true)
+              stage-statuses (into {} (map (juxt :name :status)
+                                           (:stages parsed)))
+              after-count (slurp (str (fs/path root "target" "count.txt")))
+              pending-dir (fs/path root ".swarmforge" "dashboard"
+                                   "requests" "pending")
+              request-file (fs/path pending-dir (str "req-" id ".request"))]
+          (is (= "succeeded" (:status exit-record)))
+          (is (zero? (:exit reconciled)) (:err reconciled))
+          (is (= "done" (get stage-statuses "work")))
+          (is (= before-count after-count))
+          (is (= "run\n" after-count))
+          (is (fs/regular-file? request-file))
+          (is (str/includes? (slurp (str request-file))
+                             (str "Work complete for stage job " id)))
+          (is (= 1
+                 (count
+                  (filter #(str/includes?
+                            (slurp (str %))
+                            (str "Work complete for stage job " id))
+                          (fs/list-dir pending-dir)))))
+          (is (= "completed" (get-in parsed [:job :state]))))
+          (let [job (stage-job root id)]
+            (is (not (stage-jobs/process-live? (:pid job))))
+            (is (not (stage-jobs/process-live? (:command_pid job)))))
+
+        (let [check (run-stage-env root (short-job-env) "check" "work")
+              count-after-check (slurp (str (fs/path root "target" "count.txt")))]
+          (is (zero? (:exit check)) (:err check))
+          (is (= "run\n" count-after-check))
+          (is (str/includes? (:out check) "done from consumed stage job")))
+
+        (let [again (run-stage-env root (short-job-env) "status" "--json")
+              jobs (stage-jobs/jobs root)]
+          (is (zero? (:exit again)) (:err again))
+          (is (= "completed"
+                 (get-in (json/parse-string (:out again) true)
+                         [:job :state])))
+          (is (= 1 (count (filter #(= id (:id %)) jobs))))
+          (is (empty? (stage-jobs/blocking-views root))))
+
+        (let [elapsed-ms (/ (- (System/nanoTime) started) 1000000.0)]
+          (is (< elapsed-ms 120000.0)
+              (format "short detached lifecycle took %.0f ms" elapsed-ms))
+          (println (format "detached lifecycle E2E duration: %.0f ms"
+                           elapsed-ms))))
+      (finally
+        (delete-tree-best-effort forge)))))
+
+(deftest detached-failures-require-explicit-retry-and-cancel-cleans-child
+  (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-failure."})]
+    (try
+      (detached-fixture
+       root
+       ["sh" "-c"
+        (str "mkdir -p target; sleep 2; "
+             "printf 'should-not-exist\\n' > target/cancelled-hit.txt")])
+      (let [launch (run-stage-env root (short-job-env) "check" "work"
+                                  "--timeout-seconds" "1")
+            id (stage-job-id-from-output launch)]
+        (is (zero? (:exit launch)) (:err launch))
+        (is (wait-until #(fs/regular-file? (stage-job-exit-file root id)) 4000))
+        (let [exit-record (stage-job-exit root id)
+              status (run-stage-env root (short-job-env) "status" "--json")
+              parsed (json/parse-string (:out status) true)]
+          (is (= "timed-out" (:status exit-record)))
+          (is (zero? (:exit status)) (str (:out status) (:err status)))
+          (is (= "timed-out"
+                 (get (into {} (map (juxt :name :status) (:stages parsed)))
+                      "work"))
+              (pr-str parsed))
+          (is (= "timed-out" (get-in parsed [:job :state]))))
+        (let [without-retry (run-stage-env root (short-job-env) "check" "work")]
+          (is (not (zero? (:exit without-retry))))
+          (is (str/includes? (str (:out without-retry) (:err without-retry))
+                             "retry explicitly")))
+        (let [retry (run-stage-env root (short-job-env) "retry" id)
+              retry-id (stage-job-id-from-output retry)]
+          (is (zero? (:exit retry)) (:err retry))
+          (is (string? retry-id))
+          (is (wait-until #(some? (:pid (stage-job root retry-id))) 2000))
+          (let [cancel (run-stage-env root (short-job-env) "cancel" retry-id)]
+            (is (zero? (:exit cancel)) (:err cancel))
+            (is (wait-until
+                 #(and (fs/regular-file? (stage-job-exit-file root retry-id))
+                       (= "cancelled"
+                          (:status (stage-job-exit root retry-id))))
+                 4000))
+            (is (not (fs/exists?
+                      (fs/path root "target" "cancelled-hit.txt"))))
+            (let [job (stage-job root retry-id)]
+              (is (not (stage-jobs/process-live? (:command_pid job))))))))
+      (finally
+        (delete-tree-best-effort root)))))
+
+(deftest detached-job-fails-closed-on-changed-stamps-and-invalid-identity
+  (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-invalid."})]
+    (try
+      (detached-fixture
+       root
+       ["sh" "-c" "mkdir -p target; sleep 2; printf 'ok\\n' > target/result.txt"])
+      (let [launch (run-stage-env root (short-job-env) "check" "work")
+            id (stage-job-id-from-output launch)
+            _ (is (zero? (:exit launch)) (:err launch))
+            _ (is (wait-until #(some? (:pid (stage-job root id))) 2000))
+            future-time (str (.plusSeconds (java.time.Instant/now) 40))]
+        (is (= "waiting-for-job"
+               (:status (stage-jobs/view root id))))
+        (is (= "unknown"
+               (:status (stage-jobs/view root id future-time))))
+        (fs/delete (stage-jobs/log-file root id))
+        (is (= "unknown" (:status (stage-jobs/view root id))))
+        (write-file (stage-jobs/log-file root id) "")
+        (is (= "waiting-for-job" (:status (stage-jobs/view root id))))
+        (let [unrelated-pid (.pid (java.lang.ProcessHandle/current))]
+          (is (false? (stage-jobs/process-matches?
+                       unrelated-pid "not-the-original-process")))
+          (is (true? (stage-jobs/process-live? unrelated-pid))
+              "identity mismatch must not make an unrelated live PID cancellable"))
+        (write-file (fs/path root "source.txt") "changed during job\n")
+        (is (wait-until #(fs/regular-file? (stage-job-exit-file root id)) 4000))
+        (let [status (run-stage-env root (short-job-env) "status" "--json")
+              parsed (json/parse-string (:out status) true)
+              statuses (into {} (map (juxt :name :status) (:stages parsed)))]
+          (is (= "failed" (get statuses "work")))
+          (is (= "failed" (get-in parsed [:job :state])))
+          (is (false? (:idle (-> (run-pack-web-test root "--test-state" (str root))
+                                 :out
+                                 (#(json/parse-string % true)))))))
+        (let [job (stage-job root id)]
+          (if (stage-jobs/process-matches? (:pid job) (:process_start_identity job))
+            (run-stage-env root (short-job-env) "cancel" id)
+            nil)))
+      (finally
+        (delete-tree-best-effort root)))))
+
+(deftest detached-terminal-failures-never-become-success
+  (testing "a nonzero command fails without automatic retry"
+    (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-exit."})]
+      (try
+        (detached-fixture root ["sh" "-c" "exit 7"])
+        (let [launch (run-stage-env root (short-job-env) "check" "work")
+              id (stage-job-id-from-output launch)]
+          (is (zero? (:exit launch)) (:err launch))
+          (is (wait-until #(fs/regular-file? (stage-job-exit-file root id)) 3000))
+          (is (= 7 (:exit (stage-job-exit root id))))
+          (is (= "failed" (:status (stage-job-exit root id))))
+          (let [check (run-stage-env root (short-job-env) "check" "work")]
+            (is (not (zero? (:exit check))))
+            (is (str/includes? (str (:out check) (:err check))
+                               "retry explicitly"))))
+        (finally
+          (delete-tree-best-effort root)))))
+
+  (testing "missing evidence is a failed gate"
+    (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-evidence."})]
+      (try
+        (detached-fixture root ["true"])
+        (let [launch (run-stage-env root (short-job-env) "check" "work")
+              id (stage-job-id-from-output launch)]
+          (is (zero? (:exit launch)) (:err launch))
+          (is (wait-until #(fs/regular-file? (stage-job-exit-file root id)) 3000))
+          (is (= "failed" (:status (stage-job-exit root id))))
+          (is (str/includes? (:reason (stage-job-exit root id))
+                             "Evidence missing")))
+        (finally
+          (delete-tree-best-effort root)))))
+
+  (testing "evidence changed after exit is refused"
+    (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-evidence-change."})]
+      (try
+        (detached-fixture root ["sh" "-c" "mkdir -p target; echo ok > target/result.txt"])
+        (let [launch (run-stage-env root (short-job-env) "check" "work")
+              id (stage-job-id-from-output launch)]
+          (is (zero? (:exit launch)) (:err launch))
+          (is (wait-until #(fs/regular-file? (stage-job-exit-file root id)) 3000))
+          (write-file (fs/path root "target" "result.txt") "changed\n")
+          (let [status (run-stage-env root (short-job-env) "status" "--json")
+                parsed (json/parse-string (:out status) true)]
+            (is (zero? (:exit status)) (:err status))
+            (is (= "failed"
+                   (get (into {} (map (juxt :name :status) (:stages parsed)))
+                        "work")))
+            (is (= "failed" (get-in parsed [:job :state])))))
+        (finally
+          (delete-tree-best-effort root)))))
+
+  (testing "a malformed exit record is unknown, not successful"
+    (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-malformed."})]
+      (try
+        (detached-fixture root ["sh" "-c" "mkdir -p target; echo ok > target/result.txt"])
+        (let [launch (run-stage-env root (short-job-env) "check" "work")
+              id (stage-job-id-from-output launch)]
+          (is (zero? (:exit launch)) (:err launch))
+          (is (wait-until #(fs/regular-file? (stage-job-exit-file root id)) 3000))
+          (write-file (stage-job-exit-file root id) "{broken\n")
+          (let [status (run-stage-env root (short-job-env) "status" "--json")
+                parsed (json/parse-string (:out status) true)]
+            (is (zero? (:exit status)) (:err status))
+            (is (= "unknown"
+                   (get (into {} (map (juxt :name :status) (:stages parsed)))
+                        "work")))
+            (is (= "unknown" (get-in parsed [:job :state])))))
+        (finally
+          (delete-tree-best-effort root)))))
+
+  (testing "a stale identity keeps an otherwise idle project non-idle"
+    (let [forge (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-stale-forge."})
+          root (fs/path forge "projects" "fixture")
+          id "stage-job-work-stale-fixture"
+          current-pid (.pid (java.lang.ProcessHandle/current))]
+      (try
+        (detached-fixture root ["true"])
+        (write-file (fs/path root ".swarmforge" "board" "tasks.tsv")
+                    "")
+        (write-file (fs/path forge ".swarmforge" "open-projects") "fixture\n")
+        (stage-jobs/atomic-write-edn!
+         (stage-jobs/job-file root id)
+         {:id id
+          :status "running"
+          :stage "work"
+          :card "fixture-card"
+          :card_name "fixture-card"
+          :card_id "fixture-task"
+          :role "agent"
+          :requested_lane "work"
+          :created_at "2026-11-22T00:00:00Z"
+          :started_at "2026-11-22T00:00:00Z"
+          :heartbeat_at "2026-11-22T00:00:00Z"
+          :pid current-pid
+          :process_start_identity "not-this-process"
+          :command_fingerprint "stale"
+          :timeout_seconds 60})
+        (let [snapshot (-> (run-pack-web-test root "--test-state" (str root))
+                           :out
+                           (json/parse-string true))]
+          (is (= "unknown" (get-in snapshot [:stage_jobs 0 :status])))
+          (is (false? (:idle snapshot)))
+          (is (false?
+               (:idle ((requiring-resolve
+                        'forge-runtime-upgrade/idle-state)
+                       forge)))))
+        (finally
+          (delete-tree-best-effort forge))))))
 
 (deftest pending-environment-bound-operator-acceptance-completes-and-persists
   (let [root (operator-acceptance-fixture

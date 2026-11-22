@@ -18,7 +18,7 @@
        "  pack_dashboard_request.sh clarify-chat <clarification-id> <question-file>\n"
        "                                           [--reference <clarification-id>]\n"
        "  pack_dashboard_request.sh withdraw-clarification <clarification-id>\n"
-       "  pack_dashboard_request.sh create --root <dir> --body <text>\n"
+       "  pack_dashboard_request.sh create --root <dir> --body <text> [--id <id>]\n"
        "  pack_dashboard_request.sh list --root <dir>\n"
        "\n"
        "An answer that names a pending local route-card proposal must choose\n"
@@ -648,18 +648,40 @@
   (vec (concat (map request-entry (list-files (pending-dir root)))
                (map request-entry (list-files (done-dir root))))))
 
-(defn create-request! [root body]
-  (when (str/blank? body)
-    (exit! 1 "Missing request body"))
-  (let [id (chat-id)
-        now (timestamp)
-        file (request-file (pending-dir root) id)]
-    (fs/create-dirs (fs/parent file))
-    (spit (str file) (render-request {"id" id
-                                      "status" "pending"
-                                      "body" body
-                                      "created_at" now}))
-    {:id id :status "pending" :body body :response "" :created_at now}))
+(declare with-request-lock atomic-write-request!)
+
+(defn create-request!
+  ([root body] (create-request! root body nil))
+  ([root body requested-id]
+   (when (str/blank? body)
+     (exit! 1 "Missing request body"))
+   (when (and requested-id
+              (not (re-matches #"[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}"
+                               requested-id)))
+     (exit! 1 "Request id is invalid"))
+   (let [id (or requested-id (chat-id))
+         now (timestamp)
+         file (request-file (pending-dir root) id)
+         done (request-file (done-dir root) id)]
+     (with-request-lock
+      root
+      (fn []
+        (let [existing (or (when (fs/regular-file? file) (request-entry file))
+                           (when (fs/regular-file? done) (request-entry done)))]
+          (if existing
+            (if (= body (:body existing))
+              existing
+              (exit! 1 (str "Request " id
+                            " already exists with different text")))
+            (do
+              (fs/create-dirs (fs/parent file))
+              (atomic-write-request!
+               file {"id" id
+                     "status" "pending"
+                     "body" body
+                     "created_at" now})
+              {:id id :status "pending" :body body
+               :response "" :created_at now}))))))))
 
 (defn find-pending [root id]
   (let [file (request-file (pending-dir root) id)]
@@ -994,8 +1016,9 @@
     (let [root (or (parse-flag args "--root") (project-root))]
       (withdraw-chat-clarification! root (second args)))
     "create" (let [root (or (parse-flag args "--root") (project-root))
-                   body (or (parse-flag args "--body") "")]
-               (println (:id (create-request! root body))))
+                   body (or (parse-flag args "--body") "")
+                   requested-id (parse-flag args "--id")]
+               (println (:id (create-request! root body requested-id))))
     "list" (let [root (or (parse-flag args "--root") (project-root))]
              (doseq [item (list-requests root)]
                (println (str (:id item) "\t" (:status item) "\t" (:body item)))))

@@ -34,6 +34,8 @@ required_files=(
   swarmforge/scripts/agents.conf
   swarmforge/scripts/check-documentation.bb
   swarmforge/scripts/check-e2e.bb
+  swarmforge/scripts/stage.bb
+  swarmforge/scripts/stage_jobs.bb
   swarmforge/scripts/upgrade-agent-project.bb
 )
 

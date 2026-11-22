@@ -10,6 +10,10 @@
            [java.nio.file StandardOpenOption]
            [java.security MessageDigest]))
 
+(when-let [stage-jobs-file (fs/path (fs/parent *file*) "stage_jobs.bb")]
+  (when (fs/regular-file? stage-jobs-file)
+    (load-file (str stage-jobs-file))))
+
 (def manifest-version 1)
 (def max-blockers 20)
 (def max-changes 20)
@@ -244,20 +248,36 @@
       [])))
 
 (defn active-board-blockers [forge project-name]
-  (let [file (fs/path forge "projects" project-name
-                      ".swarmforge" "board" "tasks.tsv")]
-    (if-not (fs/regular-file? file)
-      []
-      (->> (str/split-lines (slurp (str file)))
-           (remove str/blank?)
-           (keep (fn [line]
-                   (let [[card lane] (str/split line #"\t" -1)]
-                     (when (and (not (str/blank? card))
-                                (not (contains? #{"done" "queued"} lane)))
-                       {:project project-name
-                        :card card
-                        :kind "active-card"}))))
-           vec))))
+  (let [project (fs/path forge "projects" project-name)
+        file (fs/path project ".swarmforge" "board" "tasks.tsv")
+        cards (if-not (fs/regular-file? file)
+                []
+                (->> (str/split-lines (slurp (str file)))
+                     (remove str/blank?)
+                     (keep (fn [line]
+                             (let [[card lane] (str/split line #"\t" -1)]
+                               (when (and (not (str/blank? card))
+                                          (not (contains? #{"done" "queued"} lane)))
+                                 {:project project-name
+                                  :card card
+                                  :kind "active-card"}))))
+                     vec))
+        stage-jobs
+        (if (find-ns 'stage-jobs)
+          (let [blocking-views @(requiring-resolve 'stage-jobs/blocking-views)
+                public-view @(requiring-resolve 'stage-jobs/public-view)
+                jobs-now @(requiring-resolve 'stage-jobs/now)]
+            (->> (blocking-views project)
+                 (keep (fn [view]
+                         (when-let [job (public-view view (jobs-now))]
+                           {:project project-name
+                            :card (:card job)
+                            :kind "stage-job"
+                            :job (:id job)
+                            :status (:status job)})))
+                 vec))
+          [])]
+    (vec (concat cards stage-jobs))))
 
 (defn idle-state [forge]
   (let [open (read-open-projects forge)

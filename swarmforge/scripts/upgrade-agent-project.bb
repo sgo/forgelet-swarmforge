@@ -91,6 +91,7 @@
 
 (def gherkin-mutation-harden-stage
   {:name "harden"
+   :detached true
    :runs [["mvn" "-Pwith-mutation-tests"
            "-DoutputFormats=XML,HTML" "verify"]
           ["scripts/run-acceptance-tests.sh" "--prepare"]

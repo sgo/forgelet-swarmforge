@@ -18,6 +18,7 @@
    :evidence ["ARCHITECTURE.md"]
    :stamp [:sources]}
   {:name "harden"
+   :detached true
    :runs [["mvn" "-Pwith-mutation-tests"
            "-DoutputFormats=XML,HTML" "verify"]
           ["scripts/run-acceptance-tests.sh" "--prepare"]

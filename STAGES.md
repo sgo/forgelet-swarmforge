@@ -30,6 +30,13 @@ The stage list is in `stages.edn`.
   `target/coverage/lcov.info` is the clean-stage evidence.
 - `release` is optional and covers an explicit composition release.
 
+Long gates marked `:detached true` launch one durable supervisor job and
+return a job id immediately. End the turn without polling. The supervisor
+writes a bounded exit record and queues one completion request; the next
+`stage status --json` or `stage check` reconciles evidence and source stamps
+once. Use `stage job`, `stage jobs`, `stage cancel` and `stage retry` for
+bounded recovery.
+
 The coverage gate preserves helper filenames such as `agent-runner.bb`.
 `bb coverage:discover` is the fast regression check that Cloverage can resolve
 every Babashka helper before the full coverage run starts. During coverage,

@@ -1012,6 +1012,7 @@
           (is (= [["scripts/install-snapshot.sh"]] (:runs deploy))))
         (is (str/includes? stages "scripts/run-acceptance-tests.sh"))
         (is (str/includes? stages "target/acceptance/acceptance.log"))
+        (is (str/includes? stages ":detached true"))
         (is (str/includes? stages "gherkin-mutation:check"))
         (is (str/includes?
              stages "target/gherkin-mutation/reports/mutation-report.json"))
@@ -1090,7 +1091,7 @@
           (doseq [script [mvn parser javac]]
             (fs/set-posix-file-permissions script "rwxr-xr-x"))
           (write-file stages-file
-                      (pr-str {:task name :stages [harden]}))
+                      (pr-str {:task name :stages [(dissoc harden :detached)]}))
           (let [run-check
                 (fn []
                   (sh/sh (str (fs/which "bb")) (str stage-script)
@@ -1416,6 +1417,7 @@
                  "scripts/project-acceptance-mutation.sh"]}
         expected-harden
         {:name "harden"
+         :detached true
          :runs [["mvn" "-Pwith-mutation-tests"
                  "-DoutputFormats=XML,HTML" "verify"]
                 ["scripts/run-acceptance-tests.sh" "--prepare"]

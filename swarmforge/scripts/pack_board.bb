@@ -8,6 +8,8 @@
   (:import [java.nio.channels FileChannel]
            [java.nio.file OpenOption StandardOpenOption]))
 
+(load-file (str (fs/path (fs/parent *file*) "stage_jobs.bb")))
+
 (def usage-text
   (str "Usage:\n"
        "  pack_board.sh create --name <name> --lane <lane> [--root <dir>] [--text <text>]\n"
@@ -642,6 +644,9 @@
     line))
 
 (defn promote-recorded! [root file rows promotion]
+  (when-let [view (first (stage-jobs/blocking-views root))]
+    (exit! 1 (str "Cannot promote a next card while stage job "
+                  (:id view) " is " (:status view))))
   (let [target (row-for rows (:promoted-name promotion))]
     (when-not target
       (exit! 1 (str "Promotion target is missing from the board: "
@@ -712,6 +717,7 @@
                   (atomic-spit! file (str (str/join "\n" after-done) "\n"))
                   (promote-recorded! root file after-done existing)))
               (let [active-after (project-active-cards root after-done)
+                    stage-job (first (stage-jobs/blocking-views root))
                     target (when (empty? active-after)
                              (first (queued-cards root after-done)))
                     base {:completed-name completed-name
@@ -721,6 +727,11 @@
                     promotion (cond
                                 (seq active-after)
                                 (assoc base :status :waiting-active)
+
+                                stage-job
+                                (assoc base
+                                       :status :waiting-stage-job
+                                       :stage-job (:id stage-job))
 
                                 target
                                 (let [[name _ _ _ task-id]
@@ -745,6 +756,11 @@
 
                   :waiting-active
                   (do (println (str "WAITING_ACTIVE:" completed-name))
+                      nil)
+
+                  :waiting-stage-job
+                  (do (println (str "WAITING_STAGE_JOB:" completed-name
+                                    ":" (:stage-job promotion)))
                       nil)
 
                   :promoting

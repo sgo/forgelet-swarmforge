@@ -54,7 +54,8 @@
                 "${FAKE_RUNTIME_CONTENT:-v1}\n")
     (write-file (fs/path source "swarmforge/skills/shared/SKILL.md") "shared\n")
     (fs/create-dirs (fs/path source "swarmforge/scripts"))
-    (doseq [name ["forge_runtime_upgrade.bb" "forge_runtime_upgrade.sh"]]
+    (doseq [name ["forge_runtime_upgrade.bb" "forge_runtime_upgrade.sh"
+                  "stage_jobs.bb"]]
       (fs/copy (fs/path scripts-dir name)
                (fs/path source "swarmforge/scripts" name)
                {:replace-existing true}))
@@ -73,6 +74,8 @@
             " swarmforge/scripts/forge_runtime_upgrade.bb\n"
             "cp " (str (fs/path source "swarmforge/scripts/forge_runtime_upgrade.sh"))
             " swarmforge/scripts/forge_runtime_upgrade.sh\n"
+            "cp " (str (fs/path source "swarmforge/scripts/stage_jobs.bb"))
+            " swarmforge/scripts/stage_jobs.bb\n"
             "chmod +x swarmforge/scripts/forge_runtime_upgrade.sh\n"
             "printf '%s\\n' \"${FAKE_RUNTIME_CONTENT:-v1}\" > swarmforge/scripts/runtime-marker\n"
             "printf '#!/bin/sh\\n' > swarm\n"

@@ -14,6 +14,7 @@
 (load-file (str (fs/path script-dir "pane_tree.bb")))
 (load-file (str (fs/path script-dir "forge.bb")))
 (load-file (str (fs/path script-dir "completed_card_report.bb")))
+(load-file (str (fs/path script-dir "stage_jobs.bb")))
 (def pane-shell-command? @(requiring-resolve 'pane-tree/shell-command?))
 (def pane-classify @(requiring-resolve 'pane-tree/classify-pane))
 (def pane-observe @(requiring-resolve 'pane-tree/observe-pane))
@@ -352,7 +353,30 @@
 
 (defn project-idle? [root]
   (and (fs/regular-file? (fs/path root ".swarmforge" "single-agent"))
-       (nil? (active-single-agent-card root))))
+       (nil? (active-single-agent-card root))
+       (not (stage-jobs/root-blocking? root))))
+
+(defn project-stage-jobs [root]
+  (state-cached
+   :stage-job-builds [::stage-jobs (str root)]
+   (fn []
+     (let [at (stage-jobs/now)]
+       (->> (stage-jobs/blocking-views root at)
+            (mapv #(stage-jobs/public-view % at)))))))
+
+(defn stage-job-status-line [job]
+  (let [id (:id job)
+        elapsed (or (:elapsed_seconds job) 0)
+        progress (or (:progress job) "waiting for heartbeat")
+        prefix (case (:status job)
+                 "waiting-for-job" (str "Waiting for " id)
+                 "completed-unconsumed" (str "Completion ready for " id)
+                 "failed" (str "Failed " id)
+                 "timed-out" (str "Timed out " id)
+                 "cancelled" (str "Cancelled " id)
+                 "interrupted" (str "Interrupted " id)
+                 "Unknown " id)]
+    (str prefix " — " elapsed "s — " progress)))
 
 (defn last-n-lines [text n]
   (vec (take-last n (str/split-lines (or text "")))))
@@ -502,13 +526,16 @@
   (fs/exists? (fs/path root ".swarmforge" "notify" (str "reject-" name))))
 
 (defn task-with-status-from-view
-  [root task pending-ids pending-names active-names pane-statuses]
+  [root task pending-ids pending-names active-names pane-statuses stage-jobs-by-card]
   (let [role (:lane task)
         name (:name task)
-        task-id (:id task)]
+        task-id (:id task)
+        stage-job (or (get stage-jobs-by-card task-id)
+                      (get stage-jobs-by-card name))]
     (assoc task :status
            (cond
              (= "done" role) ""
+             stage-job (stage-job-status-line stage-job)
              (rejected-task? root name) "REJECTED"
              (or (contains? pending-ids task-id)
                  (contains? pending-names name)) "Waiting for approval"
@@ -530,9 +557,16 @@
                             (keep (fn [[role names]]
                                     (when (seq names)
                                       [role (pane-status-for root role)])))
-                            active-by-role)]
+                            active-by-role)
+        stage-jobs (reduce (fn [result job]
+                             (reduce (fn [mapping card]
+                                       (if card (assoc mapping card job) mapping))
+                                     result
+                                     [(:card job) (:card_name job) (:card_id job)]))
+                           {}
+                           (project-stage-jobs root))]
     (task-with-status-from-view root task pending-ids pending-names
-                                active-by-role pane-statuses)))
+                                active-by-role pane-statuses stage-jobs)))
 
 (defn batch-task-names [dir]
   (in-process-task-names (handoff-files dir)))
@@ -603,10 +637,19 @@
                                        (when (seq names)
                                          [role (pane-status-for root role)])))
                                active-by-role)
+           stage-jobs (reduce (fn [result job]
+                                (reduce (fn [mapping card]
+                                          (if card
+                                            (assoc mapping card job)
+                                            mapping))
+                                        result
+                                        [(:card job) (:card_name job) (:card_id job)]))
+                              {}
+                              (project-stage-jobs root))
            board (mapv (fn [task]
                          (let [task (task-with-status-from-view
                                      root task pending-ids pending-names
-                                     active-by-role pane-statuses)]
+                                     active-by-role pane-statuses stage-jobs)]
                            (if-let [batch (get idx (:name task))]
                              (assoc task :batch batch)
                              task)))
@@ -1057,14 +1100,16 @@
 (defn cards-in-lane [all-tasks lane]
   (filterv #(= lane (:lane %)) all-tasks))
 
-(defn queue-row [role names batch-names busy? alive? activity updated]
+(defn queue-row
+  [role names batch-names busy? alive? activity updated stage-job]
   {:task (or (first names) "")
    :tasks (vec names)
    :batch_tasks (vec batch-names)
    :role role
-   :state (role-queue-state alive? busy?)
+   :state (if stage-job (:status stage-job) (role-queue-state alive? busy?))
    :updated_at (or updated "")
-   :activity activity})
+   :activity activity
+   :stage_job stage-job})
 
 (defn in-process-task-names [files]
   (->> files
@@ -1095,13 +1140,16 @@
         card (first cards)
         busy? (boolean (or path card))
         alive? (state-session-alive? root role row)
+        stage-job (some #(when (= role (:role %)) %)
+                        (project-stage-jobs root))
         text (when (or alive? (some? *pane-text*))
                (state-pane-text root role row))
         names (work-task-names files cards)
         batch-names (in-process-batch-task-names row)]
     (queue-row role names batch-names busy? alive?
                (role-heat root role (or alive? (some? *pane-text*)) text (backend-name row))
-               (or (:updated_at from-file) (:updated_at card) ""))))
+               (or (:updated_at from-file) (:updated_at card) "")
+               stage-job)))
 
 (defn work-in-flight [root]
   (state-cached
@@ -1696,6 +1744,7 @@
      :approvals (approvals root)
      :resolved_approvals (resolved-approvals root)
      :work_in_flight (work-in-flight root)
+     :stage_jobs (project-stage-jobs root)
      :chat chat
      :clarification_attention (clarification-attention chat)
      :clarifications []}))
@@ -1838,6 +1887,7 @@
       :lanes (lanes root)
       :tasks (tagged name (tasks root))
       :work_in_flight (tagged name (work-in-flight root))
+      :stage_jobs (tagged name (project-stage-jobs root))
       :clarification_attention (clarification-attention chat)
       :completion_stats stats})))
 
@@ -2105,7 +2155,8 @@
   (select-keys item [:name :id :lane :updated_at :audit_count :batch :merging]))
 
 (defn automation-work-row [item]
-  (select-keys item [:task :tasks :batch_tasks :role :state :updated_at :activity]))
+  (select-keys item [:task :tasks :batch_tasks :role :state :updated_at
+                     :activity :stage_job]))
 
 (defn automation-activity [item]
   (select-keys item [:alive :state :heat :last_changed_at]))
@@ -2160,6 +2211,8 @@
    :cards (bounded-automation-section (:tasks item) automation-card-limit automation-card)
    :activity (bounded-automation-section
               (:work_in_flight item) automation-activity-limit automation-work-row)
+   :stage_jobs (bounded-automation-section
+                (:stage_jobs item) automation-card-limit identity)
    :clarification_attention (:clarification_attention item)})
 
 (defn automation-projection [root snapshot]
@@ -2179,6 +2232,7 @@
                      :lanes (:lanes snapshot)
                      :tasks (:tasks snapshot)
                      :work_in_flight (:work_in_flight snapshot)
+                     :stage_jobs (:stage_jobs snapshot)
                      :clarification_attention (:clarification_attention snapshot)}])
         typed (mapcat
                (fn [project]

@@ -110,6 +110,14 @@ Approving the spec, automatically or by the operator, moves the active card's
 visible board lane to `code`. This does not run the code gate or record its
 evidence; run `stage check code` when the implementation is ready.
 
+A stage marked `:detached true` returns a durable stage-job id instead of
+holding the turn open. End the turn as soon as the command prints that id; do
+not sleep or poll. The completion request wakes a later turn to run
+`stage status --json` or `stage check <name>`, which validates the exit record,
+evidence and source stamps and records the stage once. Use `stage job`,
+`stage jobs`, `stage cancel` and `stage retry` for bounded inspection and
+explicit recovery. Short stages stay foreground.
+
 Approved Gherkin is executable. Every step has a handler under `acceptance/src`
 that calls the public API, and `scripts/run-acceptance-tests.sh` must pass.
 Hand-written JUnit is unit coverage, not acceptance evidence.
