@@ -9,6 +9,7 @@
                 (require 'swarmforge.handoff-test)
                 (require 'swarmforge.script-test)
                 (require 'swarmforge.stage-test)
+                (require 'swarmforge.agent-runner-test)
                 (require 'swarmforge.agent-project-test)
                 (require 'swarmforge.runtime-upgrade-test)
                 (require 'swarmforge.update-exercise-test)
@@ -20,6 +21,7 @@
                                                                     'swarmforge.handoff-test
                                                                     'swarmforge.script-test
                                                                     'swarmforge.stage-test
+                                                                    'swarmforge.agent-runner-test
                                                                     'swarmforge.agent-project-test
                                                                     'swarmforge.runtime-upgrade-test
                                                                     'swarmforge.update-exercise-test

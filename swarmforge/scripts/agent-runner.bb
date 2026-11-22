@@ -423,6 +423,25 @@
     (tmux root "set-window-option" "-t" window "allow-rename" "off")
     (tmux root "rename-window" "-t" window project)))
 
+(def ^:dynamic *settle-timeout-ms* 30000)
+(def ^:dynamic *settle-iteration-ms* 250)
+(def ^:dynamic *settle-prompt-delay-ms* 500)
+
+(def current-claude-trust-prompt-re
+  #"(?m)^\s*(?:❯\s*)?No, exit\s*$\n\s*Yes, I trust this folder\s*$\n\s*Enter to confirm · Esc to cancel\s*$")
+
+(defn folder-trust-choice [text]
+  (cond
+    (and (str/includes? (or text "")
+                       "Quick safety check: Is this a project you created or one you trust?")
+         (str/includes? (or text "")
+                        "Claude Code'll be able to read, edit, and execute files here.")
+         (re-find current-claude-trust-prompt-re (or text "")))
+    ["Down" "C-m"]
+
+    (str/includes? (or text "") "Trust this folder?")
+    ["1" "C-m"]))
+
 (declare settle-agent-session!)
 
 (defn start-agent-session! [root command]
@@ -475,25 +494,26 @@
         (str/includes? text "load-project-runtime-env:")
         false
 
-        (str/includes? text "Trust this folder?")
+        (folder-trust-choice text)
         (do
-          (tmux root "send-keys" "-t" session-name "1" "C-m")
-          (Thread/sleep 500)
-          (recur (+ waited 500)))
+          (apply tmux root "send-keys" "-t" session-name
+                 (folder-trust-choice text))
+          (Thread/sleep *settle-prompt-delay-ms*)
+          (recur (+ waited *settle-prompt-delay-ms*)))
 
         (and (str/includes? text "Update available")
              (str/includes? text "1. Update now"))
         (do
           (tmux root "send-keys" "-t" session-name "3" "C-m")
-          (Thread/sleep 500)
-          (recur (+ waited 500)))
+          (Thread/sleep *settle-prompt-delay-ms*)
+          (recur (+ waited *settle-prompt-delay-ms*)))
 
-        (>= waited 30000) false
+        (>= waited *settle-timeout-ms*) false
 
         :else
         (do
-          (Thread/sleep 250)
-          (recur (+ waited 250)))))))
+          (Thread/sleep *settle-iteration-ms*)
+          (recur (+ waited *settle-iteration-ms*)))))))
 
 (defn stop-agent! [root]
   (if (session? root)
@@ -754,4 +774,5 @@
                   (Thread/sleep (* 1000 (:interval options)))
                   (recur)))))))))))
 
-(apply -main *command-line-args*)
+(when (= (str *file*) (System/getProperty "babashka.file"))
+  (apply -main *command-line-args*))
