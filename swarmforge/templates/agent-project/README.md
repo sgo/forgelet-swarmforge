@@ -47,6 +47,9 @@ supervisor writes a bounded exit record and queues exactly one completion
 request; the next `stage status --json` or `stage check <stage>` reconciles the
 exit, evidence and source stamps. Use `stage job <id>`, `stage jobs`,
 `stage cancel <id>` and `stage retry <id>` for bounded inspection and recovery.
+Completion joins a terminal event written after exit/evidence with a yield-ready
+event written as the launching turn ends. The normal path uses a filesystem
+watch; a bounded fallback still queues the result if readiness never arrives.
 
 ## Snapshot installation and deployment
 

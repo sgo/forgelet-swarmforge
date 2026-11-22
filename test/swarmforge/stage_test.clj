@@ -158,6 +158,51 @@
    (commit-change! root "detached stage fixture")
    root))
 
+(defn handshake-job!
+  [root id]
+  (let [pid (.pid (java.lang.ProcessHandle/current))
+        identity (stage-jobs/process-start-identity pid)
+        job {:id id
+             :project "fixture"
+             :stage "work"
+             :card "fixture-card"
+             :card_name "fixture-card"
+             :card_id "fixture-task"
+             :tree "handshake-tree"
+             :input_hash "handshake-input"
+             :command_fingerprint "handshake-command"
+             :status "succeeded"
+             :pid pid
+             :process_start_identity identity
+             :timeout_seconds 60
+             :created_at (stage-jobs/now)
+             :heartbeat_at (stage-jobs/now)
+             :progress "command completed"}]
+    (stage-jobs/atomic-write-edn! (stage-jobs/job-file root id) job)
+    (stage-jobs/atomic-write-edn!
+     (stage-jobs/exit-file root id)
+     {:job_id id
+      :command_fingerprint "handshake-command"
+      :status "succeeded"
+      :exit 0
+      :finished_at (stage-jobs/now)
+      :evidence []})
+    job))
+
+(defn handshake-event! [job event]
+  {:event event
+   :job_id (:id job)
+   :project (:project job)
+   :stage (:stage job)
+   :card_id (:card_id job)
+   :tree (:tree job)
+   :input_hash (:input_hash job)
+   :command_fingerprint (:command_fingerprint job)
+   :supervisor_pid (:pid job)
+   :supervisor_start_identity (:process_start_identity job)
+   :exit_status "succeeded"
+   :exit 0})
+
 (defn fixture-at [root]
   (sh/sh "git" "init" "-q" :dir (str root))
   (sh/sh "git" "config" "user.email" "test@example.com" :dir (str root))
@@ -543,6 +588,9 @@
                             (slurp (str %))
                             (str "Work complete for stage job " id))
                           (fs/list-dir pending-dir)))))
+          (is (= #{"yield-ready" "terminal"}
+                 (set (map :event (stage-jobs/events root id)))))
+          (is (= "joined" (:handshake_status (stage-job root id))))
           (is (= "completed" (get-in parsed [:job :state]))))
           (let [job (stage-job root id)]
             (is (not (stage-jobs/process-live? (:pid job))))
@@ -570,6 +618,90 @@
                            elapsed-ms))))
       (finally
         (delete-tree-best-effort forge)))))
+
+(deftest completion-handshake-joins-in-either-order-with-a-bounded-fallback
+  (let [wait-var (get (ns-publics 'stage) 'handshake-wait-ms)
+        with-short-wait #(with-redefs-fn {wait-var (constantly 500)} %)]
+    (testing "terminal before yield joins through the filesystem watch"
+      (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-handshake-terminal."})
+            id "stage-job-work-handshake-terminal"
+            job (handshake-job! root id)
+            terminal (stage-jobs/append-event! root id (handshake-event! job "terminal"))
+            appender (future
+                       (Thread/sleep 50)
+                       (stage-jobs/append-event! root id
+                                                 (handshake-event! job "yield-ready")))]
+        (try
+          (with-short-wait
+            #(is (= true
+                    (stage-call "coordinate-stage-job-wake!" root id terminal))))
+          @appender
+          (let [events (stage-jobs/events root id)
+                stored (stage-job root id)]
+            (is (= ["terminal" "yield-ready"] (mapv :event events)))
+            (is (= [1 2] (mapv :seq events)))
+            (is (< (:offset (first events)) (:offset (second events))))
+            (is (= "joined" (:handshake_status stored))))
+          (finally
+            (future-cancel appender)
+            (delete-tree-best-effort root)))))
+
+    (testing "yield before completion joins immediately"
+      (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-handshake-yield."})
+            id "stage-job-work-handshake-yield"
+            job (handshake-job! root id)
+            _yield (stage-jobs/append-event! root id
+                                             (handshake-event! job "yield-ready"))
+            terminal (stage-jobs/append-event! root id
+                                               (handshake-event! job "terminal"))]
+        (try
+          (with-short-wait
+            #(is (= true
+                    (stage-call "coordinate-stage-job-wake!" root id terminal))))
+          (is (= "joined" (:handshake_status (stage-job root id))))
+          (finally
+            (delete-tree-best-effort root)))))
+
+    (testing "terminal-only fallback still queues one wake"
+      (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-handshake-fallback."})
+            id "stage-job-work-handshake-fallback"
+            job (handshake-job! root id)
+            terminal (stage-jobs/append-event! root id
+                                               (handshake-event! job "terminal"))]
+        (try
+          (with-redefs-fn {wait-var (constantly 50)}
+            #(is (= true
+                    (stage-call "coordinate-stage-job-wake!" root id terminal))))
+          (is (= "fallback-terminal-only"
+                 (:handshake_status (stage-job root id))))
+          (is (= 1
+                 (count
+                  (filter #(fs/regular-file? %)
+                          [(fs/path root ".swarmforge" "dashboard"
+                                    "requests" "pending"
+                                    (str "req-" id ".request"))]))))
+          (finally
+            (delete-tree-best-effort root)))))
+
+    (testing "scope mismatch fails closed without a wake"
+      (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-handshake-scope."})
+            id "stage-job-work-handshake-scope"
+            job (handshake-job! root id)
+            terminal (stage-jobs/append-event!
+                      root id
+                      (assoc (handshake-event! job "terminal")
+                             :card_id "another-card"))]
+        (try
+          (with-short-wait
+            #(is (string?
+                  (stage-call "coordinate-stage-job-wake!" root id terminal))))
+          (is (= "failed" (:handshake_status (stage-job root id))))
+          (is (not (fs/exists?
+                    (fs/path root ".swarmforge" "dashboard"
+                             "requests" "pending"
+                             (str "req-" id ".request")))))
+          (finally
+            (delete-tree-best-effort root)))))))
 
 (deftest detached-failures-require-explicit-retry-and-cancel-cleans-child
   (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-failure."})]

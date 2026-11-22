@@ -158,6 +158,11 @@ once without rerunning the command. `stage job`, `stage jobs`, `stage cancel`
 and `stage retry` are the bounded inspection and recovery commands. A running
 or unconsumed job keeps the project non-idle.
 
+Completion is joined from two durable events: terminal after exit/evidence, and
+yield-ready when the launching turn ends. A filesystem watch provides the normal
+join; a bounded fallback still queues the terminal result if yield readiness is
+missing. Both events carry job and project/card scope for revalidation.
+
 <!-- forgelet:single-agent-correction-policy:begin -->
 ## Spec corrections after the first approval
 

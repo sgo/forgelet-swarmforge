@@ -691,6 +691,7 @@
 (def default-stage-timeout-seconds 86400)
 (def default-supervisor-heartbeat-ms 1000)
 (def default-supervisor-poll-ms 200)
+(def default-handshake-wait-ms 5000)
 
 (defn supervisor-heartbeat-ms []
   (try
@@ -705,6 +706,14 @@
      (or (System/getenv "STAGE_JOB_POLL_MS")
          (str default-supervisor-poll-ms)))
     (catch Exception _ default-supervisor-poll-ms)))
+
+(defn handshake-wait-ms []
+  (try
+    (let [value (Long/parseLong
+                 (or (System/getenv "STAGE_JOB_HANDSHAKE_WAIT_MS")
+                     (str default-handshake-wait-ms)))]
+      (max 0 value))
+    (catch Exception _ default-handshake-wait-ms)))
 
 (defn command-fingerprint [commands]
   (sha256 (.getBytes (pr-str (vec commands)) "UTF-8")))
@@ -833,6 +842,7 @@
         job {:id id
              :status "launching"
              :stage (:name stage)
+             :project (:task config)
              :card (or (:display card) (:name card))
              :card_name (:name card)
              :card_id (:id card)
@@ -876,7 +886,110 @@
     (println (str "stage job " id ": waiting-for-job"))
     (println "End this model turn now. Do not poll or sleep.")
     (println "A completion request will wake a later turn to reconcile the job.")
+    (let [current (stage-jobs/load-job root id)]
+      (stage-jobs/append-event!
+       root id
+       {:event "yield-ready"
+        :job_id id
+        :project (:project current)
+        :stage (:stage current)
+        :card_id (:card_id current)
+        :tree (:tree current)
+        :input_hash (:input_hash current)
+        :command_fingerprint (:command_fingerprint current)}))
     id))
+
+(defn event-scope-matches-job?
+  [event job]
+  (and (= (:job_id event) (:id job))
+       (= (:project event) (:project job))
+       (= (:stage event) (:stage job))
+       (= (:card_id event) (:card_id job))
+       (= (:tree event) (:tree job))
+       (= (:input_hash event) (:input_hash job))
+       (= (:command_fingerprint event)
+          (:command_fingerprint job))))
+
+(defn valid-event-sequence? [events]
+  (and (not= [:malformed] events)
+       (every? map? events)
+       (= (mapv :seq events)
+          (vec (range 1 (inc (count events)))))
+       (= (count events) (count (distinct (map :event events))))))
+
+(defn mark-handshake-failure! [root id reason]
+  (stage-jobs/update-job!
+   root id #(assoc %
+                   :handshake_status "failed"
+                   :handshake_error reason
+                   :reconcile_error reason
+                   :handshake_at (now)))
+  reason)
+
+(defn queue-stage-job-wake!
+  [root id handshake-status event-seq]
+  (let [request-id (str "req-" id)
+        request-script (fs/path (fs/parent *file*)
+                                "pack_dashboard_request.sh")
+        result (sh/sh (str request-script) "create"
+                      "--root" (str root)
+                      "--id" request-id
+                      "--body" (str "Work complete for stage job " id))]
+    (if (zero? (:exit result))
+      (stage-jobs/update-job!
+       root id #(assoc %
+                       :wake_request_id (str/trim (:out result))
+                       :handshake_status handshake-status
+                       :handshake_event_seq event-seq
+                       :handshake_at (now)))
+      (stage-jobs/update-job!
+       root id #(assoc % :wake_error
+                       (stage-jobs/bounded-progress
+                        (str (:err result) (:out result))))))
+    (zero? (:exit result))))
+
+(defn coordinate-stage-job-wake! [root id terminal-event]
+  (let [wait-ms (handshake-wait-ms)
+        ready? (fn [events]
+                 (and (valid-event-sequence? events)
+                      (some #(= "yield-ready" (:event %)) events)
+                      (some #(= "terminal" (:event %)) events)))
+        events (stage-jobs/wait-for-events! root id ready? wait-ms)
+        job (stage-jobs/load-job root id)
+        yield-event (some #(when (= "yield-ready" (:event %)) %) events)
+        terminal (some #(when (= "terminal" (:event %)) %) events)
+        exit (stage-jobs/load-exit root id)]
+    (cond
+      (not (valid-event-sequence? events))
+      (mark-handshake-failure! root id "stage-job event log is malformed")
+
+      (not (event-scope-matches-job? terminal job))
+      (mark-handshake-failure! root id "terminal event scope does not match the job")
+
+      (not (and (= (:supervisor_pid terminal) (:pid job))
+                (= (:supervisor_start_identity terminal)
+                   (:process_start_identity job))
+                (stage-jobs/process-matches?
+                 (:pid job) (:process_start_identity job))))
+      (mark-handshake-failure!
+       root id "terminal event supervisor identity does not match the job")
+
+      (not (stage-jobs/exit-valid? id job exit))
+      (mark-handshake-failure! root id "stage-job exit record is malformed")
+
+      (and yield-event
+           (not (event-scope-matches-job? yield-event job)))
+      (mark-handshake-failure! root id "yield event scope does not match the job")
+
+      yield-event
+      (queue-stage-job-wake!
+       root id "joined"
+       [(:seq yield-event) (:seq terminal)])
+
+      :else
+      (queue-stage-job-wake!
+       root id "fallback-terminal-only"
+       [(:seq terminal)]))))
 
 (defn finish-stage-job!
   [root id status exit-code reason]
@@ -911,23 +1024,23 @@
                                      "succeeded" "command completed"
                                      status))
                      :reason reason))
-    (let [request-id (str "req-" id)
-          request-script (fs/path (fs/parent *file*)
-                                  "pack_dashboard_request.sh")
-          result (try
-                   (sh/sh (str request-script) "create"
-                          "--root" (str root)
-                          "--id" request-id
-                          "--body" (str "Work complete for stage job " id))
-                   (catch Exception error
-                     {:exit 1 :err (or (ex-message error) "wake failed")}))]
-      (if (zero? (:exit result))
-        (stage-jobs/update-job!
-         root id #(assoc % :wake_request_id (str/trim (:out result))))
-        (stage-jobs/update-job!
-         root id #(assoc % :wake_error
-                         (stage-jobs/bounded-progress
-                          (str (:err result) (:out result)))))))
+    (let [job (stage-jobs/load-job root id)
+          terminal (stage-jobs/append-event!
+                    root id
+                    {:event "terminal"
+                     :job_id id
+                     :project (:project job)
+                     :stage (:stage job)
+                     :card_id (:card_id job)
+                     :tree (:tree job)
+                     :input_hash (:input_hash job)
+                     :command_fingerprint (:command_fingerprint job)
+                     :supervisor_pid (:pid job)
+                     :supervisor_start_identity
+                     (:process_start_identity job)
+                     :exit_status status
+                     :exit exit-code})]
+      (coordinate-stage-job-wake! root id terminal))
     status))
 
 (defn destroy-command-tree! [pid]

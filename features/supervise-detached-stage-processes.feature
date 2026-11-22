@@ -21,6 +21,15 @@ Feature: Supervise detached stage processes to completion
     And the stage completes exactly once without rerunning the command
     And the completion request remains queued when the agent is offline
 
+  Scenario: Join terminal completion with turn yield
+    Given the supervisor appends one durable terminal event after exit and evidence state
+    And the launching client appends one durable yield-ready event as its final action
+    When the coordinator joins those events in either order
+    Then it revalidates job, process identity and project/card scope
+    And it queues one wake without fixed polling
+    When yield readiness is missing
+    Then a bounded injected fallback still queues the terminal result
+
   Scenario: Report waiting through all lifecycle projections
     Given a detached stage job is running or awaiting reconciliation
     When project activity, board readiness and Family upgrade idleness are inspected

@@ -50,6 +50,14 @@ detached process exit, validate its evidence and complete the stage once.
   evidence recorded.
 - A valid heartbeat suppresses stall nudges. A stale heartbeat or missing
   process becomes blocked/unknown, never idle.
+- Use a durable two-event completion handshake: the supervisor appends one
+  terminal event after exit/evidence state, and the launching client appends
+  one bounded yield-ready event as its final action. The coordinator joins both,
+  revalidates job/process/scope, and queues the wake exactly once.
+- Store handshake events owner-only with sequence and byte-offset semantics.
+  Use a filesystem watch for the normal cross-process path and a bounded
+  five-to-ten-second fallback that still queues a terminal result when readiness
+  was never delivered.
 
 ## Testing
 
@@ -67,6 +75,8 @@ detached process exit, validate its evidence and complete the stage once.
   reused PIDs fail closed.
 - Repeated reconciliation and retries are idempotent; cancellation never
   targets an unrelated process.
+- The terminal-before-yield, yield-before-terminal, terminal-only fallback and
+  scope-mismatch paths are deterministic and sub-second with injected timing.
 - Existing stage, board, handoff, dashboard and lifecycle suites remain green.
 
 ## E2E
@@ -84,6 +94,10 @@ materially below that. No fixed sleep may scale with the configured production
 timeout. If a real detached process is used, it runs for only a few seconds and
 is cancelled and cleaned up in every path.
 
+The cross-process proof uses the short disposable helper and the atomic event
+log, then asserts sequence/offset ordering, one joined wake and no fixed sleep.
+The timeout fallback is exercised through an injected millisecond wait.
+
 ## Boundary
 
 Work in `projects/forgelet-swarmforge`. Do not auto-retry failed gates, weaken
@@ -97,8 +111,9 @@ atomic exit, one queued completion wake, disconnected-client reconciliation and
 source-stamp/evidence validation without a production-scale sleep. The
 verification records the measured E2E duration and confirms that child
 processes are cleaned up on success, failure, timeout and cancellation. The
-measured disconnected-client E2E duration was 1.637 seconds; the added detached
-fixtures completed together in under eight seconds.
+measured disconnected-client E2E duration was 1.613 seconds; the added detached
+fixtures completed together in under eight seconds. The two-event join/fallback
+fixtures use 50 ms injected waits and complete in under two seconds.
 
 ## Operator acceptance
 

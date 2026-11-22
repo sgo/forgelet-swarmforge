@@ -118,6 +118,12 @@ evidence and source stamps and records the stage once. Use `stage job`,
 `stage jobs`, `stage cancel` and `stage retry` for bounded inspection and
 explicit recovery. Short stages stay foreground.
 
+Completion uses a durable two-event handshake: the supervisor writes a terminal
+event after exit/evidence state, and the launching client writes yield-ready
+after returning the job id. The supervisor joins those events through a
+filesystem watch and falls back to the durable request queue if readiness is
+missing after a bounded wait.
+
 Approved Gherkin is executable. Every step has a handler under `acceptance/src`
 that calls the public API, and `scripts/run-acceptance-tests.sh` must pass.
 Hand-written JUnit is unit coverage, not acceptance evidence.

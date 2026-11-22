@@ -37,6 +37,11 @@ writes a bounded exit record and queues one completion request; the next
 once. Use `stage job`, `stage jobs`, `stage cancel` and `stage retry` for
 bounded recovery.
 
+The supervisor's terminal event and the launching client's yield-ready event
+are joined through a durable owner-only event log. A filesystem watch handles
+the normal path; a bounded fallback queues the terminal result if readiness was
+not delivered.
+
 The coverage gate preserves helper filenames such as `agent-runner.bb`.
 `bb coverage:discover` is the fast regression check that Cloverage can resolve
 every Babashka helper before the full coverage run starts. During coverage,

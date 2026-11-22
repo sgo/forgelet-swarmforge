@@ -6,7 +6,11 @@
             [clojure.java.shell :as sh]
             [clojure.string :as str])
   (:import (java.io RandomAccessFile)
+           (java.nio ByteBuffer)
+           (java.nio.channels FileChannel)
+           (java.nio.file FileSystems StandardOpenOption)
            (java.time Duration Instant)
+           (java.util.concurrent TimeUnit)
            (java.util UUID)))
 
 (def default-heartbeat-stale-ms 30000)
@@ -38,6 +42,9 @@
 (defn cancel-file [root id]
   (fs/path (jobs-dir root) (str id ".cancel")))
 
+(defn event-log-file [root id]
+  (fs/path (jobs-dir root) (str id ".events")))
+
 (defn supervisor-socket [id]
   (fs/path (System/getProperty "java.io.tmpdir")
            (str "sf-stage-"
@@ -62,6 +69,95 @@
 
 (defn atomic-write-edn! [path value]
   (atomic-write! path (str (pr-str value) "\n")))
+
+(defn append-event!
+  [root id event]
+  (let [path (event-log-file root id)
+        parent (fs/parent path)]
+    (fs/create-dirs parent)
+    (when-not (fs/exists? path)
+      (fs/create-file path)
+      (fs/set-posix-file-permissions path "rw-------"))
+    (with-open [channel (FileChannel/open
+                         path
+                         (into-array StandardOpenOption
+                                     [StandardOpenOption/READ
+                                      StandardOpenOption/WRITE]))]
+      (let [lock (.lock channel)]
+        (try
+          (let [size (.size channel)
+                buffer (ByteBuffer/allocate (int size))]
+            (.position channel 0)
+            (while (.hasRemaining buffer)
+              (.read channel buffer))
+            (let [existing (String. (.array buffer) "UTF-8")
+                  sequence (inc (count
+                                 (remove str/blank?
+                                         (str/split-lines existing))))
+                  bounded (assoc event
+                                 :seq sequence
+                                 :offset size
+                                 :recorded_at (now))
+                  bytes (.getBytes (str (pr-str bounded) "\n") "UTF-8")]
+              (.position channel size)
+              (loop [buffer (ByteBuffer/wrap bytes)]
+                (when (.hasRemaining buffer)
+                  (.write channel buffer)
+                  (recur buffer)))
+              (.force channel true)
+              (fs/set-posix-file-permissions path "rw-------")
+              bounded))
+          (finally
+            (.close lock)))))))
+
+(defn events [root id]
+  (let [path (event-log-file root id)]
+    (if-not (fs/regular-file? path)
+      []
+      (try
+        (->> (str/split-lines (slurp (str path)))
+             (remove str/blank?)
+             (mapv edn/read-string))
+        (catch Exception _
+          [:malformed])))))
+
+(defn wait-for-event-change! [root id timeout-ms]
+  (let [path (event-log-file root id)
+        parent (or (fs/parent path) (jobs-dir root))
+        timeout (max 0 (long timeout-ms))
+        deadline (+ (System/currentTimeMillis) timeout)]
+    (fs/create-dirs parent)
+    (with-open [watcher (.newWatchService (FileSystems/getDefault))]
+      (try
+        (let [kinds (Class/forName "java.nio.file.StandardWatchEventKinds")
+              create (.get kinds "ENTRY_CREATE")
+              modify (.get kinds "ENTRY_MODIFY")]
+          (.register parent watcher
+                     (into-array (type create) [create modify])))
+        (let [key (.poll watcher (max 0 (- deadline (System/currentTimeMillis)))
+                         TimeUnit/MILLISECONDS)]
+          (when key
+            (doseq [event (.pollEvents key)]
+              (.reset event))
+            (.reset key)
+            true))
+        (catch Exception _
+          false)))))
+
+(defn wait-for-events!
+  [root id ready? timeout-ms]
+  (let [deadline (+ (System/currentTimeMillis) (max 0 (long timeout-ms)))]
+    (loop []
+      (let [current (events root id)]
+        (cond
+          (ready? current) current
+          (>= (System/currentTimeMillis) deadline) current
+          :else
+          (let [remaining (- deadline (System/currentTimeMillis))
+                changed? (wait-for-event-change! root id remaining)]
+            (when (and (not changed?) (pos? remaining))
+              (Thread/sleep (min 25 remaining)))
+            (recur)))))))
 
 (defn read-edn-file [path]
   (when (and path (fs/regular-file? path))

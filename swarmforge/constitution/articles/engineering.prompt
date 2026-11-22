@@ -75,6 +75,10 @@
   `stage check <name>`. Reconciliation validates the exit record, evidence and source stamps and
   records the stage exactly once. Use `stage job`, `stage jobs`, `stage cancel` and `stage retry`
   for bounded inspection, cancellation and explicit retry. Short stages keep the foreground path.
+- Detached completion uses two durable owner-only events: one terminal event after exit/evidence,
+  and one yield-ready event recorded by the launching client as its final action. The supervisor
+  joins them with a filesystem watch, revalidates job/process/project/card scope, and queues one wake.
+  If readiness is missing, a bounded five-to-ten-second fallback still queues the terminal result.
 
 ## Java Gate Tasks
 - A Java project provides its gates as Maven profiles, and the profiles are the contract every role uses:
