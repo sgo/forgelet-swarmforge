@@ -52,6 +52,12 @@
 (def outcome-details
   {"STAGE_OK"
    ["success" "Continue with the returned stage state."]
+   "STAGE_JOB_WAITING"
+   ["waiting-for-job" "End the turn without polling; a completion wake will follow."]
+   "STAGE_JOB_COMPLETED"
+   ["completed" "Continue with the recorded stage result."]
+   "STAGE_CANCELLATION_REQUESTED"
+   ["waiting-for-job" "Wait for the supervisor's durable cancellation exit."]
    "STAGE_CONFIG_MISSING"
    ["failed" "Restore stages.edn or pass --root to the managed project."]
    "STAGE_CONFIG_INVALID"
@@ -207,10 +213,23 @@
   (System/exit status))
 
 (defn emit-stage-success! [result]
-  (emit-stage-outcome!
-   *err*
-   (stage-outcome-envelope
-    "success" "STAGE_OK" "stage command completed successfully" nil 0)))
+  (let [current-status (:current_status @*outcome-context*)
+        [status code reason]
+        (case current-status
+          "waiting-for-job"
+          ["waiting-for-job" "STAGE_JOB_WAITING"
+           "stage job is waiting for supervised completion"]
+          "completed"
+          ["completed" "STAGE_JOB_COMPLETED"
+           "stage job completed and was reconciled"]
+          "cancellation-requested"
+          ["waiting-for-job" "STAGE_CANCELLATION_REQUESTED"
+           "stage job cancellation was requested"]
+          ["success" "STAGE_OK"
+           "stage command completed successfully"])]
+    (emit-stage-outcome!
+     *err*
+     (stage-outcome-envelope status code reason nil 0))))
 
 (defn outcome-card [card]
   (when (map? card)
@@ -1035,6 +1054,9 @@
     (stage-jobs/atomic-write-edn! (stage-jobs/job-file root id) job)
     (save-state root (:task config) (assoc state :running running))
     (update-board! root config card (:name stage))
+    (swap! *outcome-context* assoc
+           :job_id id
+           :current_status "waiting-for-job")
     (try
       (launch-stage-supervisor! root id)
       (catch Throwable error
@@ -1525,11 +1547,17 @@
       (case (:status current-view)
         "waiting-for-job"
         (do
+          (swap! *outcome-context* assoc
+                 :job_id current-job-id
+                 :current_status "waiting-for-job")
           (println (str "stage job " current-job-id ": waiting-for-job"))
           (println "End this model turn now. Do not poll or sleep."))
 
         "completed-unconsumed"
         (do
+          (swap! *outcome-context* assoc
+                 :job_id current-job-id
+                 :current_status "completed-unconsumed")
           (println (str "stage job " current-job-id
                         ": completion is ready to reconcile"))
           (println "Run stage status --json after the completion request is consumed."))
@@ -2083,6 +2111,9 @@
     (when-not (:job view)
       (exit! 1 (str "Unknown stage job: " id)))
     (let [value (stage-jobs/public-view view (now))]
+      (swap! *outcome-context* assoc
+             :job_id id
+             :current_status (:status view))
       (if json?
         (println (json/generate-string value))
         (doseq [key [:id :status :stage :card :requested_lane :role
@@ -2117,6 +2148,9 @@
                   " supervisor identity is unavailable or stale; refusing cancellation")))
     (stage-jobs/atomic-write! (stage-jobs/cancel-file root id)
                               (str (now) "\n"))
+    (swap! *outcome-context* assoc
+           :job_id id
+           :current_status "cancellation-requested")
     (println (str "cancellation requested for stage job " id))))
 
 (defn retry-job! [root config state id options]
