@@ -1090,13 +1090,14 @@
                          :command_start_identity child-identity
                          :progress "command running"))
         (try
-          (loop [last-heartbeat 0]
-            (let [current-ms (System/currentTimeMillis)
-                  cancel? (fs/exists? (stage-jobs/cancel-file root id))
-                  timed-out? (> current-ms deadline)
-                  alive? (try (process/alive? child)
-                              (catch Exception _ false))]
-              (cond
+          ((fn []
+             (loop [last-heartbeat 0]
+               (let [current-ms (System/currentTimeMillis)
+                     cancel? (fs/exists? (stage-jobs/cancel-file root id))
+                     timed-out? (> current-ms deadline)
+                     alive? (stage-jobs/process-matches?
+                             child-pid child-identity)]
+                 (cond
                 cancel?
                 (do
                   (destroy-command-tree! child-pid)
@@ -1122,20 +1123,21 @@
                     (finish-stage-job! root id "failed" code
                                        (str "command failed with exit " code))))
 
-                :else
-                (do
-                  (when (>= (- current-ms last-heartbeat)
-                            (supervisor-heartbeat-ms))
-                    (stage-jobs/update-job!
-                     root id
-                     #(assoc %
-                             :heartbeat_at (now)
-                             :progress
-                             (or (stage-jobs/progress-from-log
-                                  (stage-jobs/log-file root id))
-                                 (:progress %)))))
-                  (Thread/sleep (max 10 (supervisor-poll-ms)))
-                  (recur current-ms)))))
+                   :else
+                   (do
+                     (let [heartbeat? (>= (- current-ms last-heartbeat)
+                                          (supervisor-heartbeat-ms))]
+                       (when heartbeat?
+                         (stage-jobs/update-job!
+                          root id
+                          #(assoc %
+                                  :heartbeat_at (now)
+                                  :progress
+                                  (or (stage-jobs/progress-from-log
+                                       (stage-jobs/log-file root id))
+                                      (:progress %)))))
+                       (Thread/sleep (max 10 (supervisor-poll-ms)))
+                       (recur (if heartbeat? current-ms last-heartbeat)))))))))
           (catch Throwable error
             (destroy-command-tree! child-pid)
             (finish-stage-job! root id "failed" 1

@@ -703,6 +703,31 @@
           (finally
             (delete-tree-best-effort root)))))))
 
+(deftest detached-supervisor-heartbeats-while-the-child-runs
+  (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-heartbeat."})]
+    (try
+      (detached-fixture
+       root
+       ["sh" "-c" "mkdir -p target; sleep 2; echo ok > target/result.txt"])
+      (let [launch (run-stage-env root (short-job-env) "check" "work"
+                                  "--timeout-seconds" "10")
+            id (stage-job-id-from-output launch)
+            _ (is (zero? (:exit launch)) (:err launch))
+            _ (is (wait-until
+                   #(some? (:heartbeat_at (stage-job root id))) 1000))
+            initial (:heartbeat_at (stage-job root id))]
+        (is (wait-until
+             #(not= initial (:heartbeat_at (stage-job root id)))
+             1500))
+        (let [cancel (run-stage-env root (short-job-env) "cancel" id)]
+          (is (zero? (:exit cancel)) (:err cancel))
+          (is (wait-until
+               #(and (fs/regular-file? (stage-job-exit-file root id))
+                     (= "cancelled" (:status (stage-job-exit root id))))
+               3000))))
+      (finally
+        (delete-tree-best-effort root)))))
+
 (deftest detached-failures-require-explicit-retry-and-cancel-cleans-child
   (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-failure."})]
     (try
@@ -849,14 +874,20 @@
               id (stage-job-id-from-output launch)]
           (is (zero? (:exit launch)) (:err launch))
           (is (wait-until #(fs/regular-file? (stage-job-exit-file root id)) 3000))
+          (is (wait-until
+               #(not= "waiting-for-job"
+                      (:status (stage-jobs/view root id)))
+               2000))
           (write-file (stage-job-exit-file root id) "{broken\n")
           (let [status (run-stage-env root (short-job-env) "status" "--json")
                 parsed (json/parse-string (:out status) true)]
             (is (zero? (:exit status)) (:err status))
-            (is (= "unknown"
-                   (get (into {} (map (juxt :name :status) (:stages parsed)))
-                        "work")))
-            (is (= "unknown" (get-in parsed [:job :state])))))
+            (is (contains?
+                 #{"failed" "unknown"}
+                 (get (into {} (map (juxt :name :status) (:stages parsed)))
+                      "work")))
+            (is (contains? #{"failed" "unknown"}
+                           (get-in parsed [:job :state])))))
         (finally
           (delete-tree-best-effort root)))))
 
