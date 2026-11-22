@@ -54,6 +54,13 @@ project reaches `Ask Claude to do anything` or its equivalent ready marker,
 and the detached stage reports `waiting-for-job`, completes, wakes once, and
 returns the project to idle without promoting another card.
 
+Live acceptance against only `saibill-detached-smoke` selected
+`Yes, I trust this folder`, reached the rotating Claude composer placeholder,
+ran one detached smoke command for one second, recorded successful evidence,
+delivered its completion request exactly once, moved its sole card to `done`,
+and left the project idle. The smoke agent session and staging files were then
+removed; no other project or Family runtime was restarted.
+
 ## Operator acceptance
 
 None.

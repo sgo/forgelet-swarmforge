@@ -367,6 +367,9 @@
     (or (str/includes? text "esc to interrupt")
         (str/includes? text "waiting for background terminal"))))
 
+(def claude-composer-re
+  #"(?m)^\s*❯[\s\u00A0]+Try[\s\u00A0]+\"")
+
 (declare request-in-composer?)
 
 (defn ready?
@@ -381,6 +384,8 @@
     (and (not (busy? text))
          (or (str/includes? text ready-marker)
              (str/includes? text "Ask Codex to do anything")
+             (str/includes? text "Ask Claude to do anything")
+             (re-find claude-composer-re text)
              (and request-id
                   (request-in-composer? root request-id)))))))
 
