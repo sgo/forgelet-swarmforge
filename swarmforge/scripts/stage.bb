@@ -45,12 +45,179 @@
 (defn usage []
   (println usage-text))
 
+(def stage-outcome-prefix "STAGE_OUTCOME_JSON:")
+(def stage-outcome-version "forgelet.stage.outcome/v1")
+(def ^:dynamic *outcome-context* (atom {}))
+
+(def outcome-details
+  {"STAGE_OK"
+   ["success" "Continue with the returned stage state."]
+   "STAGE_CONFIG_MISSING"
+   ["failed" "Restore stages.edn or pass --root to the managed project."]
+   "STAGE_CONFIG_INVALID"
+   ["failed" "Repair the stage configuration and retry the same command."]
+   "STAGE_UNKNOWN"
+   ["failed" "Use one of the stage names returned by stage list."]
+   "STAGE_BLOCKED"
+   ["blocked" "Run or reconcile the named prerequisite stages in order."]
+   "STAGE_CARD_MISSING"
+   ["failed" "Route or restore exactly one active board card for this project."]
+   "STAGE_CARD_AMBIGUOUS"
+   ["failed" "Close or queue extra cards so exactly one active card remains."]
+   "STAGE_CARD_INVALID"
+   ["failed" "Repair the active card row and task_id, then retry."]
+   "STAGE_SPEC_MISSING"
+   ["failed" "Propose and approve the current spec before running the gate."]
+   "STAGE_SPEC_PENDING"
+   ["approval-required" "Approve, reject or explicitly replace the pending spec."]
+   "STAGE_SPEC_CHANGED"
+   ["failed" "Propose the changed spec again and obtain a fresh approval."]
+   "STAGE_APPROVAL_INVALID"
+   ["approval-required" "Use a fresh pending proposal and the operator's own approval words."]
+   "STAGE_INPUT_INVALID"
+   ["failed" "Correct the command input and retry."]
+   "STAGE_REPORT_INVALID"
+   ["failed" "Repair the bounded task report and retry completion."]
+   "STAGE_JOB_ACTIVE"
+   ["blocked" "Inspect the active job and wait for its completion wake."]
+   "STAGE_JOB_ORPHANED"
+   ["blocked" "Reconcile or retire the orphaned job through its owning task."]
+   "STAGE_JOB_FAILED"
+   ["failed" "Inspect the failed job and retry it explicitly."]
+   "STAGE_JOB_TIMED_OUT"
+   ["timed-out" "Inspect the timeout and retry explicitly."]
+   "STAGE_JOB_CANCELLED"
+   ["cancelled" "Start a new explicit retry when ready."]
+   "STAGE_JOB_UNKNOWN"
+   ["unknown" "Inspect identity and state; do not start a duplicate job."]
+   "STAGE_JOB_NOT_FOUND"
+   ["failed" "Use a current job id from stage jobs."]
+   "STAGE_CANCEL_NOT_ALLOWED"
+   ["failed" "Only a running job with matching process identity can be cancelled."]
+   "STAGE_RETRY_NOT_ALLOWED"
+   ["failed" "Retry only a failed, timed-out, cancelled, interrupted or unknown job."]
+   "STAGE_EVIDENCE_MISSING"
+   ["failed" "Produce the required evidence and rerun the gate."]
+   "STAGE_COMMAND_FAILED"
+   ["failed" "Inspect the command failure and correct the underlying gate."]
+   "STAGE_TREE_DIRTY"
+   ["failed" "Commit the reviewed working tree, then retry completion."]
+   "STAGE_HEAD_MISSING"
+   ["failed" "Create the project's initial commit before completion."]
+   "STAGE_NOT_CURRENT"
+   ["stale" "Run the named stale stages and record current evidence."]
+   "STAGE_HELPER_FAILED"
+   ["failed" "Inspect the retained human diagnostic and correct the stage request."]})
+
+(defn bounded-outcome-text [value maximum]
+  (let [text (-> (str (or value ""))
+                 (str/replace #"(?<![\p{L}\p{N}_+.-])(?:~|/(?:Users|home|private|var|tmp|opt|Volumes|srv|Applications|Library|usr|etc|bin))/[^\s)\]},>]+"
+                              "[redacted-path]")
+                 (str/replace #"\b(?:gh[pousr]_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|sk-[A-Za-z0-9_-]{10,}|xox[baprs]-[A-Za-z0-9-]{10,}|Bearer\s+[A-Za-z0-9._~+/=-]{10,})\b"
+                              "[redacted-token]")
+                 (str/replace #"[\p{Cc}\p{Cf}]" " ")
+                 (str/replace #"\s+" " ")
+                 str/trim)]
+    (subs text 0 (min maximum (count text)))))
+
+(defn outcome-list [text prefix]
+  (some-> (re-find (re-pattern (str prefix "(.+)$")) text)
+          second
+          (str/split #",\s*")
+          vec
+          not-empty))
+
+(defn classify-stage-outcome [message]
+  (cond
+    (str/includes? message "No stages.edn") "STAGE_CONFIG_MISSING"
+    (str/includes? message "No :stages") "STAGE_CONFIG_INVALID"
+    (or (str/includes? message "required deploy stage")
+        (str/includes? message "must not be optional")
+        (str/includes? message "Invalid spec approval mode")) "STAGE_CONFIG_INVALID"
+    (str/includes? message "Unknown stage:") "STAGE_UNKNOWN"
+    (str/includes? message "is blocked by:") "STAGE_BLOCKED"
+    (str/includes? message "More than one active card") "STAGE_CARD_AMBIGUOUS"
+    (str/includes? message "Could not select the routed board card") "STAGE_CARD_MISSING"
+    (str/includes? message "active card") "STAGE_CARD_INVALID"
+    (str/includes? message "already pending") "STAGE_SPEC_PENDING"
+    (or (str/includes? message "No current approved proposal")
+        (str/includes? message "No proposal ")) "STAGE_SPEC_MISSING"
+    (or (str/includes? message "spec changed since")
+        (str/includes? message "Spec changed since")) "STAGE_SPEC_CHANGED"
+    (or (str/includes? message "single-use")
+        (str/includes? message "operator's own words")
+        (str/includes? message "No spec files found")) "STAGE_APPROVAL_INVALID"
+    (str/includes? message "orphaned stage job") "STAGE_JOB_ORPHANED"
+    (str/includes? message " is timed-out") "STAGE_JOB_TIMED_OUT"
+    (str/includes? message " is cancelled") "STAGE_JOB_CANCELLED"
+    (str/includes? message " is unknown") "STAGE_JOB_UNKNOWN"
+    (str/includes? message "retry explicitly") "STAGE_JOB_FAILED"
+    (str/includes? message "Only a failed") "STAGE_RETRY_NOT_ALLOWED"
+    (str/includes? message "is not running") "STAGE_CANCEL_NOT_ALLOWED"
+    (str/includes? message "refusing cancellation") "STAGE_CANCEL_NOT_ALLOWED"
+    (str/includes? message "Unknown stage job") "STAGE_JOB_NOT_FOUND"
+    (str/includes? message "Evidence missing") "STAGE_EVIDENCE_MISSING"
+    (str/includes? message "working tree is not committed") "STAGE_TREE_DIRTY"
+    (str/includes? message "No HEAD commit") "STAGE_HEAD_MISSING"
+    (str/includes? message "Stages not current") "STAGE_NOT_CURRENT"
+    (or (str/includes? message "Task report")
+        (str/includes? message "Operator acceptance")) "STAGE_REPORT_INVALID"
+    (or (str/includes? message "Usage:")
+        (str/includes? message "Unknown option")
+        (str/includes? message " needs a value")
+        (str/includes? message "Stage timeout")
+        (str/includes? message "spec stage needs")) "STAGE_INPUT_INVALID"
+    (str/includes? message "Stage command failed") "STAGE_COMMAND_FAILED"
+    :else "STAGE_HELPER_FAILED"))
+
+(defn stage-outcome-envelope [status code reason remediation exit-code]
+  (let [context @*outcome-context*
+        [default-status default-remediation] (get outcome-details code
+                                                    (get outcome-details "STAGE_HELPER_FAILED"))]
+    (cond-> {:version stage-outcome-version
+             :status (or status default-status)
+             :code code
+             :reason (bounded-outcome-text reason 600)
+             :remediation (bounded-outcome-text
+                           (or remediation default-remediation) 400)
+             :exit_code exit-code}
+      (:project context) (assoc :project (:project context))
+      (:card context) (assoc :card (:card context))
+      (:stage context) (assoc :stage (:stage context))
+      (:job_id context) (assoc :job_id (:job_id context))
+      (:current_status context) (assoc :current_status (:current_status context))
+      (seq (:missing context)) (assoc :missing (vec (take 20 (:missing context)))))))
+
+(defn emit-stage-outcome! [stream outcome]
+  (binding [*out* stream]
+    (println (str stage-outcome-prefix " "
+                  (json/generate-string outcome {:pretty false})))))
+
 (defn exit! [status & messages]
-  (doseq [message messages]
-    (when message
-      (binding [*out* *err*]
-        (println message))))
+  (let [reason (->> messages (remove nil?) (map str) (str/join " "))
+        code (classify-stage-outcome reason)]
+    (doseq [message messages]
+      (when message
+        (binding [*out* *err*]
+          (println message))))
+    (binding [*out* *err*]
+      (emit-stage-outcome! *out*
+                           (stage-outcome-envelope
+                            nil code reason nil status))))
   (System/exit status))
+
+(defn emit-stage-success! [result]
+  (emit-stage-outcome!
+   *err*
+   (stage-outcome-envelope
+    "success" "STAGE_OK" "stage command completed successfully" nil 0)))
+
+(defn outcome-card [card]
+  (when (map? card)
+    (cond-> {:name (bounded-outcome-text (:name card) 160)}
+      (:id card) (assoc :id (bounded-outcome-text (:id card) 180))
+      (:display card) (assoc :display (bounded-outcome-text (:display card) 200))
+      (:lane card) (assoc :lane (bounded-outcome-text (:lane card) 80)))))
 
 (defn now []
   (str (Instant/now)))
@@ -326,7 +493,9 @@
     (when-not (map? card)
       (exit! 1 (str "Could not select the routed board card from: "
                     (str/join ", " (map :name active)))))
-    (assoc card :display (or (:display card) (:name card)))))
+    (let [selected (assoc card :display (or (:display card) (:name card)))]
+      (swap! *outcome-context* assoc :card (outcome-card selected))
+      selected)))
 
 (defn hydrate-state-card [root config state]
   (if (:card state)
@@ -2091,38 +2260,61 @@
           state (reconcile-stage-jobs!
                  root config
                  (hydrate-state-card root config
-                                     (load-state root (:task config))))]
-      (case (first args)
-        "list" (list! root config state)
-        "check" (if-let [name (second args)]
-                  (check! root config state name options)
-                  (exit! 1 "Usage: stage check <name>"))
-        "jobs" (jobs! root (:json options))
-        "job" (if-let [id (second args)]
-                (job-status! root id (:json options))
-                (exit! 1 "Usage: stage job <job-id>"))
-        "cancel" (if-let [id (second args)]
-                   (cancel-job! root id)
-                   (exit! 1 "Usage: stage cancel <job-id>"))
-        "retry" (if-let [id (second args)]
-                  (retry-job! root config state id options)
-                  (exit! 1 "Usage: stage retry <job-id>"))
-        "propose" (let [[_ kind & files] args]
-                    (if (and (= "spec" kind) (seq files))
-                      (propose! root config state files (:replace options))
-                      (exit! 1 "Usage: stage propose spec <file>... [--replace]")))
-        "approve" (if-let [id (second args)]
-                    (approve! root config state id (:words options))
-                    (exit! 1 "Usage: stage approve <proposal> --words \"<words>\""))
-        "reject" (if-let [id (second args)]
-                   (reject! root config state id (:words options))
-                   (exit! 1 "Usage: stage reject <proposal> --words \"<words>\""))
-        "complete" (complete! root config state)
-        "status" (if (:json options)
-                   (println (status-json root config state))
-                   (list! root config state))
-        "help" (usage)
-        (usage))))))
+                                     (load-state root (:task config))))
+          command (first args)
+          context (atom {:project (bounded-outcome-text (:task config) 160)
+                         :card (outcome-card (:card state))})]
+      (binding [*outcome-context* context]
+        (let [result
+              (case command
+                "list" (list! root config state)
+                "check" (if-let [name (second args)]
+                          (do
+                            (swap! context assoc :stage
+                                   (bounded-outcome-text name 120))
+                            (check! root config state name options))
+                          (exit! 1 "Usage: stage check <name>"))
+                "jobs" (jobs! root (:json options))
+                "job" (if-let [id (second args)]
+                        (do
+                          (swap! context assoc :job_id
+                                 (bounded-outcome-text id 180))
+                          (job-status! root id (:json options)))
+                        (exit! 1 "Usage: stage job <job-id>"))
+                "cancel" (if-let [id (second args)]
+                           (do
+                             (swap! context assoc :job_id
+                                    (bounded-outcome-text id 180))
+                             (cancel-job! root id))
+                           (exit! 1 "Usage: stage cancel <job-id>"))
+                "retry" (if-let [id (second args)]
+                          (do
+                            (swap! context assoc :job_id
+                                   (bounded-outcome-text id 180))
+                            (retry-job! root config state id options))
+                          (exit! 1 "Usage: stage retry <job-id>"))
+                "propose" (let [[_ kind & files] args]
+                            (if (and (= "spec" kind) (seq files))
+                              (propose! root config state files (:replace options))
+                              (exit! 1 "Usage: stage propose spec <file>... [--replace]")))
+                "approve" (if-let [id (second args)]
+                            (approve! root config state id (:words options))
+                            (exit! 1 "Usage: stage approve <proposal> --words \"<words>\""))
+                "reject" (if-let [id (second args)]
+                           (reject! root config state id (:words options))
+                           (exit! 1 "Usage: stage reject <proposal> --words \"<words>\""))
+                "complete" (complete! root config state)
+                "status" (if (:json options)
+                           (println (status-json root config state))
+                           (list! root config state))
+                "help" (usage)
+                (usage))]
+          (when (contains? #{"list" "check" "jobs" "job" "cancel"
+                            "retry" "propose" "approve" "reject" "complete"
+                            "status"}
+                           command)
+            (emit-stage-success! result))
+          result))))))
 
 (when (= (str *file*) (System/getProperty "babashka.file"))
   (binding [*operation-cache* (atom {})]

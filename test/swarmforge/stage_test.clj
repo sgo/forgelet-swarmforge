@@ -295,6 +295,83 @@
       (fs/regular-file? (fs/path root pattern)) [(fs/path root pattern)]
       :else [])))
 
+(declare parse-stage-outcome result-outcome)
+
+(def outcome-code-fixtures
+  [["No stages.edn in project" "STAGE_CONFIG_MISSING"]
+   ["No :stages in file" "STAGE_CONFIG_INVALID"]
+   ["Unknown stage: code" "STAGE_UNKNOWN"]
+   ["Stage code is blocked by: spec" "STAGE_BLOCKED"]
+   ["More than one active card: a, b" "STAGE_CARD_AMBIGUOUS"]
+   ["Could not select the routed board card" "STAGE_CARD_MISSING"]
+   ["Cannot advance spec approval: active card a is not on the board"
+    "STAGE_CARD_INVALID"]
+   ["No current approved proposal for the active spec bundle" "STAGE_SPEC_MISSING"]
+   ["Spec proposal(s) already pending: spec-1" "STAGE_SPEC_PENDING"]
+   ["The spec changed since it was proposed; propose it again" "STAGE_SPEC_CHANGED"]
+   ["Proposal spec-1 is already approved; approval is single-use"
+    "STAGE_APPROVAL_INVALID"]
+   ["Stage cannot start while orphaned stage job old is unknown"
+    "STAGE_JOB_ORPHANED"]
+   ["stage job old is failed; inspect it and retry explicitly" "STAGE_JOB_FAILED"]
+   ["stage job old is timed-out; inspect it and retry explicitly"
+    "STAGE_JOB_TIMED_OUT"]
+   ["stage job old is cancelled; inspect it and retry explicitly"
+    "STAGE_JOB_CANCELLED"]
+   ["stage job old is unknown; inspect it and retry explicitly" "STAGE_JOB_UNKNOWN"]
+   ["Unknown stage job: old" "STAGE_JOB_NOT_FOUND"]
+   ["Stage job old is not running" "STAGE_CANCEL_NOT_ALLOWED"]
+   ["Only a failed, timed-out, cancelled, interrupted or unknown stage job can be retried"
+    "STAGE_RETRY_NOT_ALLOWED"]
+   ["Evidence missing: target/report.json" "STAGE_EVIDENCE_MISSING"]
+   ["The working tree is not committed:" "STAGE_TREE_DIRTY"]
+   ["No HEAD commit; commit the project first" "STAGE_HEAD_MISSING"]
+   ["Stages not current: code, clean" "STAGE_NOT_CURRENT"]
+   ["Task report must include both sections" "STAGE_REPORT_INVALID"]
+   ["Unknown option: --bad" "STAGE_INPUT_INVALID"]
+   ["Stage command failed: command" "STAGE_COMMAND_FAILED"]
+   ["unclassified helper problem" "STAGE_HELPER_FAILED"]])
+
+(deftest stage-outcomes-are-stable-bounded-and-transport-neutral
+  (let [root (fixture)]
+    (try
+      (let [success (run-stage root "status" "--json")
+            unknown (run-stage root "check" "not-a-stage")
+            success-outcome (result-outcome success)
+            unknown-outcome (result-outcome unknown)]
+        (is (zero? (:exit success)) (:err success))
+        (is (= "success" (:status success-outcome)))
+        (is (= "STAGE_OK" (:code success-outcome)))
+        (is (not (zero? (:exit unknown))))
+        (is (= "STAGE_UNKNOWN" (:code unknown-outcome)))
+        (is (= 1 (:exit_code unknown-outcome)))
+        (is (str/includes? (:err unknown) "Unknown stage: not-a-stage"))
+        (is (seq (:remediation unknown-outcome))))
+
+      (doseq [[message expected] outcome-code-fixtures]
+        (is (= expected (stage-call "classify-stage-outcome" message))
+            message))
+
+      (let [envelope
+            (stage-call
+             "stage-outcome-envelope"
+             nil
+             "STAGE_EVIDENCE_MISSING"
+             (str "/Users/private/project token ghp_1234567890abcdefghijkl "
+                  (apply str (repeat 1000 "x")))
+             nil
+             1)]
+        (is (= "forgelet.stage.outcome/v1" (:version envelope)))
+        (is (<= (count (:reason envelope)) 600))
+        (is (not (str/includes? (:reason envelope) "/Users/private")))
+        (is (not (str/includes? (:reason envelope) "ghp_"))))
+
+      (is (nil? (parse-stage-outcome
+                 "STAGE_OUTCOME_JSON: {\"version\":\"wrong\"}")))
+      (is (nil? (parse-stage-outcome "STAGE_OUTCOME_JSON: not-json")))
+      (finally
+        (fs/delete-tree root)))))
+
 (deftest rooted-input-expansion-preserves-declared-path-semantics
   (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-inputs."})]
     (try
@@ -398,6 +475,27 @@
                    :out
                    (json/parse-string true))]
     (into {} (map (juxt :name :status)) (:stages status))))
+
+(def outcome-prefix "STAGE_OUTCOME_JSON:")
+
+(defn parse-stage-outcome [text]
+  (when-let [line (some #(when (str/starts-with? % outcome-prefix) %)
+                        (str/split-lines (or text "")))]
+    (try
+      (let [value (json/parse-string
+                   (str/trim (subs line (count outcome-prefix)))
+                   true)]
+        (when (and (= "forgelet.stage.outcome/v1" (:version value))
+                   (string? (:status value))
+                   (string? (:code value))
+                   (string? (:reason value))
+                   (string? (:remediation value))
+                   (integer? (:exit_code value)))
+          value))
+      (catch Exception _ nil))))
+
+(defn result-outcome [result]
+  (parse-stage-outcome (str (:out result) "\n" (:err result))))
 
 (defn run-scoped-stages! [root]
   (run-stage root "propose" "spec" "spec.md" "features/extra.feature")
