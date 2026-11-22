@@ -526,6 +526,9 @@
         (record-login-required! root)
         state)
 
+      (= :busy state)
+      state
+
       :else
       (let [message (str/trim (or (visible-pane root) ""))]
         (stop-agent! root)
@@ -557,7 +560,8 @@
           (Thread/sleep *settle-prompt-delay-ms*)
           (recur (+ waited *settle-prompt-delay-ms*)))
 
-        (>= waited *settle-timeout-ms*) :failed
+        (>= waited *settle-timeout-ms*)
+        (if (busy? text) :busy :failed)
 
         :else
         (do
