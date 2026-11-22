@@ -38,6 +38,12 @@
 (defn cancel-file [root id]
   (fs/path (jobs-dir root) (str id ".cancel")))
 
+(defn supervisor-socket [id]
+  (fs/path (System/getProperty "java.io.tmpdir")
+           (str "sf-stage-"
+                (subs id (max 0 (- (count id) 16)))
+                ".sock")))
+
 (defn atomic-write! [path text]
   (let [path (fs/path path)
         parent (or (fs/parent path) (fs/path "."))

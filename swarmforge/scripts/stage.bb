@@ -794,17 +794,19 @@
   (let [bb (or (fs/which "bb") (exit! 1 "bb is not on PATH"))
         stage-script (fs/absolutize *file*)
         control (stage-jobs/control-log-file root id)
-        darwin? (= "Darwin" (System/getProperty "os.name"))
-        label (str "com.forgelet.stage-job." id)
+        socket (stage-jobs/supervisor-socket id)
+        session (str "supervise-" id)
+        command (str "exec " (shell-quote bb) " "
+                     (shell-quote stage-script)
+                     " _supervise-stage-job --root " (shell-quote root)
+                     " --job-id " (shell-quote id)
+                     " >> " (shell-quote control)
+                     " 2>&1 < /dev/null")
         result
-        (if darwin?
-          (sh/sh "launchctl" "submit"
-                 "-l" label
-                 "-o" (str control)
-                 "-e" (str control)
-                 "--" (str bb) (str stage-script)
-                 "_supervise-stage-job" "--root" (str root)
-                 "--job-id" id)
+        (if (fs/which "tmux")
+          (sh/sh "tmux" "-S" (str socket)
+                 "new-session" "-d" "-s" session
+                 "-c" (str root) command)
           (let [command (str "nohup " (shell-quote bb) " "
                              (shell-quote stage-script)
                              " _supervise-stage-job --root " (shell-quote root)
@@ -815,11 +817,11 @@
     (fs/create-dirs (fs/parent control))
     (when-not (zero? (:exit result))
       (throw (ex-info "Could not launch stage supervisor"
-                      {:exit 1 :result result})))))
-
-(defn release-stage-supervisor! [id]
-  (when (= "Darwin" (System/getProperty "os.name"))
-    (sh/sh "launchctl" "remove" (str "com.forgelet.stage-job." id))))
+                      {:exit 1 :result result})))
+    (stage-jobs/update-job!
+     root id #(assoc %
+                     :supervisor_session session
+                     :supervisor_socket (str socket)))))
 
 (defn launch-stage-job!
   [root config state stage tree fingerprint options]
@@ -1965,8 +1967,7 @@
           id (or (option-value args "--job-id")
                  (exit! 1 "Supervisor needs --job-id"))]
       (binding [*operation-cache* (atom {})]
-        (supervise-stage-job! root id)
-        (release-stage-supervisor! id)))
+        (supervise-stage-job! root id)))
     (if (some #{"--help" "-h"} args)
     (usage)
     (let [{:keys [options args]} (parse-args args)
