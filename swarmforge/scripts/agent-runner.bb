@@ -380,6 +380,22 @@
   (when (claude-login-required? text)
     "Claude is not logged in. Run /login in the project agent terminal, then reopen the project."))
 
+(defn login-required-file [root]
+  (fs/path root ".swarmforge" "agent-login-required"))
+
+(defn record-login-required! [root]
+  (let [file (login-required-file root)
+        diagnostic (str "Claude is not logged in. Run /login in the attached "
+                        "project agent terminal.")]
+    (when-not (fs/regular-file? file)
+      (fs/create-dirs (fs/parent file))
+      (spit (str file) (str diagnostic "\n"))
+      (println diagnostic))
+    diagnostic))
+
+(defn clear-login-required! [root]
+  (fs/delete-if-exists (login-required-file root)))
+
 (declare request-in-composer?)
 
 (defn ready?
@@ -458,60 +474,74 @@
     (str/includes? (or text "") "Trust this folder?")
     ["1" "C-m"]))
 
-(declare settle-agent-session!)
+(declare settle-agent-session-state!)
 
 (defn start-agent-session! [root command]
-  (when-not (session? root)
-    (fs/create-dirs (fs/path root ".swarmforge"))
-    (when (and (fs/exists? (socket-file root))
-               (not (fs/regular-file? (socket-file root))))
-      (delete-socket-file! root))
-    (spit (str (socket-file root)) (str (agent-socket root) "\n"))
-    (let [env-loader (fs/path (fs/parent *file*)
-                              "load-project-runtime-env.sh")
-          _ (when-not (fs/regular-file? env-loader)
-              (exit! 1 (str "Project runtime environment loader not found: "
-                            env-loader)))
-          validation (process/sh {:continue true} "bash" (str env-loader) "--check")
-          _ (when-not (zero? (:exit validation))
-              (exit! 1 "Project runtime environment failed:"
-                      (str/trim (str (:err validation) (:out validation)))))
-          terminal (normalized-terminal)
-          result (tmux root "new-session" "-d" "-s" session-name
-                       "-c" (str root)
-                       (str "export PATH=" (sq (str (fs/path root ".swarmforge" "bin")
-                                                    ":"
-                                                    (fs/path root "swarmforge" "scripts")
-                                                    ":"
-                                                    (or (System/getenv "PATH") "")))
-                            "; export TERM=" (sq terminal)
-                            "; export SWARMFORGE_TMUX_TERM=" (sq terminal)
-                            "; unset NO_COLOR"
-                            "; exec bash " (sq (str env-loader)) " "
-                            (sq command)))]
-      (when-not (zero? (:exit result))
-        (exit! 1 "Could not start the agent session: " (:err result))))
-    (when-not (settle-agent-session! root)
-      (let [message (str/trim (or (visible-pane root) ""))]
-        (stop-agent! root)
-        (exit! 1 (or (claude-login-required-diagnostic message)
-                     "Agent session did not become ready:")
-                (when-not (str/blank? message) message)))))
+  (if-not (session? root)
+    (do
+      (fs/create-dirs (fs/path root ".swarmforge"))
+      (when (and (fs/exists? (socket-file root))
+                 (not (fs/regular-file? (socket-file root))))
+        (delete-socket-file! root))
+      (spit (str (socket-file root)) (str (agent-socket root) "\n"))
+      (let [env-loader (fs/path (fs/parent *file*)
+                                "load-project-runtime-env.sh")
+            _ (when-not (fs/regular-file? env-loader)
+                (exit! 1 (str "Project runtime environment loader not found: "
+                              env-loader)))
+            validation (process/sh {:continue true} "bash" (str env-loader) "--check")
+            _ (when-not (zero? (:exit validation))
+                (exit! 1 "Project runtime environment failed:"
+                        (str/trim (str (:err validation) (:out validation)))))
+            terminal (normalized-terminal)
+            result (tmux root "new-session" "-d" "-s" session-name
+                         "-c" (str root)
+                         (str "export PATH=" (sq (str (fs/path root ".swarmforge" "bin")
+                                                      ":"
+                                                      (fs/path root "swarmforge" "scripts")
+                                                      ":"
+                                                      (or (System/getenv "PATH") "")))
+                              "; export TERM=" (sq terminal)
+                              "; export SWARMFORGE_TMUX_TERM=" (sq terminal)
+                              "; unset NO_COLOR"
+                              "; exec bash " (sq (str env-loader)) " "
+                              (sq command)))]
+        (when-not (zero? (:exit result))
+          (exit! 1 "Could not start the agent session: " (:err result))))))
   ;; Also correct a session that predates the project-name behavior. The
   ;; persistent session survives a relay restart, so naming only a new session
   ;; would leave an upgraded project showing "codex" until it was killed.
-  (name-agent-window! root))
+  (name-agent-window! root)
+  (let [state (if (session? root)
+                (settle-agent-session-state! root)
+                :failed)]
+    (cond
+      (= :ready state)
+      (do
+        (clear-login-required! root)
+        state)
 
-(defn settle-agent-session! [root]
+      (= :login-required state)
+      (do
+        (record-login-required! root)
+        state)
+
+      :else
+      (let [message (str/trim (or (visible-pane root) ""))]
+        (stop-agent! root)
+        (exit! 1 "Agent session did not become ready:"
+                (when-not (str/blank? message) message))))))
+
+(defn settle-agent-session-state! [root]
   (loop [waited 0]
     (let [text (or (visible-pane root) "")]
       (cond
-        (claude-login-required? text) false
+        (claude-login-required? text) :login-required
 
-        (ready? root (some-> (pending-request root) :id)) true
+        (ready? root (some-> (pending-request root) :id)) :ready
 
         (str/includes? text "load-project-runtime-env:")
-        false
+        :failed
 
         (folder-trust-choice text)
         (do
@@ -527,12 +557,15 @@
           (Thread/sleep *settle-prompt-delay-ms*)
           (recur (+ waited *settle-prompt-delay-ms*)))
 
-        (>= waited *settle-timeout-ms*) false
+        (>= waited *settle-timeout-ms*) :failed
 
         :else
         (do
           (Thread/sleep *settle-iteration-ms*)
           (recur (+ waited *settle-iteration-ms*)))))))
+
+(defn settle-agent-session! [root]
+  (= :ready (settle-agent-session-state! root)))
 
 (defn stop-agent! [root]
   (if (session? root)
@@ -723,42 +756,43 @@
       (println "request" id "already delivered; monitoring the agent"))))
 
 (defn run-once! [root agent-command options]
-  (start-agent-session! root agent-command)
-  (settle-agent-session! root)
-  (if-let [request (pending-request root)]
-    (let [id (:id request)
-          state (delivery-state root id)]
-      (if-not (ready? root id)
-        (do
-          (when state
-            (note-activity! root id state (or (visible-pane root) "")))
-          (println "request" id "waits: the agent is still in a turn"))
-        (do
-          (cond
-            (request-in-composer? root id)
+  (let [settlement (start-agent-session! root agent-command)]
+    (if (= :login-required settlement)
+      (println "work requests are held until Claude login completes")
+      (if-let [request (pending-request root)]
+        (let [id (:id request)
+              state (delivery-state root id)]
+          (if-not (ready? root id)
             (do
-              (println "submitting request already in the composer:" id)
-              (when (deliver-request! root request)
-                (mark-delivered! root request (or (visible-pane root) ""))))
-
-            state
-            (handle-delivered-request! root request options)
-
-            (request-visible? root id)
+              (when state
+                (note-activity! root id state (or (visible-pane root) "")))
+              (println "request" id "waits: the agent is still in a turn"))
             (do
-              (println "request already visible in the transcript:" id)
-              (mark-delivered! root request (or (visible-pane root) "")))
-
-            :else
-            (do
-              (println "request" id)
-              (if (deliver-request! root request)
+              (cond
+                (request-in-composer? root id)
                 (do
-                  (mark-delivered! root request (or (visible-pane root) ""))
-                  (println "delivered" id))
-                (println "paste did not submit; the next pass will submit it:"
-                         id)))))))
-    (println "no pending requests")))
+                  (println "submitting request already in the composer:" id)
+                  (when (deliver-request! root request)
+                    (mark-delivered! root request (or (visible-pane root) ""))))
+
+                state
+                (handle-delivered-request! root request options)
+
+                (request-visible? root id)
+                (do
+                  (println "request already visible in the transcript:" id)
+                  (mark-delivered! root request (or (visible-pane root) "")))
+
+                :else
+                (do
+                  (println "request" id)
+                  (if (deliver-request! root request)
+                    (do
+                      (mark-delivered! root request (or (visible-pane root) ""))
+                      (println "delivered" id))
+                    (println "paste did not submit; the next pass will submit it:"
+                             id)))))))
+        (println "no pending requests")))))
 
 (defn -main [& args]
   (let [options (parse-args args)]
