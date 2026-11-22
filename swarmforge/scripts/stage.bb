@@ -56,6 +56,10 @@
    ["waiting-for-job" "End the turn without polling; a completion wake will follow."]
    "STAGE_JOB_COMPLETED"
    ["completed" "Continue with the recorded stage result."]
+   "STAGE_JOB_COMPLETION_PENDING"
+   ["completed-unconsumed" "Run status or check after the completion wake is consumed."]
+   "STAGE_JOB_RETIRED"
+   ["retired" "Use stage jobs to select the replacement attempt."]
    "STAGE_CANCELLATION_REQUESTED"
    ["waiting-for-job" "Wait for the supervisor's durable cancellation exit."]
    "STAGE_CONFIG_MISSING"
@@ -222,6 +226,24 @@
           "completed"
           ["completed" "STAGE_JOB_COMPLETED"
            "stage job completed and was reconciled"]
+          "completed-unconsumed"
+          ["completed-unconsumed" "STAGE_JOB_COMPLETION_PENDING"
+           "stage job completion is waiting for reconciliation"]
+          "failed"
+          ["failed" "STAGE_JOB_FAILED"
+           "stage job failed and requires explicit retry"]
+          "timed-out"
+          ["timed-out" "STAGE_JOB_TIMED_OUT"
+           "stage job timed out and requires explicit retry"]
+          "cancelled"
+          ["cancelled" "STAGE_JOB_CANCELLED"
+           "stage job was cancelled"]
+          "unknown"
+          ["unknown" "STAGE_JOB_UNKNOWN"
+           "stage job identity or state is unknown"]
+          "retired"
+          ["retired" "STAGE_JOB_RETIRED"
+           "stage job attempt was retired"]
           "cancellation-requested"
           ["waiting-for-job" "STAGE_CANCELLATION_REQUESTED"
            "stage job cancellation was requested"]
