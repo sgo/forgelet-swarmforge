@@ -434,7 +434,10 @@
                    (catch Exception _ nil))]
         (if-not lock
           (f nil)
-          (f lock))))))
+          (try
+            (f lock)
+            (finally
+              (.close lock))))))))
 
 (defn operation-id []
   (str "runtime-upgrade-" (random-uuid)))

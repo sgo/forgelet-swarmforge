@@ -1,8 +1,9 @@
 (ns swarmforge.runtime-upgrade-test
   (:require [babashka.fs :as fs]
+            [babashka.process :as process]
             [cheshire.core :as json]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is use-fixtures]]))
+            [clojure.test :refer [deftest is testing use-fixtures]]))
 
 (def repo-root (fs/cwd))
 (def scripts-dir (fs/path repo-root "swarmforge" "scripts"))
@@ -40,6 +41,47 @@
 
 (defn parse-json [result]
   (json/parse-string (:out result) true))
+
+(defn wait-until [predicate timeout-ms]
+  (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
+    (loop []
+      (cond
+        (predicate) true
+        (> (System/currentTimeMillis) deadline) false
+        :else (do (Thread/sleep 25) (recur))))))
+
+(defn lock-available? [forge]
+  (let [file (fs/path forge ".swarmforge" "runtime-upgrades" "upgrade.lock")]
+    (fs/create-dirs (fs/parent file))
+    (with-open [channel (java.nio.channels.FileChannel/open
+                         file
+                         (into-array [java.nio.file.StandardOpenOption/CREATE
+                                      java.nio.file.StandardOpenOption/WRITE]))]
+      (when-let [lock (try
+                        (.tryLock channel)
+                        (catch Exception _ nil))]
+        (.close lock)
+        true))))
+
+(defn lock-holder-script! [forge]
+  (let [file (fs/path forge "hold-upgrade-lock.bb")]
+    (write-file
+     file
+     (str "#!/usr/bin/env bb\n"
+          "(require '[babashka.fs :as fs])\n"
+          "(let [[forge ready hold-ms] *command-line-args*\n"
+          "      file (fs/path forge \".swarmforge/runtime-upgrades/upgrade.lock\")]\n"
+          "  (fs/create-dirs (fs/parent file))\n"
+          "  (with-open [channel (java.nio.channels.FileChannel/open\n"
+          "                       file\n"
+          "                       (into-array [java.nio.file.StandardOpenOption/CREATE\n"
+          "                                    java.nio.file.StandardOpenOption/WRITE]))]\n"
+          "    (let [lock (.lock channel)]\n"
+          "      (spit ready \"locked\\n\")\n"
+          "      (Thread/sleep (Long/parseLong hold-ms))\n"
+          "      (.close lock))))\n"))
+    (fs/set-posix-file-permissions file "rwxr-xr-x")
+    file))
 
 (defn source-fixture! []
   (let [source (tmp-dir)]
@@ -416,3 +458,55 @@
             body (parse-json result)]
         (is (zero? (:exit result)))
         (is (= "checking" (:status body)))))))
+
+(deftest runtime-upgrade-status-releases-lock-on-every-process-exit-path
+  (let [{:keys [source forge] :as fixture} (forge-fixture!)
+        holder-script (lock-holder-script! forge)
+        ready (fs/path forge "lock-holder.ready")
+        holder (atom nil)]
+    (try
+      (testing "a successful status releases its own lock"
+        (is (= "current" (:status (parse-json (status! fixture {})))))
+        (is (lock-available? forge))
+        (is (= "current" (:status (parse-json (status! fixture {}))))
+            "repeated reads do not observe a stale lock"))
+
+      (testing "an overlapping status reports checking until the lock holder exits"
+        (reset! holder
+                (process/process
+                 {:dir (str forge) :out :string :err :string}
+                 "bb" (str holder-script) (str forge) (str ready) "500"))
+        (is (wait-until #(fs/regular-file? ready) 2000))
+        (let [busy (status! fixture {})]
+          (is (zero? (:exit busy)) (:err busy))
+          (is (= "checking" (:status (parse-json busy)))))
+        (is (zero? (:exit @@holder)) (:err @@holder))
+        (is (wait-until #(lock-available? forge) 1000)))
+
+      (testing "an error status exits and releases the lock"
+        (write-file (fs/path source "get-swarm-forge") "#!/bin/sh\nexit 7\n")
+        (fs/set-posix-file-permissions
+         (fs/path source "get-swarm-forge") "rwxr-xr-x")
+        (let [failed (status! fixture {})]
+          (is (not (zero? (:exit failed))))
+          (is (= "unavailable" (:status (parse-json failed)))))
+        (is (lock-available? forge)))
+
+      (testing "a timed-out status process cannot retain the lock"
+        (write-file (fs/path source "get-swarm-forge")
+                    "#!/bin/sh\nsleep 5\n")
+        (fs/set-posix-file-permissions
+         (fs/path source "get-swarm-forge") "rwxr-xr-x")
+        (let [timed (process/process
+                     {:dir (str forge) :out :string :err :string}
+                     helper "status" "--forge" (str forge)
+                     "--source-layer" (str source)
+                     "--source-commit" source-commit)]
+          (is (wait-until #(not (lock-available? forge)) 2000))
+          (process/destroy-tree timed)
+          @timed
+          (is (wait-until #(lock-available? forge) 2000))))
+      (finally
+        (when-let [holder @holder]
+          (process/destroy-tree holder)
+          (try @holder (catch Exception _ nil)))))))
