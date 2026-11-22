@@ -370,6 +370,16 @@
 (def claude-composer-re
   #"(?m)^\s*❯[\s\u00A0]+Try[\s\u00A0]+\"")
 
+(def claude-login-required-re
+  #"Not logged in\s*·\s*run /login")
+
+(defn claude-login-required? [text]
+  (boolean (re-find claude-login-required-re (or text ""))))
+
+(defn claude-login-required-diagnostic [text]
+  (when (claude-login-required? text)
+    "Claude is not logged in. Run /login in the project agent terminal, then reopen the project."))
+
 (declare request-in-composer?)
 
 (defn ready?
@@ -381,7 +391,8 @@
   ;; request already in the idle composer replaces the placeholder that would
   ;; otherwise say "Ask Codex to do anything", so that request is readiness too.
   (let [text (or (visible-pane root) "")]
-    (and (not (busy? text))
+    (and (not (claude-login-required? text))
+         (not (busy? text))
          (or (str/includes? text ready-marker)
              (str/includes? text "Ask Codex to do anything")
              (str/includes? text "Ask Claude to do anything")
@@ -483,7 +494,8 @@
     (when-not (settle-agent-session! root)
       (let [message (str/trim (or (visible-pane root) ""))]
         (stop-agent! root)
-        (exit! 1 "Agent session did not become ready:"
+        (exit! 1 (or (claude-login-required-diagnostic message)
+                     "Agent session did not become ready:")
                 (when-not (str/blank? message) message)))))
   ;; Also correct a session that predates the project-name behavior. The
   ;; persistent session survives a relay restart, so naming only a new session
@@ -494,6 +506,8 @@
   (loop [waited 0]
     (let [text (or (visible-pane root) "")]
       (cond
+        (claude-login-required? text) false
+
         (ready? root (some-> (pending-request root) :id)) true
 
         (str/includes? text "load-project-runtime-env:")

@@ -31,6 +31,11 @@
        "❯ 1. Open settings\n"
        "  2. Exit\n"))
 
+(def logged-out-pane
+  (str "❯ Try \"create a util logging.py that…\"\n"
+       "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents\n"
+       "  Not logged in · run /login\n"))
+
 (defn settle-with-pane!
   ([initial-pane] (settle-with-pane! initial-pane "Ask Claude to do anything"))
   ([initial-pane ready-text]
@@ -82,7 +87,25 @@
       (is (agent-runner/ready? "/fixture")))
     (with-redefs [agent-runner/visible-pane
                   (constantly "❯ Try \"fix lint errors\"\n")]
-      (is (agent-runner/ready? "/fixture"))))
+      (is (agent-runner/ready? "/fixture")))
+    (with-redefs [agent-runner/visible-pane
+                  (constantly "Ask Claude to do anything\n")]
+      (is (agent-runner/ready? "/fixture")))
+    (with-redefs [agent-runner/visible-pane
+                  (constantly "Ask Codex to do anything\n")]
+      (is (agent-runner/ready? "/fixture")))
+    (with-redefs [agent-runner/visible-pane
+                  (constantly "Try \"not a Claude prompt\"\n")]
+      (is (not (agent-runner/ready? "/fixture")))))
+
+  (testing "the exact logged-out banner fails immediately without keystrokes"
+    (with-redefs [agent-runner/visible-pane (constantly logged-out-pane)]
+      (is (not (agent-runner/ready? "/fixture")))
+      (is (str/includes?
+           (agent-runner/claude-login-required-diagnostic logged-out-pane)
+           "Claude is not logged in")))
+    (is (= {:ready? false :sent []}
+           (settle-with-pane! logged-out-pane))))
 
   (testing "an unrelated safety prompt remains unsent and fails"
     (is (nil? (agent-runner/folder-trust-choice unrelated-prompt)))
