@@ -7,6 +7,8 @@
             [clojure.java.shell :as sh]
             [clojure.string :as str]))
 
+(load-file (str (fs/path (fs/parent *file*) "stage_jobs.bb")))
+
 (def usage-text
   (str "Usage:\n"
        "  agent-runner.bb --root <project> [--agent-command CMD] [--once]\n"
@@ -192,12 +194,17 @@
                             :let [[key value] (str/split line #":\s*" 2)]
                             :when (and key value)]
                         [key value]))
-        file-id (str/replace (fs/file-name file) #"\.request$" "")]
+        file-id (str/replace (fs/file-name file) #"\.request$" "")
+        task-id (or (not-empty (get entries "task_id"))
+                    (some-> (re-find #"(?m)^Task ID:\s*(\S+)\s*$"
+                                     (or body ""))
+                            second))]
     (cond-> {:id (or (get entries "id") file-id)
              :header-id (get entries "id")
              :request-file-id file-id
              :status (get entries "status")
-             :body (or body "")}
+             :body (or body "")
+             :task_id task-id}
       (contains? entries "author")
       (assoc :author (get entries "author"))
 
@@ -305,6 +312,79 @@
         (write-delivery-state! root id updated)
         (println "continuation nudge hold cleared:"
                  (or (:clarification-id previous) (:reason previous)))
+        updated)
+
+      :else
+      state)))
+
+(defn stage-job-matches-card? [job task-id]
+  (boolean
+   (and (string? task-id)
+        (or (= task-id (:card_id job))
+            (= task-id (:card job))
+            (= task-id (:card_name job))))))
+
+(defn matching-stage-job-view [root request]
+  (when-let [task-id (:task_id request)]
+    (->> (stage-jobs/jobs root)
+         (filter #(stage-job-matches-card? % task-id))
+         (map #(stage-jobs/view root (:id %)))
+         (filter stage-jobs/blocking-view?)
+         (sort-by #(str (get-in % [:job :created_at])))
+         last)))
+
+(defn stage-job-hold [view]
+  (when view
+    (let [{:keys [id status live heartbeat_stale]} view
+          job (:job view)
+          base {:job-id id
+                :stage (:stage job)
+                :card-id (or (:card_id job) (:card job))
+                :status status
+                :process-verified (boolean live)
+                :heartbeat-fresh (not heartbeat_stale)}]
+      (cond
+        (and (= "waiting-for-job" status)
+             live
+             (not heartbeat_stale))
+        (assoc base :state "waiting")
+
+        (= "completed-unconsumed" status)
+        (assoc base :state "completion-pending")
+
+        :else
+        (assoc base :state "blocked")))))
+
+(defn update-stage-job-hold! [root id state hold now]
+  (let [previous (:stage-job-hold state)]
+    (cond
+      (= hold previous)
+      state
+
+      hold
+      (let [updated (assoc state :stage-job-hold hold)]
+        (write-delivery-state! root id updated)
+        (case (:state hold)
+          "waiting"
+          (println "continuation nudges hold: waiting for stage job"
+                   (:job-id hold) "(heartbeat fresh)")
+
+          "completion-pending"
+          (println "continuation nudges hold: stage job"
+                   (:job-id hold) "completion awaits reconciliation")
+
+          (println "continuation nudges blocked: stage job"
+                   (:job-id hold) "is" (:status hold)
+                   "- reconcile stage state before continuing"))
+        updated)
+
+      previous
+      (let [updated (-> state
+                        (dissoc :stage-job-hold)
+                        (assoc :last-activity-at now))]
+        (write-delivery-state! root id updated)
+        (println "continuation nudge hold cleared: stage job"
+                 (:job-id previous))
         updated)
 
       :else
@@ -737,12 +817,18 @@
         now (System/currentTimeMillis)
         clarification (clarification-state root)
         state (update-clarification-hold! root id state clarification now)
+        stage-job (matching-stage-job-view root request)
+        state (update-stage-job-hold! root id state
+                                      (stage-job-hold stage-job) now)
         last-activity (long (or (:last-activity-at state) now))
         last-nudge (long (or (:last-nudge-at state) 0))
         idle-ms (* 1000 (long (:idle-nudge-seconds options)))
         cooldown-ms (* 1000 (long (:nudge-cooldown-seconds options)))]
     (cond
       (:clarification-hold state)
+      nil
+
+      (:stage-job-hold state)
       nil
 
       (and (not (busy? text))

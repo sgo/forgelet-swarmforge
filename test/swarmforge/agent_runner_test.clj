@@ -9,6 +9,65 @@
   (fs/create-dirs (fs/parent path))
   (spit (str path) text))
 
+(defn write-stage-job!
+  [root {:keys [id card-id heartbeat-age-ms pid process-start-identity
+                consumed?]
+         :or {heartbeat-age-ms 0
+              consumed? false}}]
+  (let [now (java.time.Instant/now)
+        pid (or pid (.pid (java.lang.ProcessHandle/current)))
+        start-identity (or process-start-identity
+                           (stage-jobs/process-start-identity pid))
+        job {:status "running"
+             :role "agent"
+             :project (str (fs/file-name root))
+             :stage "code"
+             :card card-id
+             :card_name card-id
+             :card_id card-id
+             :requested_lane "spec"
+             :pid pid
+             :command_pid pid
+             :process_start_identity start-identity
+             :command_start_identity start-identity
+             :command_fingerprint (str "fixture-" card-id)
+             :created_at (str now)
+             :heartbeat_at (str (.minusMillis now (long heartbeat-age-ms)))
+             :progress "command 1/1 started"
+             :timeout_seconds 60}]
+    (write-file (stage-jobs/log-file root id) "[stage-job] command 1/1 started\n")
+    (stage-jobs/atomic-write-edn!
+     (stage-jobs/job-file root id)
+     (cond-> (assoc job :id id)
+       consumed? (assoc :consumed_at (str now))))
+    (assoc job :id id)))
+
+(defn write-delivered-request!
+  [root request pane idle-ago-ms]
+  (let [now (System/currentTimeMillis)]
+    (agent-runner/write-delivery-state!
+     root (:id request)
+     {:delivered-at (- now idle-ago-ms)
+      :last-activity-at (- now idle-ago-ms)
+      :pane-digest (agent-runner/pane-digest pane)})))
+
+(defn run-delivered-handler!
+  [root request pane]
+  (let [calls (atom [])]
+    (with-redefs [agent-runner/visible-pane (constantly pane)
+                  agent-runner/tmux
+                  (fn [_ & args]
+                    (swap! calls conj (vec args))
+                    {:exit 0})]
+      (let [out (with-out-str
+                  (agent-runner/handle-delivered-request!
+                   root request
+                   {:idle-nudge-seconds 1
+                    :nudge-cooldown-seconds 0}))]
+        {:calls @calls
+         :out out
+         :state (agent-runner/delivery-state root (:id request))}))))
+
 (def current-trust-prompt
   (str " Quick safety check: Is this a project you created or one you trust? (Like your\n"
        " own code, a well-known open source project, or work from your team). If not,\n"
@@ -178,5 +237,141 @@
                     agent-runner/*settle-iteration-ms* 10]
             (is (= :failed
                    (agent-runner/settle-agent-session-state! root))))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest continuation-nudges-respect-canonical-stage-job-state
+  (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-runner-stage-job."})
+        idle-pane "Ask Codex to do anything\n"]
+    (try
+      (testing "a fresh matching job suppresses the old idle-threshold nudge"
+        (let [selected (write-stage-job!
+                        root
+                        {:id "stage-job-code-runner-active"
+                         :card-id "card-active"})
+              request-file
+              (fs/path root ".swarmforge" "dashboard" "requests" "pending"
+                       "req-active.request")]
+          (write-file request-file
+                      (str "id: req-active\n"
+                           "status: pending\n\n"
+                           "New routed card: active-card\n"
+                           "Task ID: card-active\n\n"
+                           "# Active card\n"))
+          (let [request (agent-runner/parse-request request-file)]
+            (is (= "card-active" (:task_id request)))
+            (write-delivered-request! root request idle-pane 1000)
+            (let [{:keys [calls out state]} (run-delivered-handler!
+                                              root request idle-pane)]
+              (is (str/includes? out "waiting for stage job"))
+              (is (str/includes? out "(heartbeat fresh)"))
+              (is (empty? calls))
+              (is (= "waiting"
+                     (get-in state [:stage-job-hold :state])))
+              (is (= (:id selected)
+                     (get-in state [:stage-job-hold :job-id]))))
+
+            (write-delivered-request! root request idle-pane 3600000)
+            (let [{:keys [calls out]} (run-delivered-handler!
+                                       root request idle-pane)]
+              (is (empty? calls))
+              (is (not (str/includes? out "nudging delivered request"))))
+
+            (testing "the selected request becomes eligible after consumption"
+              (stage-jobs/atomic-write-edn!
+               (stage-jobs/job-file root (:id selected))
+               (assoc (stage-jobs/load-job root (:id selected))
+                      :consumed_at (str (java.time.Instant/now))))
+              (run-delivered-handler! root request idle-pane)
+              (write-delivered-request! root request idle-pane 3600000)
+              (let [{:keys [calls out]} (run-delivered-handler!
+                                         root request idle-pane)]
+                (is (seq calls))
+                (is (str/includes? out "nudging delivered request")))))))
+
+      (testing "stale heartbeat blocks generic continuation"
+        (let [request {:id "req-stale" :task_id "card-stale"}]
+          (write-stage-job!
+           root
+           {:id "stage-job-code-runner-stale"
+            :card-id "card-stale"
+            :heartbeat-age-ms 60000})
+          (write-delivered-request! root request idle-pane 1000)
+          (let [{:keys [calls out state]} (run-delivered-handler!
+                                            root request idle-pane)]
+            (is (empty? calls))
+            (is (str/includes? out "continuation nudges blocked"))
+            (is (str/includes? out " is unknown "))
+            (is (not (str/includes? out "nudging delivered request")))
+            (is (= "blocked"
+                   (get-in state [:stage-job-hold :state])))
+            (is (false? (get-in state [:stage-job-hold :heartbeat-fresh]))))))
+
+      (testing "a reused process identity is not treated as the active job"
+        (let [request {:id "req-reused" :task_id "card-reused"}]
+          (write-stage-job!
+           root
+           {:id "stage-job-code-runner-reused"
+            :card-id "card-reused"
+            :process-start-identity "not-the-original-process"})
+          (write-delivered-request! root request idle-pane 1000)
+          (let [{:keys [calls out]} (run-delivered-handler!
+                                     root request idle-pane)]
+            (is (empty? calls))
+            (is (str/includes? out "continuation nudges blocked"))
+            (is (not (str/includes? out "nudging delivered request"))))))
+
+      (testing "a missing process blocks generic continuation"
+        (let [request {:id "req-missing" :task_id "card-missing"}]
+          (write-stage-job!
+           root
+           {:id "stage-job-code-runner-missing"
+            :card-id "card-missing"
+            :pid 999999999
+            :process-start-identity "missing-process"})
+          (write-delivered-request! root request idle-pane 1000)
+          (let [{:keys [calls out]} (run-delivered-handler!
+                                     root request idle-pane)]
+            (is (empty? calls))
+            (is (str/includes? out "continuation nudges blocked"))
+            (is (not (str/includes? out "nudging delivered request"))))))
+
+      (testing "a matching-project job for another card does not suppress"
+        (let [request {:id "req-other-card" :task_id "card-selected"}]
+          (write-stage-job!
+           root
+           {:id "stage-job-code-runner-other-card"
+            :card-id "card-other"})
+          (write-delivered-request! root request idle-pane 1000)
+          (let [{:keys [calls out]} (run-delivered-handler!
+                                     root request idle-pane)]
+            (is (seq calls))
+            (is (str/includes? out "nudging delivered request")))))
+
+      (testing "an open clarification still wins over stage-job state"
+        (let [request {:id "req-clarification" :task_id "card-clarification"}
+              clarification-id "clar-active"]
+          (write-stage-job!
+           root
+           {:id "stage-job-code-runner-clarification"
+            :card-id "card-clarification"
+            :heartbeat-age-ms 60000})
+          (write-file
+           (fs/path root ".swarmforge" "dashboard" "requests" "pending"
+                    (str clarification-id ".request"))
+           (str "id: " clarification-id "\n"
+                "status: open\n"
+                "author: project-agent\n"
+                "direction: project-agent\n"
+                "kind: clarification\n"
+                "clarification_id: " clarification-id "\n"
+                "attention_state: unseen\n\n"
+                "Which option should be used?\n"))
+          (write-delivered-request! root request idle-pane 1000)
+          (let [{:keys [calls out]} (run-delivered-handler!
+                                     root request idle-pane)]
+            (is (empty? calls))
+            (is (str/includes? out "waiting for clarification"))
+            (is (not (str/includes? out "nudging delivered request"))))))
       (finally
         (fs/delete-tree root)))))
