@@ -51,6 +51,58 @@
       :last-activity-at (- now idle-ago-ms)
       :pane-digest (agent-runner/pane-digest pane)})))
 
+(defn write-pending-request!
+  [root id task-id]
+  (let [path (fs/path root ".swarmforge" "dashboard" "requests" "pending"
+                      (str id ".request"))]
+    (write-file path
+                (str "id: " id "\n"
+                     "status: pending\n\n"
+                     "New routed card: fixture-card\n"
+                     "Task ID: " task-id "\n\n"
+                     "# Fixture card\n"))
+    (agent-runner/parse-request path)))
+
+(defn finish-stage-job!
+  [root id status]
+  (let [job (stage-jobs/load-job root id)
+        now (str (java.time.Instant/now))]
+    (stage-jobs/atomic-write-edn!
+     (stage-jobs/exit-file root id)
+     {:job_id id
+      :command_fingerprint (:command_fingerprint job)
+      :status status
+      :exit (if (= "succeeded" status) 0 1)
+      :finished_at now
+      :reason (when-not (= "succeeded" status) (str "fixture " status))
+      :evidence []
+      :progress "command 1/1 completed"})))
+
+(defn create-stage-wake! [root id]
+  (let [wake-id (str "req-" id)]
+    (pack-dashboard-request/create-request!
+     root (str "Work complete for stage job " id) wake-id)
+    (stage-jobs/update-job!
+     root id #(assoc % :wake_request_id wake-id))
+    wake-id))
+
+(defn run-runner-tick! [root pane]
+  (let [calls (atom [])]
+    (with-redefs [agent-runner/start-agent-session! (constantly :ready)
+                  agent-runner/ready? (fn [_ _] true)
+                  agent-runner/visible-pane (constantly pane)
+                  agent-runner/tmux
+                  (fn [_ & args]
+                    (swap! calls conj (vec args))
+                    {:exit 0})]
+      {:out (with-out-str
+              (agent-runner/run-once!
+               root "fixture-agent"
+               {:interval 1
+                :idle-nudge-seconds 300
+                :nudge-cooldown-seconds 900}))
+       :calls @calls})))
+
 (defn run-delivered-handler!
   [root request pane]
   (let [calls (atom [])]
@@ -373,5 +425,190 @@
             (is (empty? calls))
             (is (str/includes? out "waiting for clarification"))
             (is (not (str/includes? out "nudging delivered request"))))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest detached-stage-wake-parks-and-resumes-the-origin-request
+  (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-runner-wake."})
+        pane "Ask Codex to do anything\n"
+        job-id "stage-job-code-parked-origin"
+        card-id "card-parked-origin"]
+    (try
+      (let [request (write-pending-request! root "req-origin" card-id)]
+        (write-stage-job! root {:id job-id :card-id card-id})
+        (write-delivered-request! root request pane 1000)
+
+        (let [{:keys [out calls]} (run-runner-tick! root pane)]
+          (is (empty? calls))
+          (is (str/includes? out (str "while stage job " job-id)))
+          (is (= "parked-awaiting-stage"
+                 (:request-lifecycle
+                  (agent-runner/delivery-state root "req-origin")))))
+
+        (finish-stage-job! root job-id "succeeded")
+        (let [wake-id (create-stage-wake! root job-id)]
+          (dotimes [_ 3]
+            (is (= "completed-unconsumed"
+                   (:status (stage-jobs/view root job-id)))))
+          (is (fs/regular-file?
+               (fs/path root ".swarmforge" "dashboard" "requests" "pending"
+                        (str wake-id ".request")))
+              "status inspection must not consume the pending wake")
+          (stage-jobs/update-job!
+           root job-id #(assoc % :consumed_at
+                                    (str (java.time.Instant/now))))
+          (is (fs/regular-file?
+               (fs/path root ".swarmforge" "dashboard" "requests" "pending"
+                        (str wake-id ".request")))
+              "bounded status reconciliation must not substitute for delivery")
+
+          (let [{:keys [out calls]} (run-runner-tick! root pane)
+                buffer (some (fn [args]
+                               (when (= "set-buffer" (first args))
+                                 (last args)))
+                             calls)]
+            (is (str/includes? out (str "delivered for original request "
+                                        "req-origin")))
+            (is (string? buffer))
+            (is (str/includes? buffer (str "answer req-origin")))
+            (is (fs/regular-file?
+                 (fs/path root ".swarmforge" "dashboard" "requests" "done"
+                          (str wake-id ".request"))))
+            (is (not (fs/exists?
+                      (fs/path root ".swarmforge" "dashboard" "requests"
+                               "pending" (str wake-id ".request")))))
+            (is (= "active-work"
+                   (:request-lifecycle
+                    (agent-runner/delivery-state root "req-origin")))))
+
+          (is (= wake-id (create-stage-wake! root job-id))
+              "repeated terminal events resolve to the same wake")
+          (let [{:keys [calls]} (run-runner-tick! root pane)]
+            (is (not-any?
+                 (fn [args]
+                   (and (= "set-buffer" (first args))
+                        (str/includes? (or (last args) "")
+                                       (str "answer " wake-id))))
+                 calls)))
+
+          (let [answer (fs/path root "tmp" "answer.txt")
+                response "Completed the original request after stage reconciliation.\n"]
+            (write-file answer response)
+            (pack-dashboard-request/answer-pending!
+             root "req-origin" answer nil true nil true)
+            (is (fs/regular-file?
+                 (fs/path root ".swarmforge" "dashboard" "requests" "done"
+                          "req-origin.request")))
+            (is (= 1
+                   (count
+                    (filter #(str/ends-with? (fs/file-name %) "req-origin.request")
+                            (fs/list-dir
+                             (fs/path root ".swarmforge" "dashboard"
+                                      "requests" "done"))))))
+            (let [again (with-out-str
+                          (pack-dashboard-request/answer-request!
+                           root "req-origin" answer nil true nil true))]
+              (is (str/includes? again "ANSWERED: req-origin"))))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest terminal-stage-wakes-remain-deliverable
+  (doseq [terminal-status ["failed" "timed-out" "cancelled"]]
+    (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-runner-terminal."})
+          pane "Ask Codex to do anything\n"
+          card-id (str "card-" terminal-status)
+          job-id (str "stage-job-code-" terminal-status)]
+      (try
+        (let [request (write-pending-request!
+                       root (str "req-" terminal-status) card-id)]
+          (write-stage-job! root {:id job-id :card-id card-id})
+          (write-delivered-request! root request pane 1000)
+          (run-runner-tick! root pane)
+          (finish-stage-job! root job-id terminal-status)
+          (let [wake-id (create-stage-wake! root job-id)]
+            (run-runner-tick! root pane)
+            (is (fs/regular-file?
+                 (fs/path root ".swarmforge" "dashboard" "requests" "done"
+                          (str wake-id ".request"))))
+            (is (not (fs/exists?
+                      (fs/path root ".swarmforge" "dashboard" "requests"
+                               "pending" (str wake-id ".request")))))))
+        (finally
+          (fs/delete-tree root))))))
+
+(deftest delivered-stage-wake-resumes-after-interruption
+  (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-runner-resume."})
+        pane "Ask Codex to do anything\n"
+        job-id "stage-job-code-resume-wake"
+        card-id "card-resume-wake"]
+    (try
+      (let [request (write-pending-request! root "req-resume-origin" card-id)]
+        (write-stage-job! root {:id job-id :card-id card-id})
+        (write-delivered-request! root request pane 1000)
+        (run-runner-tick! root pane)
+        (finish-stage-job! root job-id "succeeded")
+        (let [wake-id (create-stage-wake! root job-id)
+              now (System/currentTimeMillis)]
+          (agent-runner/reconcile-request-lifecycles! root)
+          (agent-runner/write-delivery-state!
+           root wake-id
+           {:request-id wake-id
+            :request-lifecycle "delivered"
+            :delivery-submit-intent-at now
+            :delivery-submitted-at now
+            :stage-wake-job-id job-id
+            :stage-wake-origin-id "req-resume-origin"})
+          (agent-runner/resume-stage-wake-deliveries! root)
+          (is (fs/regular-file?
+               (fs/path root ".swarmforge" "dashboard" "requests" "done"
+                        (str wake-id ".request"))))
+          (is (= "active-work"
+                 (:request-lifecycle
+                  (agent-runner/delivery-state root "req-resume-origin"))))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest invalid-stage-state-does-not-park-indefinitely
+  (doseq [[case-name job-options]
+          [["reused"
+            {:process-start-identity "not-the-original-process"}]
+           ["stale"
+            {:heartbeat-age-ms 60000}]
+           ["missing"
+            {:pid 999999999
+             :process-start-identity "missing-process"}]]]
+    (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-runner-invalid."})
+          pane "Ask Codex to do anything\n"
+          job-id (str "stage-job-code-invalid-" case-name)
+          request-id (str "req-invalid-" case-name)
+          card-id (str "card-invalid-" case-name)]
+      (try
+        (let [request (write-pending-request! root request-id card-id)]
+          (write-stage-job!
+           root
+           (merge {:id job-id :card-id card-id} job-options))
+          (write-delivered-request! root request pane 1000)
+          (let [{:keys [out calls]} (run-runner-tick! root pane)]
+            (is (empty? calls))
+            (is (str/includes? out "continuation nudges blocked"))
+            (is (= "blocked-stage"
+                   (:request-lifecycle
+                    (agent-runner/delivery-state root request-id))))
+            (is (= request-id
+                   (:id (agent-runner/pending-request root))))
+            (is (not (fs/exists?
+                      (agent-runner/stage-request-association-file
+                       root job-id))))))
+        (finally
+          (fs/delete-tree root))))))
+
+(deftest ordinary-pending-requests-keep-fifo-order
+  (let [root (fs/create-temp-dir {:dir "/tmp" :prefix "sf-runner-fifo."})]
+    (try
+      (write-pending-request! root "req-a" "card-a")
+      (write-pending-request! root "req-b" "card-b")
+      (is (= ["req-a" "req-b"]
+             (mapv :id (agent-runner/pending-requests root))))
+      (is (= "req-a" (:id (agent-runner/pending-request root))))
       (finally
         (fs/delete-tree root)))))

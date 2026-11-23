@@ -669,7 +669,7 @@
         (let [existing (or (when (fs/regular-file? file) (request-entry file))
                            (when (fs/regular-file? done) (request-entry done)))]
           (if existing
-            (if (= body (:body existing))
+            (if (= (str/trimr body) (str/trimr (:body existing)))
               existing
               (exit! 1 (str "Request " id
                             " already exists with different text")))
@@ -856,6 +856,58 @@
       (fs/move tmp dest {:replace-existing true :atomic-move true})
       (fs/delete-if-exists src))
     (println "ANSWERED:" id)))
+
+(def stage-wake-body-re
+  #"^Work complete for stage job (stage-job-[A-Za-z0-9][A-Za-z0-9._-]{0,139})\s*$")
+(def request-id-re #"[A-Za-z0-9][A-Za-z0-9._~:-]{0,150}")
+
+(defn stage-wake-job-id [entry]
+  (some-> (:body entry)
+          str/trim
+          (as-> body
+                (when-let [[_ job-id] (re-matches stage-wake-body-re body)]
+                  job-id))))
+
+(defn complete-stage-wake! [root id origin-id]
+  (try
+    (with-request-lock
+      root
+      (fn []
+        (let [src (request-file (pending-dir root) id)
+              dest (request-file (done-dir root) id)]
+          (cond
+            (fs/regular-file? dest)
+            true
+
+            (or (not (and (string? id)
+                          (re-matches request-id-re id)))
+                (not (and (string? origin-id)
+                          (re-matches request-id-re origin-id)))
+                (not (fs/regular-file? src)))
+            false
+
+            :else
+            (let [entry (request-entry src)]
+              (if-not (stage-wake-job-id entry)
+                false
+                (let [now (timestamp)
+                      headers {"id" id
+                               "status" "done"
+                               "body" (:body entry)
+                               "response"
+                               (str "Delivered to the project agent; final result "
+                                    "will be posted to request " origin-id ".")
+                               "created_at" (:created_at entry)
+                               "updated_at" now}
+                      _ (fs/create-dirs (fs/parent dest))
+                      tmp (fs/create-temp-file {:dir (fs/parent dest)
+                                                :prefix ".completed-stage-wake."})]
+                  (spit (str tmp) (render-request headers))
+                  (fs/move tmp dest {:replace-existing true :atomic-move true})
+                  (fs/delete-if-exists src)
+                  true)))))))
+    (catch Exception _
+      false)))
 
 (defn backfill-action! [done entry text action]
   (let [tmp (fs/create-temp-file {:dir (fs/parent done)

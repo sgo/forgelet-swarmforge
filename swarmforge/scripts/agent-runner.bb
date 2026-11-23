@@ -8,6 +8,7 @@
             [clojure.string :as str]))
 
 (load-file (str (fs/path (fs/parent *file*) "stage_jobs.bb")))
+(load-file (str (fs/path (fs/parent *file*) "pack_dashboard_request.bb")))
 
 (def usage-text
   (str "Usage:\n"
@@ -285,7 +286,7 @@
               :reason (:reason state)}
     :clear nil))
 
-(declare write-delivery-state!)
+(declare delivery-state write-delivery-state!)
 
 (defn update-clarification-hold! [root id state clarification now]
   (let [hold (clarification-hold clarification)
@@ -390,11 +391,159 @@
       :else
       state)))
 
-(defn pending-requests [root]
+(defn stage-request-association-dir [root]
+  (fs/path root ".swarmforge" "agent-runner" "stage-requests"))
+
+(defn stage-request-association-file [root job-id]
+  (fs/path (stage-request-association-dir root) (str job-id ".edn")))
+
+(defn stage-request-association [root job-id]
+  (when (stage-jobs/valid-job-id? job-id)
+    (stage-jobs/read-edn-file
+     (stage-request-association-file root job-id))))
+
+(defn write-stage-request-association! [root job-id association]
+  (when (stage-jobs/valid-job-id? job-id)
+    (stage-jobs/atomic-write-edn!
+     (stage-request-association-file root job-id)
+     association)))
+
+(defn delete-stage-request-association! [root job-id]
+  (when (stage-jobs/valid-job-id? job-id)
+    (fs/delete-if-exists (stage-request-association-file root job-id))))
+
+(defn parkable-stage-view? [view]
+  (let [status (:status view)]
+    (or (and (= "waiting-for-job" status)
+             (:live view)
+             (not (:heartbeat_stale view)))
+        (contains? #{"completed-unconsumed" "failed" "timed-out"
+                     "cancelled" "interrupted"}
+                   status))))
+
+(defn request-stage-view [root request state]
+  (if-let [job-id (:stage-job-id state)]
+    (stage-jobs/view root job-id)
+    (matching-stage-job-view root request)))
+
+(defn pending-request-status [root id]
+  (cond
+    (and id (fs/regular-file?
+             (fs/path root ".swarmforge" "dashboard" "requests" "pending"
+                      (str id ".request"))))
+    "pending"
+
+    (and id (fs/regular-file?
+             (fs/path root ".swarmforge" "dashboard" "requests" "done"
+                      (str id ".request"))))
+    "done"
+
+    :else nil))
+
+(defn park-request-awaiting-stage! [root request state view now]
+  (let [job (:job view)
+        job-id (:id view)
+        wake-id (:wake_request_id job)
+        current (:request-lifecycle state)
+        parked (assoc state
+                      :request-id (:id request)
+                      :request-lifecycle "parked-awaiting-stage"
+                      :stage-job-id job-id
+                      :stage-job-status (:status view)
+                      :stage-wake-request-id wake-id)
+        changed (or (not= "parked-awaiting-stage" current)
+                    (not= job-id (:stage-job-id state))
+                    (not= wake-id (:stage-wake-request-id state))
+                    (nil? (stage-request-association root job-id)))]
+    (when changed
+      (write-stage-request-association!
+       root job-id
+       {:request-id (:id request)
+        :stage-job-id job-id
+        :stage-wake-request-id wake-id
+        :parked-at (str (java.time.Instant/now))})
+      (write-delivery-state! root (:id request) parked)
+      (println "parking request" (:id request)
+               "while stage job" job-id "is" (:status view)))
+    parked))
+
+(defn unpark-request! [root request state lifecycle now]
+  (let [changed? (not= lifecycle (:request-lifecycle state))
+        updated (assoc state
+                       :request-id (:id request)
+                       :request-lifecycle lifecycle
+                       :last-activity-at now)]
+    (when-let [job-id (:stage-job-id state)]
+      (delete-stage-request-association! root job-id))
+    (when changed?
+      (write-delivery-state! root (:id request) updated)
+      (when (= "parked-awaiting-stage" (:request-lifecycle state))
+        (println "unparking request" (:id request)
+                 "after stage job" (:stage-job-id state) "became" lifecycle)))
+    updated))
+
+(defn update-request-lifecycle! [root request state view now]
+  (let [status (:status view)
+        lifecycle (:request-lifecycle state)]
+    (cond
+      (parkable-stage-view? view)
+      (park-request-awaiting-stage! root request state view now)
+
+      (= "unknown" status)
+      (unpark-request! root request state "blocked-stage" now)
+
+      (and (= "parked-awaiting-stage" lifecycle)
+           (nil? view))
+      (let [wake-id (:stage-wake-request-id state)
+            wake-status (pending-request-status root wake-id)]
+        (if (= "pending" wake-status)
+          state
+          (unpark-request! root request state
+                           (if wake-status "active-work" "blocked-stage")
+                           now)))
+
+      (and (= "parked-awaiting-stage" lifecycle)
+           (contains? #{"completed" "retired"} status))
+      (let [wake-id (or (:stage-wake-request-id state)
+                        (get-in view [:job :wake_request_id]))
+            wake-status (pending-request-status root wake-id)]
+        (if (= "pending" wake-status)
+          (if (= wake-id (:stage-wake-request-id state))
+            state
+            (let [updated (assoc state :stage-wake-request-id wake-id)]
+              (write-delivery-state! root (:id request) updated)
+              (write-stage-request-association!
+               root (:stage-job-id state)
+               {:request-id (:id request)
+                :stage-job-id (:stage-job-id state)
+                :stage-wake-request-id wake-id
+                :parked-at (str (java.time.Instant/now))})
+              updated))
+          (unpark-request! root request state "active-work" now)))
+
+      :else
+      state)))
+
+(defn all-pending-requests [root]
   (->> (request-files root)
        (map parse-request)
        (filter #(= "pending" (:status %)))
        vec))
+
+(defn parked-request? [root request]
+  (= "parked-awaiting-stage"
+     (:request-lifecycle (delivery-state root (:id request)))))
+
+(defn reconcile-request-lifecycles! [root]
+  (let [now (System/currentTimeMillis)]
+    (doseq [request (all-pending-requests root)
+            :let [state (delivery-state root (:id request))]
+            :when state]
+      (update-request-lifecycle!
+       root request state (request-stage-view root request state) now))))
+
+(defn pending-requests [root]
+  (vec (remove #(parked-request? root %) (all-pending-requests root))))
 
 (defn pending-request [root]
   (first (pending-requests root)))
@@ -667,14 +816,79 @@
         (> (System/currentTimeMillis) deadline) false
         :else (do (Thread/sleep 250) (recur))))))
 
+(def stage-wake-body-re
+  #"^Work complete for stage job (stage-job-[A-Za-z0-9][A-Za-z0-9._-]{0,139})\s*$")
+
+(defn stage-wake-job-id [request]
+  (some-> (:body request)
+          str/trim
+          (as-> body
+                (when-let [[_ job-id] (re-matches stage-wake-body-re body)]
+                  job-id))))
+
+(defn stage-wake-origin [root request]
+  (when-let [job-id (stage-wake-job-id request)]
+    (when-let [association (stage-request-association root job-id)]
+      (let [origin-id (:request-id association)
+            origin-state (delivery-state root origin-id)]
+        (when (and origin-state
+                   (contains? #{"pending" "done"}
+                              (pending-request-status root origin-id)))
+          {:job-id job-id
+           :origin-id origin-id
+           :origin-state origin-state})))))
+
+(defn complete-stage-wake-delivery! [root request]
+  (when-let [{:keys [job-id origin-id origin-state]}
+             (stage-wake-origin root request)]
+    (if (pack-dashboard-request/complete-stage-wake!
+         root (:id request) origin-id)
+      (let [now (System/currentTimeMillis)
+            updated (assoc origin-state
+                           :request-lifecycle "active-work"
+                           :stage-job-id job-id
+                           :stage-wake-request-id (:id request)
+                           :stage-wake-delivered-at now
+                           :last-activity-at now)]
+        (write-delivery-state! root origin-id updated)
+        (write-delivery-state!
+         root (:id request)
+         (assoc (or (delivery-state root (:id request)) {})
+                :request-id (:id request)
+                :request-lifecycle "delivered"
+                :stage-wake-job-id job-id
+                :stage-wake-origin-id origin-id
+                :stage-wake-completed-at now))
+        (delete-stage-request-association! root job-id)
+        (println "stage completion wake" (:id request)
+                 "delivered for original request" origin-id)
+        true)
+      false)))
+
+(defn stage-completion-message [root request origin]
+  (str "[phone " (:id request) "] Work complete for stage job "
+       (:job-id origin) ".\n\n"
+       "Reconcile the stage result, finish the remaining work, and answer "
+       "the original operator request " (:origin-id origin)
+       " with the final result. Do not answer this administrative completion "
+       "wake.\n\n"
+       "Answer the original request with: "
+       (fs/path root "swarmforge" "scripts" "pack_dashboard_request.sh")
+       " answer " (:origin-id origin) " ./tmp/answer.txt\n"
+       "Write only the operator-facing answer to ./tmp/answer.txt. Your "
+       "terminal output is not sent to the phone."))
+
 (defn send-request! [root request]
   (let [id (:id request)
-        text (str "[phone " id "] " (:body request) "\n\n"
-                  "Answer with: "
-                  (fs/path root "swarmforge" "scripts" "pack_dashboard_request.sh")
-                  " answer " id " ./tmp/answer.txt\n"
-                  "Write only the operator-facing answer to ./tmp/answer.txt. "
-                  "Your terminal output is not sent to the phone.")]
+        origin (stage-wake-origin root request)
+        text (if origin
+               (stage-completion-message root request origin)
+               (str "[phone " id "] " (:body request) "\n\n"
+                    "Answer with: "
+                    (fs/path root "swarmforge" "scripts" "pack_dashboard_request.sh")
+                    " answer " id " ./tmp/answer.txt\n"
+                    "Write only the operator-facing answer to ./tmp/answer.txt. "
+                    "Your terminal output is not sent to the phone."))]
     (tmux root "set-buffer" "-b" "agent-request" text)
     (tmux root "paste-buffer" "-d" "-p" "-b" "agent-request"
           "-t" session-name)
@@ -753,11 +967,34 @@
         updated)
       state)))
 
+(defn record-submission-intent! [root request]
+  (let [id (:id request)
+        now (System/currentTimeMillis)
+        state (or (delivery-state root id) {})
+        origin (stage-wake-origin root request)]
+    (write-delivery-state!
+     root id
+     (cond-> (assoc state
+                    :request-id id
+                    :request-lifecycle (or (:request-lifecycle state)
+                                           "delivered")
+                    :delivery-submit-intent-at now)
+       origin
+       (assoc :stage-wake-job-id (:job-id origin)
+              :stage-wake-origin-id (:origin-id origin))))
+    (delivery-state root id)))
+
 (defn mark-delivered! [root request text]
   (let [now (System/currentTimeMillis)
-        state {:delivered-at now
-               :last-activity-at now
-               :pane-digest (pane-digest text)}]
+        existing (or (delivery-state root (:id request)) {})
+        state (assoc existing
+                     :request-id (:id request)
+                     :request-lifecycle (or (:request-lifecycle existing)
+                                            "delivered")
+                     :delivery-submitted-at now
+                     :delivered-at now
+                     :last-activity-at now
+                     :pane-digest (pane-digest text))]
     (write-delivery-state! root (:id request) state)
     state))
 
@@ -845,7 +1082,22 @@
       :else
       (println "request" id "already delivered; monitoring the agent"))))
 
+(defn finish-stage-wake-delivery! [root request]
+  (when (stage-wake-job-id request)
+    (complete-stage-wake-delivery! root request)))
+
+(defn resume-stage-wake-deliveries! [root]
+  (doseq [request (all-pending-requests root)
+          :let [state (delivery-state root (:id request))]
+          :when (and (:stage-wake-origin-id state)
+                     (:delivery-submitted-at state))]
+    (when (complete-stage-wake-delivery! root request)
+      (println "resumed stage completion wake delivery for"
+               (:stage-wake-origin-id state)))))
+
 (defn run-once! [root agent-command options]
+  (resume-stage-wake-deliveries! root)
+  (reconcile-request-lifecycles! root)
   (let [settlement (start-agent-session! root agent-command)]
     (if (= :login-required settlement)
       (println "work requests are held until Claude login completes")
@@ -862,8 +1114,10 @@
                 (request-in-composer? root id)
                 (do
                   (println "submitting request already in the composer:" id)
+                  (record-submission-intent! root request)
                   (when (deliver-request! root request)
-                    (mark-delivered! root request (or (visible-pane root) ""))))
+                    (mark-delivered! root request (or (visible-pane root) ""))
+                    (finish-stage-wake-delivery! root request)))
 
                 state
                 (handle-delivered-request! root request options)
@@ -876,9 +1130,11 @@
                 :else
                 (do
                   (println "request" id)
+                  (record-submission-intent! root request)
                   (if (deliver-request! root request)
                     (do
                       (mark-delivered! root request (or (visible-pane root) ""))
+                      (finish-stage-wake-delivery! root request)
                       (println "delivered" id))
                     (println "paste did not submit; the next pass will submit it:"
                              id)))))))
