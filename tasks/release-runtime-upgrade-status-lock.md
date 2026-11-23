@@ -60,6 +60,12 @@ error and forced timeout, and acquires the lock immediately after each process
 exits. Repeated status reads return the normal status instead of `checking`.
 No project source or runtime was changed.
 
+After completion, the operator explicitly authorised the canonical `code` and
+`clean` gates despite the focused-only testing boundary above. The committed
+tree passed `bb test` with 520 tests and 4,154 assertions, zero failures and
+zero errors, plus all 20 dashboard browser tests. The `bb crap` clean gate
+passed 24 tests with 132 assertions, zero failures and zero errors.
+
 ## Operator acceptance
 
 None.
