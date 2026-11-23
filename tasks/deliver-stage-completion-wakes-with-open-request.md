@@ -86,6 +86,18 @@ wake reaches the intended idle agent, the final result is posted to the
 original operator request, and no duplicate wake, duplicate answer or
 indefinite parked state remains.
 
+The focused agent-runner suite passed 8 tests with 97 assertions. Its bounded
+fixtures cover parking, status inspection without wake consumption, single wake
+delivery, interrupted-delivery recovery, success and terminal failure wake
+delivery, stale/missing/reused process recovery, idempotent final answers and
+ordinary FIFO ordering. No production-duration waits were used.
+
+The script/request suite passed 108 tests with 621 assertions. The full
+`bb test` gate passed 526 tests with 4,225 assertions, zero failures and zero
+errors, plus all 20 dashboard browser tests; the detached lifecycle E2E
+completed in 1,762 ms. The `bb crap` clean gate passed 24 tests with 132
+assertions, zero failures and zero errors.
+
 ## Operator acceptance
 
 None.
