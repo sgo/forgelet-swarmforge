@@ -77,6 +77,17 @@ detached stage, sends one completion wake when that stage terminates, and
 reports stale/missing job state as blocked or unknown instead of idle. No
 active project or forge runtime is restarted to prove the behavior.
 
+The focused agent-runner suite passed 3 tests with 53 assertions, including
+handler-level cases for a fresh matching job, elapsed idle thresholds, stale
+heartbeat, missing and reused process identity, another card, completion
+consumption, and an open clarification. These fixtures use injected
+millisecond/second thresholds and make no production-duration waits.
+
+The full `bb test` gate passed 521 tests with 4,181 assertions, zero failures
+and zero errors, plus all 20 dashboard browser tests. The detached lifecycle
+E2E completed in 1,595 ms. The `bb crap` clean gate passed 24 tests with 132
+assertions, zero failures and zero errors.
+
 ## Operator acceptance
 
 None.
