@@ -12,6 +12,7 @@
                 (require 'swarmforge.agent-runner-test)
                 (require 'swarmforge.agent-project-test)
                 (require 'swarmforge.runtime-upgrade-test)
+                (require 'swarmforge.runtime-identity-acceptance-test)
                 (require 'swarmforge.update-exercise-test)
                 (require 'swarmforge.pack-ui-test)
                 (require 'swarmforge.coverage-in-process-test)
@@ -24,6 +25,7 @@
                                                                     'swarmforge.agent-runner-test
                                                                     'swarmforge.agent-project-test
                                                                     'swarmforge.runtime-upgrade-test
+                                                                    'swarmforge.runtime-identity-acceptance-test
                                                                     'swarmforge.update-exercise-test
                                                                     'swarmforge.pack-ui-test
                                                                     'swarmforge.coverage-in-process-test)]
