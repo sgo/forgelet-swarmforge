@@ -60,9 +60,19 @@ all imperative uses of the word “confirm.”
 
 ## Verification
 
-The exact confirmation-request wording that escaped enforcement now produces
-the existing structured quick-reply challenge, while the deliberately excluded
-broader confirmation phrases do not.
+The detector now recognizes case-insensitive `confirm when` while preserving
+the existing reply-instruction, `tell me`, quoted `say`, approval and action
+exclusivity behavior. Exact, mixed-case, sentence and multiline invitation
+tests require either `--reply-with` or `--without-quick-reply`; the helper does
+not infer reply text. Bare `confirm`, `confirm that`, `confirms` and
+descriptive confirmation prose remain unflagged.
+
+The focused quick-reply suite passed 4 tests with 102 assertions. The full
+`bb test` gate passed 541 tests with 4,367 assertions, all 20 dashboard browser
+tests, and the bounded-projection E2E; the detached lifecycle E2E completed in
+1,533 ms. The `bb crap` clean gate passed 24 tests with 132 assertions and wrote
+`target/coverage/lcov.info`. The documentation contract passed 3 documents and
+5 sections.
 
 ## Operator acceptance
 
