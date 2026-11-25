@@ -74,8 +74,28 @@ pending invites survived, so the operator received test-room invitations.
 
 ## Verification
 
-Automated runtime identity acceptance completes without modifying the operator’s
-live Host, homeserver, bridge registry, control registry or room invites.
+`qa/run-runtime-identity-acceptance.sh` composes from one explicit source commit
+using a local Git clone, a fixture product pack and a failing fake curl. It
+verified all 102 runtime manifest files against source bytes, the manifest
+digest, source commit and `preserve-installed-bridge-v1` policy. Bridge
+installation remained absent, no Host API was called, no live Host token or
+bridge configuration was read, and no Matrix endpoint was contacted.
+
+Tests poisoned the Host token, Host URL, bridge configuration, homeserver data
+directory and operator room membership with sentinel files. Success, invalid
+source failure and SIGTERM interruption all returned without changing any
+sentinel and without leaving an acceptance work directory. The interruption
+test proved the cleanup trap runs while fixture work is active.
+
+The full `bb test` gate passed 540 tests with 4,329 assertions, all 20 dashboard
+browser tests, and the bounded-projection E2E; the detached lifecycle E2E
+completed in 1,567 ms. The `bb crap` clean gate passed 24 tests with 132
+assertions and wrote `target/coverage/lcov.info`. The documentation contract
+passed 3 documents and 5 sections.
+
+No live Host or Matrix operation was performed by these automated gates.
+Released app/Host creation remains a separately invoked operator acceptance
+check.
 
 ## Operator acceptance
 
