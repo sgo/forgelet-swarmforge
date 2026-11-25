@@ -411,24 +411,18 @@ verify_layer_identity() {
 }
 
 download_layer_commit() {
-  local dest="$1" commit="$2" git_dir tar_path url
+  local dest="$1" commit="$2" git_dir
   git_dir="$(local_git_dir)"
   mkdir -p "$dest"
   if [[ -n "$git_dir" ]]; then
     git -C "$git_dir" archive --format=tar "$commit" | tar -x -C "$dest"
   else
-    tar_path="$tmp_dir/layer-$commit.tgz"
-    url="$repo_url/archive/$commit.tar.gz"
-    if ! curl -fsSL "$url" -o "$tar_path" 2>/dev/null; then
-      if command -v gh >/dev/null 2>&1 && gh auth token >/dev/null 2>&1; then
-        curl -fsSL -H "Authorization: Bearer $(gh auth token)" \
-          "$url" -o "$tar_path" \
-          || fail_source "the exact layer commit $commit was not available at $url"
-      else
-        fail_source "the exact layer commit $commit was not available at $url"
-      fi
-    fi
-    tar -xzf "$tar_path" --strip-components=1 -C "$dest"
+    git init -q "$dest"
+    git -C "$dest" remote add origin "$repo_url"
+    git -C "$dest" fetch --quiet --depth=1 origin "$commit" \
+      || fail_source "the exact layer commit $commit was not available from $repo_url"
+    git -C "$dest" checkout -q --detach FETCH_HEAD \
+      || fail_source "the exact layer commit $commit could not be checked out"
   fi
   printf '%s\n' "$commit" > "$dest/.swarmforge-source-commit"
   verify_layer_identity "$dest" "$commit"
