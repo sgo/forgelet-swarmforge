@@ -113,6 +113,18 @@ forge_root="$(cd "$forge_root" && pwd)" || fail "forge root not found"
 [[ -d "$forge_root/swarmforge/scripts" ]] || fail "not a composed forge (no swarmforge/scripts/): $forge_root"
 
 dest="$forge_root/projects/$name"
+allowlist="${SWARMFORGE_MCP_ONLY_ALLOWLIST:-$forge_root/swarmforge/mcp-only-projects.conf}"
+project_key="${name##*/}"
+mcp_only=0
+if [[ -f "$allowlist" && ! -L "$allowlist" ]] &&
+   awk -v name="$project_key" '
+     /^[[:space:]]*(#|$)/ { next }
+     { line=$0; sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line) }
+     line == name { found=1 }
+     END { exit(found ? 0 : 1) }
+   ' "$allowlist"; then
+  mcp_only=1
+fi
 
 if [[ "$mode" == convert ]]; then
   converter="$script_dir/convert-pack-project"
@@ -137,6 +149,7 @@ if [[ "$mode" == upgrade ]]; then
   helper="$script_dir/swarmforge/scripts/upgrade-agent-project.bb"
   [[ -f "$helper" ]] || fail "upgrade helper not found: $helper"
   args=(--root "$dest" --template "$template_dir")
+  [[ "$mcp_only" == 1 ]] && args+=(--mcp-only)
   [[ "$check_only" == 1 ]] && args+=(--check)
   exec bb "$helper" "${args[@]}"
 fi
@@ -162,6 +175,10 @@ sed "s/:task \"agent-project\"/:task \"$name\"/" "$dest/stages.edn" \
 mv "$dest/stages.edn.tmp" "$dest/stages.edn"
 mkdir -p "$dest/swarmforge/scripts"
 cp -R "$forge_root/swarmforge/scripts/." "$dest/swarmforge/scripts/"
+if [[ "$mcp_only" == 1 ]]; then
+  rm -f "$dest/swarmforge/scripts/stage.sh" \
+        "$dest/swarmforge/scripts/stage.bb"
+fi
 mkdir -p "$dest/swarmforge/constitution/articles"
 if [[ -f "$forge_root/swarmforge/constitution/articles/engineering.prompt" ]]; then
   cp "$forge_root/swarmforge/constitution/articles/engineering.prompt" \
@@ -182,6 +199,11 @@ if [[ -f "$dest/scripts/check-documentation.sh" ]]; then
 fi
 if [[ -f "$dest/scripts/run-qa-e2e.sh" ]]; then
   chmod +x "$dest/scripts/run-qa-e2e.sh"
+fi
+
+if [[ "$mcp_only" == 1 ]]; then
+  bb "$forge_root/swarmforge/scripts/upgrade-agent-project.bb" \
+    --root "$dest" --template "$template_dir" --mcp-only
 fi
 
 mkdir -p "$dest/.swarmforge"

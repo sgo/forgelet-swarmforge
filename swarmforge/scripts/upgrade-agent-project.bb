@@ -2,6 +2,7 @@
 
 (ns upgrade-agent-project
   (:require [babashka.fs :as fs]
+            [cheshire.core :as json]
             [clojure.edn :as edn]
             [clojure.pprint :as pprint]
             [clojure.string :as str]))
@@ -79,6 +80,28 @@
        "for supported safe Markdown, fenced examples, channel behavior and the rule that\n"
        "prose is not approval or execution authority.\n"
        operator-chat-end))
+
+(def stage-execution-begin
+  "<!-- forgelet:stage-execution-guidance:begin -->")
+(def stage-execution-end
+  "<!-- forgelet:stage-execution-guidance:end -->")
+(def mcp-stage-execution-block
+  (str stage-execution-begin "\n"
+       "## Stage execution\n\n"
+       "This project is MCP-first. Use `stage_job_launch` for one configured\n"
+       "stage. When it returns `waiting-for-job`, end the turn without polling.\n"
+       "After the completion wake, use `stage_job_status` and then\n"
+       "`stage_job_reconcile`; use `stage_job_retry` only when status says the\n"
+       "job is retryable. `stage_job_cancel` and `stage_effective_config` are\n"
+       "separate explicit operations. Do not run a shell stage command.\n"
+       stage-execution-end))
+(def fallback-stage-execution-block
+  (str stage-execution-begin "\n"
+       "## Stage execution\n\n"
+       "MCP migration fallback: this project is not MCP-first yet. Use the local\n"
+       "stage helper when present. If it is absent, MCP registration with an\n"
+       "enabled project stage grant is required before running a stage.\n"
+       stage-execution-end))
 
 (def legacy-clarify-command-re
   #"pack_dashboard_request\.sh\s+clarify(?:\s|$)")
@@ -300,13 +323,53 @@
        (not (re-find legacy-clarify-command-re
                      (when (fs/regular-file? file) (slurp (str file)))))))
 
+(defn mcp-stage-grant-enabled? [root]
+  (let [file (fs/path root ".swarmforge" "mcp" "stage-grants.json")
+        family (str (fs/file-name (fs/parent (fs/parent root))))
+        project (str (fs/file-name root))]
+    (try
+      (and (fs/regular-file? file)
+           (not (java.nio.file.Files/isSymbolicLink file))
+           (= "rw-------" (str (fs/posix-file-permissions file)))
+           (let [grant (json/parse-string (slurp (str file)) true)
+                 stages (:stages grant)]
+             (and (map? grant)
+                  (= #{:family :project :stages} (set (keys grant)))
+                  (= family (:family grant))
+                  (= project (:project grant))
+                  (vector? stages)
+                  (seq stages)
+                  (every? (fn [stage]
+                            (and (map? stage)
+                                 (= #{:name :timeoutSeconds} (set (keys stage)))
+                                 (string? (:name stage))
+                                 (re-matches #"[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
+                                             (:name stage))
+                                 (int? (:timeoutSeconds stage))
+                                 (<= 1 (:timeoutSeconds stage) 604800)))
+                          stages))))
+      (catch Exception _ false))))
+
+(defn stage-execution-block [root]
+  (if (mcp-stage-grant-enabled? root)
+    mcp-stage-execution-block
+    fallback-stage-execution-block))
+
+(defn stage-execution-current? [file root]
+  (managed-block-in-place?
+   file stage-execution-begin stage-execution-end
+   (stage-execution-block root)))
+
 (defn -main [& args]
   (let [root (fs/absolutize (or (option args "--root") "."))
         template (fs/absolutize
                   (or (option args "--template")
                       (fail! "--template is required")))
         check-only? (flag? args "--check")
+        mcp-only? (flag? args "--mcp-only")
         stages-file (fs/path root "stages.edn")
+        local-stage-sh (fs/path root "swarmforge" "scripts" "stage.sh")
+        local-stage-bb (fs/path root "swarmforge" "scripts" "stage.bb")
         contract (fs/path root "docs" "manual-contract.edn")
         checker (fs/path root "swarmforge" "scripts" "check-documentation.bb")
         e2e-checker (fs/path root "swarmforge" "scripts" "check-e2e.bb")
@@ -357,6 +420,10 @@
         upgraded (when with-e2e (ensure-docs-stage with-e2e))
         standard? (some #(= "qa" (:name %)) (:stages config))
         pending (cond-> []
+                  (and mcp-only?
+                       (or (fs/exists? local-stage-sh)
+                           (fs/exists? local-stage-bb)))
+                  (conj "remove project-local stage helpers")
                   (and gherkin-mutation-adopted?
                        (not= config with-harden))
                   (conj "adopt Gherkin mutation Maven plugin")
@@ -407,6 +474,10 @@
                         agents-file operator-chat-begin operator-chat-end
                         operator-chat-block))
                   (conj "install operator-chat guidance")
+                  (and mcp-only?
+                       (some #(not (stage-execution-current? % root))
+                             policy-files))
+                  (conj "install MCP stage execution guidance")
                   (not (fs/regular-file? checker)) (conj "install check-documentation.bb")
                   (or (not (fs/regular-file? wrapper))
                       (not= (slurp (str wrapper)) (slurp (str template-wrapper))))
@@ -421,6 +492,9 @@
           (println (str "upgrade needed: " item)))
         (System/exit 1))
       (do
+        (when mcp-only?
+          (fs/delete-if-exists local-stage-sh)
+          (fs/delete-if-exists local-stage-bb))
         (when (and config (not= config upgraded))
           (write-stages! stages-file upgraded))
         (when (and gherkin-mutation-adopted?
@@ -461,6 +535,12 @@
                    operator-chat-block)
           (install-managed-block!
            agents-file operator-chat-begin operator-chat-end operator-chat-block))
+        (when mcp-only?
+          (doseq [file policy-files]
+            (when-not (stage-execution-current? file root)
+              (install-managed-block!
+               file stage-execution-begin stage-execution-end
+               (stage-execution-block root)))))
         (when-not (= (when (fs/regular-file? checker) (slurp (str checker)))
                      (slurp (str upgrade-source)))
           (fs/create-dirs (fs/parent checker))
@@ -495,6 +575,8 @@
         (println "added, complete its contract and documentation examples. Then run:")
         (println (str "  cd " root))
         (println "  export PATH=\"$PWD/.swarmforge/bin:$PWD/swarmforge/scripts:$PATH\"")
-        (println "  bb swarmforge/scripts/stage.bb list --root .")))))
+        (if mcp-only?
+          (println "  use the MCP stage tools, starting with stage_job_launch")
+          (println "  bb swarmforge/scripts/stage.bb list --root ."))))))
 
 (apply -main *command-line-args*)

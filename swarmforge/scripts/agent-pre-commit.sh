@@ -4,9 +4,6 @@ set -euo pipefail
 root="$(git rev-parse --show-toplevel)"
 [[ -f "$root/.swarmforge/single-agent" ]] || exit 0
 
-stage="$root/swarmforge/scripts/stage.bb"
-[[ -f "$stage" ]] || exit 0
-
 # The host records the operator-supplied mission before any agent card exists.
 # That one operator-owned file is not agent work and must not wait for a spec.
 staged="$(git -C "$root" diff --cached --name-only --diff-filter=ACMRTUXB)"
@@ -33,16 +30,57 @@ if [[ "${SWARMFORGE_MANAGED_RUNTIME_SYNC:-}" == "1" && -n "$staged" ]]; then
   [[ "$managed_runtime" == "true" ]] && exit 0
 fi
 
-export PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"
-approved="$(
-  bb "$stage" status --json --root "$root" 2>/dev/null \
-    | python3 -c 'import json,sys; print(str(json.load(sys.stdin).get("spec_approved", False)).lower())' \
-      2>/dev/null || true
-)"
+export PATH="/opt/homebrew/bin:${HOME:-}/.local/bin:$PATH"
 
-if [[ "$approved" != "true" ]]; then
+helper="${SWARMFORGE_STAGE_HELPER:-}"
+if [[ -z "$helper" && -f "$root/swarmforge/scripts/stage.bb" ]]; then
+  helper="$root/swarmforge/scripts/stage.bb"
+fi
+if [[ -z "$helper" && -f "$root/swarmforge/scripts/stage.sh" ]]; then
+  helper="$root/swarmforge/scripts/stage.sh"
+fi
+if [[ -z "$helper" ]]; then
+  runtime_config="${FORGELET_STAGE_RUNTIME_CONFIG:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/forgelet/stage-runtime.json}"
+  if [[ -f "$runtime_config" && ! -L "$runtime_config" ]]; then
+    runtime_mode="$(stat -f '%Lp' "$runtime_config" 2>/dev/null || stat -c '%a' "$runtime_config" 2>/dev/null || true)"
+    if [[ "$runtime_mode" =~ ^[0-7]+$ ]] && (( (8#$runtime_mode & 077) == 0 )); then
+      stage_home="$(
+        python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); value=data.get("stageHome"); print(value if isinstance(value,str) else "")' \
+          "$runtime_config" 2>/dev/null || true
+      )"
+    fi
+    if [[ -n "${stage_home:-}" && -f "$stage_home/stage.sh" && ! -L "$stage_home/stage.sh" ]]; then
+      helper="$stage_home/stage.sh"
+    elif [[ -n "${stage_home:-}" && -f "$stage_home/stage.bb" && ! -L "$stage_home/stage.bb" ]]; then
+      helper="$stage_home/stage.bb"
+    fi
+  fi
+fi
+
+if [[ -z "$helper" || ( ! -f "$helper" && ! -L "$helper" ) ]]; then
+  cat >&2 <<'MSG'
+Commit refused: no stage approval interface is available.
+Set SWARMFORGE_STAGE_HELPER or configure the MCP stage runtime's stageHome.
+The approval check fails closed; do not use --no-verify.
+MSG
+  exit 1
+fi
+
+if [[ "$helper" == *.bb ]]; then
+  approval_output="$(
+    bb "$helper" approval-status --root "$root" 2>/dev/null || true
+  )"
+else
+  approval_output="$(
+    "$helper" approval-status --root "$root" 2>/dev/null || true
+  )"
+fi
+
+if [[ "$approval_output" != "approved" ]]; then
   cat >&2 <<'MSG'
 Commit refused: the current spec bundle is not approved.
+If approval was expected, the stage approval interface was unavailable or
+returned invalid state.
 Run:
   bb swarmforge/scripts/stage.bb propose spec <files...>
   bb swarmforge/scripts/stage.bb approve <proposal> --words "<operator words>"

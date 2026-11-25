@@ -161,6 +161,17 @@
       (throw (ex-info (str "Missing host scripts at " src) {:http-status 500})))
     (copy-tree-replace! src (fs/path dest "swarmforge" "scripts"))))
 
+(defn mcp-only-project? [forge name]
+  (let [file (or (not-empty (System/getenv "SWARMFORGE_MCP_ONLY_ALLOWLIST"))
+                 (str (fs/path forge "swarmforge" "mcp-only-projects.conf")))]
+    (and (fs/regular-file? file)
+         (not (java.nio.file.Files/isSymbolicLink (fs/path file)))
+         (some #(= name %)
+               (->> (str/split-lines (slurp file))
+                    (map str/trim)
+                    (remove str/blank?)
+                    (remove #(str/starts-with? % "#")))))))
+
 (defn copy-shared-articles! [forge dest]
   (doseq [name shared-articles]
     (let [src (fs/path forge "swarmforge" "constitution" "articles" name)]
@@ -455,7 +466,12 @@
       (do
         (when-not source-layer?
           (copy-shared-scripts! forge dest)
-          (copy-shared-articles! forge dest))
+          (copy-shared-articles! forge dest)
+          (when (mcp-only-project? forge name)
+            (fs/delete-if-exists
+             (fs/path dest "swarmforge" "scripts" "stage.sh"))
+            (fs/delete-if-exists
+             (fs/path dest "swarmforge" "scripts" "stage.bb"))))
         (ensure-single-agent-role! dest)
         (let [installer (fs/path dest "swarmforge" "scripts" "install-agent-hooks.sh")]
           (when (fs/regular-file? installer)

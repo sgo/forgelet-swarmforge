@@ -27,6 +27,7 @@
        "  stage approve <proposal> --words \"<operator's words>\" [--root DIR]\n"
        "  stage reject <proposal> --words \"<operator's words>\" [--root DIR]\n"
        "  stage complete [--root DIR]\n"
+       "  stage approval-status [--root DIR]\n"
        "  stage status [--json] [--root DIR]\n"
        "\n"
        "A new task report has ## Verification and ## Operator acceptance\n"
@@ -2144,6 +2145,13 @@
           (when (contains? value key)
             (println (str (name key) "=" (get value key)))))))))
 
+(defn approval-status! [root config state]
+  (if (spec-approved? root config state)
+    (println "approved")
+    (do
+      (println "unapproved")
+      (System/exit 1))))
+
 (defn jobs! [root json?]
   (let [values (mapv #(stage-jobs/public-view % (now))
                      (stage-jobs/blocking-views root))]
@@ -2360,6 +2368,7 @@
                            (reject! root config state id (:words options))
                            (exit! 1 "Usage: stage reject <proposal> --words \"<words>\""))
                 "complete" (complete! root config state)
+                "approval-status" (approval-status! root config state)
                 "status" (if (:json options)
                            (println (status-json root config state))
                            (list! root config state))

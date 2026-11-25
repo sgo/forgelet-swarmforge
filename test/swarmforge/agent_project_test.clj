@@ -2393,6 +2393,95 @@
       (finally
         (delete-tree! forge-root)))))
 
+(deftest mcp-only-template-uses-the-shared-approval-interface
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent")
+        allowlist (fs/path forge "swarmforge" "mcp-only-projects.conf")
+        shared-stage (fs/path repo-root "swarmforge" "scripts" "stage.sh")]
+    (try
+      (write-file allowlist "agent\n")
+      (let [created (run repo-root composer "--forge" (str forge) "agent")]
+        (is (zero? (:exit created)) (str (:err created) (:out created))))
+      (is (fs/regular-file? (fs/path project "stages.edn")))
+      (is (not (fs/exists? (fs/path project "swarmforge/scripts/stage.sh"))))
+      (is (not (fs/exists? (fs/path project "swarmforge/scripts/stage.bb"))))
+      (write-file (fs/path project "tasks" "mcp-card.md")
+                  "# mcp-card\n\n## Operator-observed problem\n\nA card.\n")
+      (is (zero? (:exit (git project "add" "tasks/mcp-card.md"))))
+      (let [home (fs/path forge "empty-home")
+            missing (run-env project
+                             {"HOME" (str home)
+                              "XDG_CONFIG_HOME" (str home)
+                              "FORGELET_STAGE_RUNTIME_CONFIG"
+                              (str home "missing.json")}
+                             "git" "commit" "-m" "unapproved")]
+        (is (not (zero? (:exit missing))))
+        (is (str/includes? (str (:err missing))
+                           "no stage approval interface")))
+      (let [invalid-helper (fs/path forge "invalid-stage-helper.sh")]
+        (write-file invalid-helper "#!/bin/sh\necho invalid\n")
+        (fs/set-posix-file-permissions invalid-helper "rwxr-xr-x")
+        (let [invalid (run-env project
+                               {"SWARMFORGE_STAGE_HELPER" (str invalid-helper)}
+                               "git" "commit" "-m" "invalid helper")]
+          (is (not (zero? (:exit invalid))))
+          (is (str/includes? (str (:err invalid))
+                             "current spec bundle is not approved"))))
+      (seed-active-board-card! project)
+      (let [proposal (run project (str shared-stage)
+                          "propose" "spec" "tasks/mcp-card.md"
+                          "--root" (str project))]
+        (is (zero? (:exit proposal)) (str (:err proposal) (:out proposal))))
+      (let [runtime-config (fs/path forge "stage-runtime.json")]
+        (write-file runtime-config
+                    (json/generate-string
+                     {:stageHome (str (fs/path repo-root
+                                               "swarmforge" "scripts"))}))
+        (fs/set-posix-file-permissions runtime-config "rw-------")
+        (let [commit (run-env project
+                              {"FORGELET_STAGE_RUNTIME_CONFIG"
+                               (str runtime-config)}
+                              "git" "commit" "-m"
+                              "approved without local stage")]
+          (is (zero? (:exit commit)) (str (:err commit) (:out commit)))))
+      (is (not (fs/exists? (fs/path project "swarmforge/scripts/stage.sh"))))
+      (is (not (fs/exists? (fs/path project "swarmforge/scripts/stage.bb"))))
+      (finally
+        (stop-agent-session! project)
+        (delete-tree! forge)))))
+
+(deftest mcp-only-allowlist-controls-existing-project-migration
+  (let [forge (fixture-forge)
+        project (fs/path forge "projects" "agent")
+        allowlist (fs/path forge "swarmforge" "mcp-only-projects.conf")]
+    (try
+      (is (zero? (:exit (run repo-root composer "--forge" (str forge) "agent"))))
+      (is (fs/regular-file? (fs/path project "swarmforge/scripts/stage.sh")))
+      (is (fs/regular-file? (fs/path project "swarmforge/scripts/stage.bb")))
+      (let [stages-before (slurp (str (fs/path project "stages.edn")))]
+        (is (zero? (:exit
+                    (run repo-root composer "--upgrade" "agent"
+                         "--forge" (str forge) "--check"))))
+        (write-file allowlist "agent\n")
+        (let [check (run repo-root composer "--upgrade" "agent"
+                         "--forge" (str forge) "--check")]
+          (is (pos? (:exit check)))
+          (is (str/includes? (:out check)
+                             "remove project-local stage helpers")))
+        (let [upgraded (run repo-root composer "--upgrade" "agent"
+                            "--forge" (str forge))]
+          (is (zero? (:exit upgraded)) (str (:err upgraded) (:out upgraded))))
+        (is (not (fs/exists? (fs/path project "swarmforge/scripts/stage.sh"))))
+        (is (not (fs/exists? (fs/path project "swarmforge/scripts/stage.bb"))))
+        (is (= stages-before (slurp (str (fs/path project "stages.edn")))))
+        (open-without-start! forge "agent")
+        (is (not (fs/exists? (fs/path project "swarmforge/scripts/stage.sh"))))
+        (is (not (fs/exists? (fs/path project "swarmforge/scripts/stage.bb"))))
+        (is (= stages-before (slurp (str (fs/path project "stages.edn"))))))
+      (finally
+        (stop-agent-session! project)
+        (delete-tree! forge)))))
+
 (deftest a-pack-project-converts-in-place-after-a-safe-dry-run
   (let [forge (fixture-forge)
         project (fs/path forge "projects" "pack")
