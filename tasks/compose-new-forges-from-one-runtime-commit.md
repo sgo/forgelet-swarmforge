@@ -81,9 +81,29 @@ catalogue and removes the partial destination.
 
 ## Verification
 
-A disposable create from the published layer installs exactly one runtime
-identity, current file hashes match that source, the manifest records the same
-commit, and the Family is immediately `current` without a repair upgrade.
+The composer resolves the layer commit once, fetches that exact SHA, carries it
+into the manifest, and compares every layer-owned installed file with the
+resolved source before writing the runtime claim. Conflicting
+`SWARMFORGE_BASE_DIR`/`SWARMFORGE_GIT_DIR` selectors and an uncommitted local
+runtime fail before target mutation. A branch-advance fixture proves that the
+product fetch cannot switch the installed runtime to the newer layer commit.
+Bridge installation is followed by a byte-for-byte restore of the layer runtime
+while the installed adapter and bridge state are preserved.
+
+The full `bb test` gate passed 531 tests with 4,273 assertions, all 20 dashboard
+browser tests, and the bounded-projection E2E; the detached lifecycle E2E
+completed in 1,506 ms. The `bb crap` clean gate passed 24 tests with 132
+assertions and wrote `target/coverage/lcov.info`. The documentation contract
+passed 3 documents and 5 sections.
+
+A real Host provisioning operation created a disposable Family from published
+commit `586a97d0c451d27efedcaa33ae64868ffec96540`. Its manifest and runtime
+status both recorded that commit, installed and available digests matched at
+`sha256:89b2531c7cb5752eb9e6771b85eabdf3550c18f87a629ba07c3965fe61684834`,
+and status was immediately `current` with no changes, blockers or project
+upgrades. The three formerly stale files matched the published source bytes.
+The Family was reachable with no repair upgrade; Host removal completed and the
+disposable directory was moved to Trash.
 
 ## Operator acceptance
 
