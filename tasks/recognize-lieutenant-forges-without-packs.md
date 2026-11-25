@@ -71,8 +71,31 @@ that is a compatibility accident, not a lifecycle marker.
 
 ## Verification
 
-The tic-tac-toe forge, upgraded with no projects open, starts successfully and
-becomes reachable through the Host without a synthetic `packs/` directory.
+One lifecycle predicate now recognizes `.swarmforge/project-pack` as the modern
+Lieutenant marker and `packs/` as legacy compatibility. Config parsing, role
+restart, enclosing-project discovery, top-level dispatch, health, project
+open/close and runtime stop use that predicate. A lieutenant configuration with
+neither marker fails with bounded guidance before creating runtime sessions or
+a dashboard.
+
+Actual startup tests passed for both modern and legacy Lieutenant roots, with
+the modern root containing no `packs/` directory and both roots reporting
+`healthy`. Unsupported lieutenant agents still fail validation.
+
+The full `bb test` gate passed 535 tests with 4,292 assertions, all 20 dashboard
+browser tests, and the bounded-projection E2E; the detached lifecycle E2E
+completed in 1,489 ms. The `bb crap` clean gate passed 24 tests with 132
+assertions and wrote `target/coverage/lcov.info`. The documentation contract
+passed 3 documents and 5 sections.
+
+A real Host-created disposable modern Family had `.swarmforge/project-pack`,
+no `packs/`, reported `healthy`, and was immediately `current`. To exercise the
+reported upgrade path, its installed runtime was returned to the previous
+`7ffd25e` `swarmforge.bb` identity and status reported one pending update. The
+normal runtime upgrade then reached `current` at
+`47fed48ece5a768334eb753b63a2d41309faee48`, started the updated modern Family,
+and Host reported it reachable with no synthetic `packs/` directory. The
+disposable Family was removed through Host and its directory moved to Trash.
 
 ## Operator acceptance
 
