@@ -947,6 +947,13 @@ Actionable confirmations should be phrased as `Reply with "Done"` and submitted
 with `--reply-with "Done"`; otherwise the literal-prose override is still
 required.
 
+Answers containing the case-insensitive phrase `confirm when`, including
+`confirm when it is ready`, receive the same quick-reply reminder. This is
+deliberately narrower than a general imperative use of “confirm”: bare
+`confirm`, `confirm that` and descriptive mentions remain ordinary prose. The
+helper still requires `--reply-with` or `--without-quick-reply` and never
+invents the reply value.
+
 Answers containing a bounded double-quoted `say "..."` instruction receive the
 same quick-reply reminder. That text is not parsed into a reply, route action or
 approval: the agent must choose the exact action text and submit it explicitly.
