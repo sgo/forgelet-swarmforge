@@ -59,10 +59,34 @@ must retain a fail-closed spec-approval check without a local stage helper.
 
 ## Verification
 
-A fresh disposable project runs with no local stage executable, MCP registration
-is the only normal stage path, the pre-commit spec check fails closed without
-the shared interface, and no existing project is changed by this preparation
-card.
+The allowlist defaults to a non-existent forge file, so the preparation is
+inactive until an operator names projects explicitly. Fresh allowlisted
+projects omit only `stage.sh` and `stage.bb`; explicit upgrades do the same,
+while projects outside the list keep both helpers. Reopening a migrated project
+refreshes shared runtime files without restoring either stage executable, and
+the project-owned `stages.edn` remains byte-identical.
+
+`stage approval-status` is the shared approval interface. The pre-commit hook
+uses a legacy local helper when present, otherwise `SWARMFORGE_STAGE_HELPER`,
+otherwise the owner-only MCP stage runtime configuration's `stageHome`. A
+fresh project without either helper refused an unapproved commit, an invalid
+helper refused the commit, and an approved spec committed successfully with no
+local stage executable.
+
+The MCP stage E2E passed with one-second detached stages: Codex and Claude
+registrations used the unchanged project grant schema, the six stage tools were
+available, `stage_job_launch` was selected, the completion wake was reconciled,
+and cancellation, retry and project isolation all passed. This prepares the
+path but does not claim the separate real-harden acceptance.
+
+The full `bb test` gate passed 537 tests with 4,318 assertions, all 20 dashboard
+browser tests, and the bounded-projection E2E; the detached lifecycle E2E
+completed in 1,569 ms. The `bb crap` clean gate passed 24 tests with 132
+assertions and wrote `target/coverage/lcov.info`. The documentation contract
+passed 3 documents and 5 sections.
+
+The active forge has no migration allowlist entry from this card, so no existing
+project was migrated or restarted.
 
 ## Operator acceptance
 
