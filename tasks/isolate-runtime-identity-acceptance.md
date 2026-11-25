@@ -99,5 +99,4 @@ check.
 
 ## Operator acceptance
 
-None in source. Live app/Host creation remains a separately invoked operator
-check.
+- owner: operator | environment: released Host and live Matrix | checks: explicitly requested live app/Host creation | status: pending
