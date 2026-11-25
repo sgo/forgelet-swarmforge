@@ -63,3 +63,7 @@ A fresh disposable project runs with no local stage executable, MCP registration
 is the only normal stage path, the pre-commit spec check fails closed without
 the shared interface, and no existing project is changed by this preparation
 card.
+
+## Operator acceptance
+
+None.

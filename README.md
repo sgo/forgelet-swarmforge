@@ -244,6 +244,20 @@ Closing the project stops both the relay and the `swarmforge-agent` session;
 `agent-runner.bb --stop-agent` stops only the agent, leaving the phone relay
 running.
 
+MCP-only stage execution is a dark, explicitly allow-listed migration. List
+exact project names in `<forge>/swarmforge/mcp-only-projects.conf` (or name a
+different file with `SWARMFORGE_MCP_ONLY_ALLOWLIST`). An allow-listed fresh or
+upgraded project omits only its local `stage.sh` and `stage.bb`; `stages.edn`,
+project scripts and stage history remain project-owned. The allowlist also
+keeps those helpers absent when a project runtime is refreshed or reopened.
+Without that file every existing project keeps its current local helper.
+
+The project pre-commit hook now asks a shared stage helper for
+`approval-status`. It uses the local helper for legacy projects, then
+`SWARMFORGE_STAGE_HELPER`, then the shared `stageHome` from the MCP stage
+runtime configuration. Missing helpers, invalid output and unapproved specs all
+refuse the commit.
+
 While a delivered request is otherwise idle, the runner reads that project's
 typed clarification records before considering a continuation nudge. Any open
 clarification holds every later nudge pass, including after its attention moves

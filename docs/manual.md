@@ -44,3 +44,20 @@ different composed runtime.
 
 An upgrade does not grant permission to restart the independently managed
 `forgelet-host` process.
+
+## MCP-only project preparation
+
+MCP-only stage execution remains disabled by default. A forge-owned
+`swarmforge/mcp-only-projects.conf` may list exact single-agent project names;
+`SWARMFORGE_MCP_ONLY_ALLOWLIST` can select a different file. For those projects,
+fresh composition and explicit upgrade omit the local `stage.sh` and `stage.bb`.
+Only those executables are removed: `stages.edn`, project scripts, task notes
+and stage evidence remain, and runtime refresh keeps the helpers absent.
+Projects outside the allowlist are unchanged.
+
+The managed stage guidance block selects the MCP tool sequence only when
+`.swarmforge/mcp/stage-grants.json` is a valid owner-only enabled grant for that
+Family and project. Otherwise it records a clearly marked local-helper fallback.
+The project pre-commit hook calls the shared `stage approval-status` interface
+instead of treating a missing local helper as success. Missing, unreadable or
+invalid approval state fails closed.
