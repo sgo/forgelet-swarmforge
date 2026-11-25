@@ -1,5 +1,6 @@
 (ns swarmforge.script-test
   (:require [babashka.fs :as fs]
+            [clojure.edn :as edn]
             [clojure.java.shell :as sh]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
@@ -2745,6 +2746,158 @@
         (fs/delete-tree base)
         (fs/delete-tree packs)
         (fs/delete-tree bridge)))))
+
+(deftest get-swarm-forge-rejects-conflicting-layer-sources-before-composition
+  (let [host (tmp-dir)
+        base (tmp-dir)
+        git-dir (tmp-dir)
+        sentinel (fs/path host "operator-work.txt")]
+    (try
+      (write-file sentinel "keep\n")
+      (let [result
+            (run {:dir host
+                  :ok? false
+                  :env {"SWARMFORGE_BASE_DIR" (str base)
+                        "SWARMFORGE_GIT_DIR" (str git-dir)
+                        "SWARMFORGE_SKIP_BRIDGE" "1"}}
+                 (str (fs/path repo-root "get-swarm-forge"))
+                 "project-manager")]
+        (is (not (zero? (:exit result))))
+        (is (str/includes? (str (:err result))
+                           "SWARMFORGE_BASE_DIR and SWARMFORGE_GIT_DIR select different layer sources"))
+        (is (= "keep\n" (slurp (str sentinel))))
+        (is (not (fs/exists? (fs/path host "projects"))))
+        (is (not (fs/exists? (fs/path host ".swarmforge/project-pack")))))
+      (finally
+        (fs/delete-tree host)
+        (fs/delete-tree base)
+        (fs/delete-tree git-dir)))))
+
+(deftest get-swarm-forge-rejects-a-local-layer-without-one-committed-identity
+  (let [host (tmp-dir)
+        base (tmp-dir)]
+    (try
+      (write-file (fs/path base "swarm") "#!/bin/sh\n# committed\n")
+      (run {:dir base} "git" "init" "-q")
+      (run {:dir base} "git" "config" "user.email" "test@example.com")
+      (run {:dir base} "git" "config" "user.name" "Test User")
+      (run {:dir base} "git" "add" "swarm")
+      (run {:dir base} "git" "commit" "-q" "-m" "layer")
+      (write-file (fs/path base "swarm") "#!/bin/sh\n# uncommitted\n")
+      (let [result
+            (run {:dir host
+                  :ok? false
+                  :env {"SWARMFORGE_BASE_DIR" (str base)
+                        "SWARMFORGE_SKIP_BRIDGE" "1"}}
+                 (str (fs/path repo-root "get-swarm-forge"))
+                 "project-manager")]
+        (is (not (zero? (:exit result))))
+        (is (str/includes? (str (:err result))
+                           "uncommitted runtime changes"))
+        (is (not (fs/exists? (fs/path host "projects"))))
+        (is (not (fs/exists? (fs/path host "swarm")))))
+      (finally
+        (fs/delete-tree host)
+        (fs/delete-tree base)))))
+
+(deftest get-swarm-forge-keeps-the-layer-commit-resolved-before-a-branch-advance
+  (let [root (tmp-dir)
+        host (fs/path root "host")
+        layer (fs/path root "layer")
+        product-parent (fs/path root "product")
+        pack (fs/path product-parent "two-pack")
+        bin (fs/path root "bin")
+        curl (fs/path bin "curl")]
+    (try
+      (fs/create-dirs host)
+      (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"
+                    "route_card.sh" "route_card.bb"
+                    "install-agent-credentials.sh"
+                    "matrix-bridge.sh"]]
+        (write-file (fs/path layer "swarmforge/scripts" name) (str name "\n")))
+      (fs/copy (fs/path scripts-dir "forge_runtime_upgrade.bb")
+               (fs/path layer "swarmforge/scripts/forge_runtime_upgrade.bb"))
+      (fs/copy (fs/path scripts-dir "forge_runtime_upgrade.sh")
+               (fs/path layer "swarmforge/scripts/forge_runtime_upgrade.sh"))
+      (write-file (fs/path layer "swarmforge/scripts/doorbell.bb")
+                  "OLD-DOORBELL\n")
+      (write-file (fs/path layer "swarmforge/scripts/role_health.bb")
+                  "OLD-ROLE-HEALTH\n")
+      (doseq [name ["engineering.prompt" "workflow.prompt" "handoffs.prompt"
+                    "privacy.prompt" "stopping-without-finishing.prompt"]]
+        (write-file (fs/path layer "swarmforge/constitution/articles" name)
+                    (str "OLD-" name "\n")))
+      (write-file (fs/path layer "swarmforge/constitution.prompt")
+                  "OLD-CONSTITUTION\n")
+      (write-file (fs/path layer "swarmforge/roles/lieutenant.prompt")
+                  "OLD-LIEUTENANT\n")
+      (write-file (fs/path layer "swarm") "#!/bin/sh\necho old\n")
+      (run {:dir layer} "git" "init" "-q")
+      (run {:dir layer} "git" "config" "user.email" "test@example.com")
+      (run {:dir layer} "git" "config" "user.name" "Test User")
+      (run {:dir layer} "git" "add" ".")
+      (run {:dir layer} "git" "commit" "-q" "-m" "old runtime")
+      (run {:dir layer} "git" "branch" "-M" "forgelet")
+      (let [old-commit (str/trim
+                        (:out (run {:dir layer} "git" "rev-parse" "HEAD")))]
+        (write-file (fs/path pack "swarm") "#!/bin/sh\necho pack\n")
+        (write-file (fs/path pack "swarmforge/swarmforge.conf")
+                    "window coder\n")
+        (write-file (fs/path pack "swarmforge/roles/coder.prompt")
+                    "coder\n")
+        (write-file
+         curl
+         (str "#!/bin/sh\n"
+              "set -eu\n"
+              "out=''\n"
+              "url=''\n"
+              "while [ $# -gt 0 ]; do\n"
+              "  case \"$1\" in\n"
+              "    -o) out=\"$2\"; shift 2 ;;\n"
+              "    -*) shift ;;\n"
+              "    *) url=\"$1\"; shift ;;\n"
+              "  esac\n"
+              "done\n"
+              "case \"$url\" in\n"
+              "  */archive/refs/heads/two-pack.tar.gz)\n"
+              "    tar -czf \"$out\" -C " (str product-parent) " two-pack\n"
+              "    printf 'NEW-ROLE-HEALTH\\n' > "
+              (str (fs/path layer "swarmforge/scripts/role_health.bb")) "\n"
+              "    git -C " (str layer) " add swarmforge/scripts/role_health.bb\n"
+              "    git -C " (str layer)
+              " -c user.name='Test User' -c user.email='test@example.com'"
+              " commit -q -m 'branch advanced during composition'\n"
+              "    ;;\n"
+              "  *) exit 22 ;;\n"
+              "esac\n"))
+        (run {:dir root} "chmod" "+x" (str curl))
+        (let [result
+              (run {:dir host
+                    :env {"PATH" (str bin ":" (System/getenv "PATH"))
+                          "SWARMFORGE_REPO_URL" "https://fixture.invalid"
+                          "SWARMFORGE_GIT_DIR" (str layer)
+                          "SWARMFORGE_SKIP_BRIDGE" "1"
+                          "SWARMFORGE_NO_SELF_UPDATE" "1"}}
+                   (str (fs/path repo-root "get-swarm-forge"))
+                   "two-pack")
+              manifest (edn/read-string
+                        (slurp (str (fs/path host
+                                             ".swarmforge/runtime-manifest.edn"))))
+              advanced (str/trim
+                        (:out (run {:dir layer} "git" "rev-parse" "HEAD")))]
+          (is (zero? (:exit result)) (str (:err result) (:out result)))
+          (is (not= old-commit advanced))
+          (is (= old-commit (:source_commit manifest)))
+          (is (= "OLD-ROLE-HEALTH\n"
+                 (slurp (str (fs/path host
+                                      "swarmforge/scripts/role_health.bb")))))
+          (is (= "OLD-DOORBELL\n"
+                 (slurp (str (fs/path host
+                                      "swarmforge/scripts/doorbell.bb")))))
+          (is (= "#!/bin/sh\necho old\n"
+                 (slurp (str (fs/path host "swarm")))))))
+      (finally
+        (fs/delete-tree root)))))
 
 (deftest get-swarm-forge-updates-its-own-copy-from-the-layer
   ;; Given an installed helper and a layer whose branch carries a different one

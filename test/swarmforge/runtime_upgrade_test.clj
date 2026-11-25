@@ -309,20 +309,27 @@
                   "window specifier grok master\n")
       (write-file (fs/path packs name "swarmforge/roles/specifier.prompt")
                   "specifier\n"))
-    (let [composed
+    (run {:dir base} "git" "init" "-q")
+    (run {:dir base} "git" "config" "user.email" "test@example.com")
+    (run {:dir base} "git" "config" "user.name" "Test User")
+    (run {:dir base} "git" "add" ".")
+    (run {:dir base} "git" "commit" "-q" "-m" "runtime fixture")
+    (let [base-commit (str/trim
+                       (:out (run {:dir base} "git" "rev-parse" "HEAD")))
+          composed
           (run {:dir target
                 :env {"SWARMFORGE_BASE_DIR" (str base)
                       "SWARMFORGE_PACKS_DIR" (str packs)
                       "SWARMFORGE_SKIP_BRIDGE" "1"
                       "SWARMFORGE_NO_SELF_UPDATE" "1"
-                      "SWARMFORGE_SOURCE_COMMIT" source-commit}}
+                      "SWARMFORGE_SOURCE_COMMIT" base-commit}}
                (str (fs/path repo-root "get-swarm-forge"))
                "project-manager")
           manifest-file (fs/path target ".swarmforge/runtime-manifest.edn")]
       (is (zero? (:exit composed)) (str (:err composed) (:out composed)))
       (is (fs/regular-file? manifest-file))
       (let [manifest (clojure.edn/read-string (slurp (str manifest-file)))]
-        (is (= source-commit (:source_commit manifest)))
+        (is (= base-commit (:source_commit manifest)))
         (is (= "project-manager" (:product manifest)))
         (is (str/starts-with? (:digest manifest) "sha256:"))
         (is (some #(= "swarmforge/scripts/forge_runtime_upgrade.bb" (first %))

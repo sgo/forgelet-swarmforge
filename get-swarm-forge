@@ -115,14 +115,13 @@ maybe-update-self() {
   fi
   echo "get-swarm-forge: replaced itself with the helper from ${base_ref} and starting again"
   rm -rf "$tmp_dir"
-  SWARMFORGE_SELF_UPDATED=1 exec "$mine" "${original_args[@]}"
+  SWARMFORGE_SOURCE_COMMIT="$composed_layer_commit" \
+    SWARMFORGE_SELF_UPDATED=1 exec "$mine" "${original_args[@]}"
 }
 
 local_git_dir() {
   if [[ -v SWARMFORGE_GIT_DIR ]]; then
     echo "$SWARMFORGE_GIT_DIR"
-  elif [[ -d "$HOME/projects/swarm-forge/.git" ]]; then
-    echo "$HOME/projects/swarm-forge"
   fi
 }
 
@@ -246,6 +245,17 @@ copy_shared_skills() {
   done
 }
 
+copy_shared_runtime() {
+  local src="$1"
+  copy_shared_scripts_and_articles "$src"
+  copy_shared_skills "$src"
+  [[ -f "$src/swarm" ]] && cp "$src/swarm" swarm
+  [[ -f "$src/swarmforge/constitution.prompt" ]] \
+    && cp "$src/swarmforge/constitution.prompt" swarmforge/constitution.prompt
+  [[ -f "$src/swarmforge/roles/lieutenant.prompt" ]] \
+    && cp "$src/swarmforge/roles/lieutenant.prompt" swarmforge/roles/lieutenant.prompt
+}
+
 copy_host_files() {
   local src="$1"
   copy_shared_scripts_and_articles "$src"
@@ -316,40 +326,168 @@ merge_ignore_lines() {
   done < "$src"
 }
 
-canonical_source_commit() {
-  local commit="${SWARMFORGE_SOURCE_COMMIT:-}"
-  if [[ -n "$commit" ]]; then
-    if [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then
-      echo "$commit"
-      return 0
-    fi
-    echo "get-swarm-forge: SWARMFORGE_SOURCE_COMMIT must be a 40-character lowercase Git commit" >&2
-    exit 1
-  fi
+source_commit_re='^[0-9a-f]{40}$'
+
+fail_source() {
+  echo "get-swarm-forge: $1" >&2
+  exit 1
+}
+
+validate_source_selection() {
+  local declared="${SWARMFORGE_SOURCE_COMMIT:-}"
+  local base="${SWARMFORGE_BASE_DIR:-}"
   local git_dir
   git_dir="$(local_git_dir)"
-  if [[ -n "$git_dir" && -d "$git_dir/.git" ]]; then
-    commit="$(git -C "$git_dir" rev-parse "refs/heads/$base_ref^{commit}" 2>/dev/null || true)"
+
+  if [[ -n "$base" && -n "$git_dir" ]]; then
+    fail_source "SWARMFORGE_BASE_DIR and SWARMFORGE_GIT_DIR select different layer sources; set only one, or leave both unset to use the published $base_ref branch"
   fi
-  if [[ -z "$commit" ]]; then
+  if [[ -n "$declared" && ! "$declared" =~ $source_commit_re ]]; then
+    fail_source "SWARMFORGE_SOURCE_COMMIT must be a 40-character lowercase Git commit"
+  fi
+  if [[ -n "$git_dir" ]]; then
+    [[ -d "$git_dir/.git" ]] \
+      || fail_source "SWARMFORGE_GIT_DIR is not a Git checkout: $git_dir"
+    if [[ -n "$declared" ]] \
+         && ! git -C "$git_dir" cat-file -e "$declared^{commit}" 2>/dev/null; then
+      fail_source "SWARMFORGE_SOURCE_COMMIT $declared is not present in SWARMFORGE_GIT_DIR"
+    fi
+  fi
+  if [[ -n "$base" && ! -d "$base" ]]; then
+    fail_source "SWARMFORGE_BASE_DIR is not a directory: $base"
+  fi
+  if [[ -n "$base" && ! -d "$base/.git" \
+        && -f "$base/swarmforge/scripts/forge_runtime_upgrade.bb" ]]; then
+    fail_source "SWARMFORGE_BASE_DIR must be a Git checkout so the runtime manifest can name one exact source commit; set SWARMFORGE_GIT_DIR to that checkout or use the published branch"
+  fi
+}
+
+resolve_layer_commit() {
+  local declared="${SWARMFORGE_SOURCE_COMMIT:-}"
+  local base="${SWARMFORGE_BASE_DIR:-}"
+  local git_dir commit
+  git_dir="$(local_git_dir)"
+
+  if [[ -n "$declared" ]]; then
+    echo "$declared"
+    return
+  fi
+  if [[ -n "$git_dir" ]]; then
+    commit="$(git -C "$git_dir" rev-parse "refs/heads/$base_ref^{commit}" 2>/dev/null || true)"
+  elif [[ -n "$base" && -d "$base/.git" ]]; then
+    commit="$(git -C "$base" rev-parse "HEAD^{commit}" 2>/dev/null || true)"
+  elif [[ -z "$base" ]]; then
     commit="$(git ls-remote "$repo_url" "refs/heads/$base_ref" 2>/dev/null \
       | awk 'NR == 1 { print $1 }')"
+  elif [[ ! -f "$base/swarmforge/scripts/forge_runtime_upgrade.bb" ]]; then
+    return
   fi
-  if [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then
-    echo "$commit"
+  if [[ ! "$commit" =~ $source_commit_re ]]; then
+    fail_source "could not resolve one canonical commit for the $base_ref layer"
   fi
+  echo "$commit"
+}
+
+verify_git_source_commit() {
+  local git_dir="$1" commit="$2" head dirty
+  head="$(git -C "$git_dir" rev-parse HEAD 2>/dev/null || true)"
+  [[ "$head" == "$commit" ]] \
+    || fail_source "local layer checkout is at ${head:-an unknown commit}, not the requested source commit $commit"
+  dirty="$(git -C "$git_dir" status --porcelain --untracked-files=no \
+    -- swarm swarmforge 2>/dev/null)"
+  [[ -z "$dirty" ]] \
+    || fail_source "local layer checkout has uncommitted runtime changes; commit them before composing so the manifest and files name the same source"
+}
+
+verify_layer_identity() {
+  local layer="$1" commit="$2" actual=""
+  if [[ -d "$layer/.git" ]]; then
+    actual="$(git -C "$layer" rev-parse HEAD 2>/dev/null || true)"
+  elif [[ -f "$layer/.swarmforge-source-commit" ]]; then
+    actual="$(<"$layer/.swarmforge-source-commit")"
+  fi
+  [[ "$actual" == "$commit" ]] \
+    || fail_source "composed layer identity is ${actual:-missing}, not the resolved source commit $commit"
+}
+
+download_layer_commit() {
+  local dest="$1" commit="$2" git_dir tar_path url
+  git_dir="$(local_git_dir)"
+  mkdir -p "$dest"
+  if [[ -n "$git_dir" ]]; then
+    git -C "$git_dir" archive --format=tar "$commit" | tar -x -C "$dest"
+  else
+    tar_path="$tmp_dir/layer-$commit.tgz"
+    url="$repo_url/archive/$commit.tar.gz"
+    if ! curl -fsSL "$url" -o "$tar_path" 2>/dev/null; then
+      if command -v gh >/dev/null 2>&1 && gh auth token >/dev/null 2>&1; then
+        curl -fsSL -H "Authorization: Bearer $(gh auth token)" \
+          "$url" -o "$tar_path" \
+          || fail_source "the exact layer commit $commit was not available at $url"
+      else
+        fail_source "the exact layer commit $commit was not available at $url"
+      fi
+    fi
+    tar -xzf "$tar_path" --strip-components=1 -C "$dest"
+  fi
+  printf '%s\n' "$commit" > "$dest/.swarmforge-source-commit"
+  verify_layer_identity "$dest" "$commit"
+}
+
+compare_runtime_file() {
+  local layer="$1" relative="$2"
+  [[ -f "$layer/$relative" ]] || fail_source "the resolved layer is missing runtime file $relative"
+  [[ -f "$PWD/$relative" ]] || fail_source "composition did not install runtime file $relative"
+  cmp -s "$layer/$relative" "$PWD/$relative" \
+    || fail_source "installed runtime file $relative does not match source commit $composed_layer_commit"
+}
+
+compare_runtime_tree() {
+  local layer="$1" relative_root="$2" file relative
+  [[ -d "$layer/$relative_root" ]] || return 0
+  while IFS= read -r -d '' file; do
+    relative="${file#$layer/}"
+    [[ "$relative" == "swarmforge/scripts/matrix-bridge.sh" ]] && continue
+    compare_runtime_file "$layer" "$relative"
+  done < <(find "$layer/$relative_root" -type f -print0)
+}
+
+verify_composed_runtime() {
+  local layer="$1" relative
+  verify_layer_identity "$layer" "$composed_layer_commit"
+  for relative in \
+    swarm \
+    swarmforge/constitution.prompt \
+    swarmforge/roles/lieutenant.prompt \
+    swarmforge/constitution/articles/engineering.prompt \
+    swarmforge/constitution/articles/workflow.prompt \
+    swarmforge/constitution/articles/handoffs.prompt \
+    swarmforge/constitution/articles/privacy.prompt \
+    swarmforge/constitution/articles/stopping-without-finishing.prompt; do
+    compare_runtime_file "$layer" "$relative"
+  done
+  compare_runtime_tree "$layer" swarmforge/scripts
+  compare_runtime_tree "$layer" swarmforge/skills
 }
 
 write_runtime_manifest() {
   local layer="${1:-$main_dir}"
   local helper="$layer/swarmforge/scripts/forge_runtime_upgrade.bb"
   [[ -f "$helper" ]] || return 0
-  local commit
-  commit="$(canonical_source_commit)"
-  [[ -n "$commit" ]] \
+  local manifest_commit
+  [[ "$composed_layer_commit" =~ $source_commit_re ]] \
     || fail_missing "canonical source commit for the composed runtime manifest"
+  verify_composed_runtime "$layer"
   bb "$helper" manifest --forge "$PWD" --source-layer "$layer" \
-    --product "$product" --source-commit "$commit"
+    --product "$product" --source-commit "$composed_layer_commit"
+  manifest_commit="$(bb -e \
+    '(require (quote [clojure.edn :as edn]))
+     (print (:source_commit
+             (edn/read-string
+              (slurp (first *command-line-args*)))))' \
+    "$PWD/.swarmforge/runtime-manifest.edn")"
+  [[ "$manifest_commit" == "$composed_layer_commit" ]] \
+    || fail_source "runtime manifest records ${manifest_commit:-no source commit}, not resolved source commit $composed_layer_commit"
 }
 
 install_pack_ignores() {
@@ -533,6 +671,9 @@ restore_layer_route_gate() {
   done
 }
 
+validate_source_selection
+composed_layer_commit="$(resolve_layer_commit)"
+
 host_dir="${SWARMFORGE_BASE_DIR:-$tmp_dir/host}"
 host_from="$product"
 packs_src="${SWARMFORGE_PACKS_DIR:-}"
@@ -540,7 +681,7 @@ main_dir="$tmp_dir/main"
 
 if [[ "$product" == two-pack || "$product" == four-pack || "$product" == six-pack ]]; then
   if [[ -z "${SWARMFORGE_BASE_DIR:-}" ]]; then
-    download_branch "$base_ref" "$main_dir"
+    download_layer_commit "$main_dir" "$composed_layer_commit"
     host_dir="$main_dir"
   fi
   maybe-update-self "$main_dir"
@@ -555,8 +696,8 @@ if [[ "$product" == two-pack || "$product" == four-pack || "$product" == six-pac
     fi
   fi
   [[ -n "$pack_src" && -d "$pack_src" ]] || fail_missing "pack $product"
-  copy_shared_scripts_and_articles "$host_dir"
   copy_pack_template "$pack_src" "."
+  copy_shared_runtime "$host_dir"
   merge_ignore_lines "$host_dir/swarmforge/packs/$product/gitignore" ".gitignore"
   [[ -f swarm ]] || fail_missing "swarm from pack $product"
   chmod +x swarm
@@ -578,11 +719,15 @@ fi
 
 if [[ -z "${SWARMFORGE_BASE_DIR:-}" ]]; then
   download_branch "$product" "$host_dir"
-  download_branch "$base_ref" "$main_dir"
+  download_layer_commit "$main_dir" "$composed_layer_commit"
 fi
 
 layer_dir="$main_dir"
 [[ -n "${SWARMFORGE_BASE_DIR:-}" ]] && layer_dir="$host_dir"
+
+if [[ -d "$layer_dir/.git" && -z "${SWARMFORGE_GIT_DIR:-}" ]]; then
+  verify_git_source_commit "$layer_dir" "$composed_layer_commit"
+fi
 
 maybe-update-self "$main_dir"
 
@@ -590,14 +735,10 @@ mkdir -p projects
 copy_host_files "$host_dir"
 
 # A forge product branch carries its own copy of the shared runtime, which is
-# whatever it was when that branch was last refreshed. This fork's shared runtime
-# is the layer on $base_ref, so it is overlaid last and wins, the way a pack is
-# overlaid by the branch that owns the shared files: the product keeps its
+# whatever it was when that branch was last refreshed. The resolved layer is
+# overlaid last and wins for every shared runtime file: the product keeps its
 # configuration, roles, and scaffolding.
-if [[ -z "${SWARMFORGE_BASE_DIR:-}" ]]; then
-  copy_shared_scripts_and_articles "$main_dir"
-  copy_shared_skills "$main_dir"
-fi
+copy_shared_runtime "$layer_dir"
 
 overlay_lieutenant_prompt "$host_dir" "$main_dir"
 seed_local_lieutenant_prompt "$host_dir" "$main_dir"
