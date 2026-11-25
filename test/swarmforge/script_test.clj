@@ -180,6 +180,17 @@
         (is (= ["other" "thing"] (open-projects-names forge)))
         (run {:dir root} (script "swarmforge.bb") "--test-mark-project" (str project) "closed")
         (is (= ["other"] (open-projects-names forge)))
+        (let [modern (fs/path root "modern")
+              modern-project (fs/path modern "projects" "thing")]
+          (fs/create-dirs (fs/path modern ".swarmforge/project-pack/swarmforge"))
+          (fs/create-dirs modern-project)
+          (run {:dir root} (script "swarmforge.bb")
+               "--test-mark-project" (str modern-project) "open")
+          (is (= ["thing"] (open-projects-names modern)))
+          (is (= (str modern)
+                 (str/trim
+                  (:out (run {:dir root} (script "swarmforge.bb")
+                             "--test-enclosing-forge" (str modern-project)))))))
         ;; A project composed on its own - a pack installed into a directory - has
         ;; no forge above it, and nothing is written for one.
         (run {:dir root} (script "swarmforge.bb") "--test-mark-project" (str root) "open")
@@ -442,6 +453,88 @@
         (is (str/includes? (:out result) "swarmforge-coder"))
         (is (str/includes? (:out result) "swarmforge-cleaner"))
         (is (fs/exists? (fs/path root ".swarmforge/tmux-socket"))))
+      (finally
+        (fs/delete-tree root)))))
+
+(defn lieutenant-root! [root marker]
+  (write-file (fs/path root "swarmforge/constitution.prompt") "Read articles.\n")
+  (write-file (fs/path root "swarmforge/roles/lieutenant.prompt")
+              "Lieutenant prompt.\n")
+  (write-file (fs/path root "swarmforge/swarmforge.conf")
+              "lieutenant claude\n")
+  (case marker
+    :modern (fs/create-dirs (fs/path root ".swarmforge/project-pack/swarmforge"))
+    :legacy (write-file (fs/path root "packs/keep") "")
+    nil))
+
+(defn lieutenant-start-env [root]
+  (let [bin (fs/path root "test-bin")
+        home (fs/path root "home")
+        claude (fs/path bin "claude")]
+    (fs/create-dirs home)
+    (write-file claude "#!/bin/sh\nexec sleep 120\n")
+    (run {:dir root} "chmod" "+x" (str claude))
+    {"HOME" (str home)
+     "PATH" (str bin ":" (System/getenv "PATH"))
+     "SWARMFORGE_AGENT_START_DELAY_MS" "0"
+     "SWARMFORGE_PREVENT_SLEEP" "0"
+     "SWARMFORGE_TERMINAL" "none"}))
+
+(defn start-and-check-lieutenant! [marker]
+  (let [root (tmp-dir)]
+    (try
+      (lieutenant-root! root marker)
+      (let [env (lieutenant-start-env root)
+            started (run {:dir root :env env}
+                         (script "swarmforge.bb") (str root))
+            health (run {:dir root :env env}
+                        (script "swarmforge.bb") "--health" (str root))]
+        (is (zero? (:exit started)) (str (:err started) (:out started)))
+        (is (zero? (:exit health)) (str (:err health) (:out health)))
+        (is (= "healthy\n" (:out health)))
+        (is (= (= :legacy marker) (fs/exists? (fs/path root "packs"))))
+        (is (fs/regular-file? (fs/path root ".swarmforge/dashboard-url")))
+        (is (fs/regular-file? (fs/path root ".swarmforge/tmux-socket"))))
+      (finally
+        (run {:dir root :ok? false}
+             (script "swarmforge.bb") "--stop-forge-runtime" (str root))
+        (let [socket-file (fs/path root ".swarmforge/tmux-socket")]
+          (when (fs/regular-file? socket-file)
+            (kill-tmux-server! (str/trim (slurp (str socket-file))))))
+        (fs/delete-tree root)))))
+
+(deftest modern-lieutenant-forge-starts-without-packs
+  (start-and-check-lieutenant! :modern))
+
+(deftest legacy-lieutenant-forge-still-starts
+  (start-and-check-lieutenant! :legacy))
+
+(deftest lieutenant-forge-without-a-marker-fails-closed
+  (let [root (tmp-dir)]
+    (try
+      (lieutenant-root! root nil)
+      (let [result (run {:dir root :ok? false}
+                        (script "swarmforge.bb") (str root))]
+        (is (= 1 (:exit result)))
+        (is (str/includes? (str (:err result))
+                           "requires .swarmforge/project-pack or a legacy packs/ directory"))
+        (is (not (fs/exists? (fs/path root ".swarmforge/tmux-socket")))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest modern-lieutenant-forge-keeps-its-supported-agent-check
+  (let [root (tmp-dir)]
+    (try
+      (lieutenant-root! root :modern)
+      (write-file (fs/path root "swarmforge/swarmforge.conf")
+                  "lieutenant unsupported\n")
+      (let [result (run {:dir root :ok? false}
+                        (script "swarmforge.bb")
+                        "--test-lieutenant-launch-command"
+                        (str root))]
+        (is (= 1 (:exit result)))
+        (is (str/includes? (str (:err result))
+                           "Unsupported agent 'unsupported' for lieutenant")))
       (finally
         (fs/delete-tree root)))))
 

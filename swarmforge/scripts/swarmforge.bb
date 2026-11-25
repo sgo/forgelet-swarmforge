@@ -143,6 +143,25 @@
 (defn lieutenant-config-line? [line]
   (= "lieutenant" (str/lower-case (first (str/split (str/trim line) #"\s+")))))
 
+(defn lieutenant-forge-root?
+  "A lieutenant Family has a product-pack marker in current compositions and a
+  top-level packs/ tree in legacy compositions. Both are forge roots; a pack
+  project has neither."
+  [root]
+  (or (fs/directory? (fs/path root ".swarmforge" "project-pack"))
+      (fs/directory? (fs/path root "packs"))))
+
+(defn lieutenant-configured? [root]
+  (let [file (fs/path root "swarmforge" "swarmforge.conf")]
+    (and (fs/regular-file? file)
+         (some lieutenant-config-line? (str/split-lines (slurp (str file)))))))
+
+(defn require-lieutenant-forge-root! [root]
+  (when-not (lieutenant-forge-root? root)
+    (config-fail!
+     (str "Not a lieutenant forge root at " root
+          ": expected .swarmforge/project-pack or a legacy packs/ directory"))))
+
 (defn special-worktree? [worktree]
   (#{"none" "master"} worktree))
 
@@ -260,14 +279,22 @@
                    (conj roles (:role row))
                    (cond-> worktrees (not (special-worktree? worktree)) (conj worktree))))))
       (do
-        (let [lieutenant?
-              (and (fs/directory? (fs/path (:working-dir ctx) "packs"))
-                   (some lieutenant-config-line?
-                         (str/split-lines (slurp (str (:config-file ctx))))))]
-          (when-not (and lieutenant? (empty? rows))
-            (reject-if (empty? rows)
-                       (str "No windows defined in " (:config-file ctx)))
-            (require-master-worktree! rows)))
+        (let [forge-root? (lieutenant-forge-root? (:working-dir ctx))
+              lieutenant? (lieutenant-configured? (:working-dir ctx))]
+          (cond
+            (and forge-root? lieutenant? (empty? rows))
+            nil
+
+            (and (not forge-root?) lieutenant? (empty? rows))
+            (config-fail!
+             (str "Lieutenant config in " (:config-file ctx)
+                  " requires .swarmforge/project-pack or a legacy packs/ directory"))
+
+            :else
+            (do
+              (reject-if (empty? rows)
+                         (str "No windows defined in " (:config-file ctx)))
+              (require-master-worktree! rows))))
         (assoc ctx :roles rows)))))
 
 (defn write-sessions-file! [ctx]
@@ -1444,8 +1471,7 @@
         (some lieutenant-config-line?
               (str/split-lines (slurp (str (:config-file ctx)))))
         roles (cond-> (vec (:roles ctx))
-                (and (fs/directory? (fs/path root "packs"))
-                     configured-lieutenant?)
+                (and (lieutenant-forge-root? root) configured-lieutenant?)
                 (conj (lieutenant-row ctx)))
         named (set wanted)
         chosen (if (seq named)
@@ -1598,9 +1624,6 @@
   (let [{:keys [agent extra-args]} (parse-lieutenant-config ctx)]
     (window-row ctx "lieutenant" agent "master" "task" "forward-only" extra-args false)))
 
-(defn forge-root? [root]
-  (fs/directory? (fs/path root "packs")))
-
 (defn session-names-from-file [ctx]
   (let [file (:sessions-file ctx)]
     (if (fs/regular-file? file)
@@ -1628,7 +1651,7 @@
     (when (and forge
                projects
                (= "projects" (str (fs/file-name projects)))
-               (fs/directory? (fs/path forge "packs")))
+               (lieutenant-forge-root? forge))
       (str forge))))
 
 (defn mark-project!
@@ -1660,6 +1683,7 @@
 (defn health-command! [root]
   (when (str/blank? root)
     (fail! (str red "Error:" reset " --health needs a forge root")))
+  (require-lieutenant-forge-root! root)
   (when-not (host-healthy? root)
     (fail! (str red "Error:" reset " forge runtime is not healthy")))
   (println "healthy"))
@@ -1680,6 +1704,7 @@
 (defn stop-forge-runtime-command! [root]
   (when (str/blank? root)
     (fail! (str red "Error:" reset " --stop-forge-runtime needs a forge root")))
+  (require-lieutenant-forge-root! root)
   (let [ctx (context root)
         socket-file (:tmux-socket-file ctx)
         socket (when (fs/regular-file? socket-file)
@@ -1710,6 +1735,7 @@
   (let [flag (if open? "--open-project" "--close-project")]
     (when (or (str/blank? (str root)) (str/blank? (str name)))
       (fail! (str "usage: swarmforge.sh " flag " <forge-root> <project>")))
+    (require-lieutenant-forge-root! root)
     (let [api (fs/path root "swarmforge" "scripts" "forge.bb")]
       (when-not (fs/regular-file? api)
         (fail! (str "No forge at " root ": " api " is missing.")))
@@ -1731,6 +1757,7 @@
     (mark-project! ctx false)))
 
 (defn run-host! [root]
+  (require-lieutenant-forge-root! root)
   (check-dependency! "tmux")
   (check-dependency! "git")
   (check-dependency! "bb")
@@ -1908,7 +1935,7 @@
     "--stop-project" (run-stop-project! (second args))
     "--restart-forge" (run-host! (or (second args) (System/getProperty "user.dir")))
     (let [root (or (first args) (System/getProperty "user.dir"))]
-      (if (forge-root? root)
+      (if (lieutenant-forge-root? root)
         (if (forge-up? root)
           (refuse-bare-forge-restart! root)
           (run-host! root))
