@@ -93,6 +93,12 @@ get-swarm-forge project-manager      # a forge with selectable packs
 ./swarm                              # dashboard, host lieutenant, projects/ waiting
 ```
 
+A modern Lieutenant Family carries its project template at
+`.swarmforge/project-pack` and does not need a top-level `packs/` directory.
+SwarmForge recognizes that marker for startup, health and project lifecycle
+commands; a legacy Family with `packs/` remains supported. A lieutenant-only
+configuration with neither marker fails rather than starting as an empty pack.
+
 Each forge dashboard runs in its own `swarmforge-dashboard` tmux session on
 `<forge>/.swarmforge/dashboard-tmux.sock`, wrapped in the platform's sleep
 inhibitor where one is available. The launcher does not own the dashboard, so it

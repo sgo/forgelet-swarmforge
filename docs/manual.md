@@ -11,6 +11,12 @@ operator-visible model.
 successful composition writes `.swarmforge/runtime-manifest.edn` with the
 product, source commit and a SHA-256 digest over layer-owned files.
 
+Lieutenant composition puts the project template under
+`.swarmforge/project-pack`. That marker identifies a modern Lieutenant Family
+without requiring a top-level `packs/` directory. Legacy Families with
+`packs/` remain valid, and a lieutenant-only configuration with neither marker
+fails closed instead of being parsed as an empty pack.
+
 The composer resolves the layer branch once and downloads that exact commit;
 all shared runtime files and the manifest therefore name one source revision
 even if the branch advances during the run. A local development source must be
