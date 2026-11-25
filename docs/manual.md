@@ -11,6 +11,14 @@ operator-visible model.
 successful composition writes `.swarmforge/runtime-manifest.edn` with the
 product, source commit and a SHA-256 digest over layer-owned files.
 
+The composer resolves the layer branch once and downloads that exact commit;
+all shared runtime files and the manifest therefore name one source revision
+even if the branch advances during the run. A local development source must be
+selected explicitly with `SWARMFORGE_GIT_DIR`, or supplied as one complete,
+clean Git-backed `SWARMFORGE_BASE_DIR`. Those selectors are mutually exclusive.
+The composition compares every layer-owned installed file with the resolved
+source and fails before writing a runtime claim if any content differs.
+
 `SWARMFORGE_SKIP_BRIDGE=1` omits bridge build and installation while preserving
 an adapter already installed by the bridge.
 

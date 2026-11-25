@@ -115,9 +115,17 @@ operator but never opens a browser. For old state, the launcher seeds the
 preference from `dashboard-url`.
 
 Set `SWARMFORGE_REPO_URL` to `https://github.com/unclebob/swarm-forge` and
-`SWARMFORGE_BASE_REF` to `main` to compose Uncle Bob's products instead, or point
-`SWARMFORGE_GIT_DIR` at a local checkout to compose from a branch you have not
-pushed.
+`SWARMFORGE_BASE_REF` to `main` to compose Uncle Bob's products instead.
+
+An ordinary composition resolves the layer branch once, downloads that exact
+commit, and records the same commit in the runtime manifest. The branch may
+advance while the product is being fetched; the shared runtime does not follow
+it. For deliberate development from a local layer, set `SWARMFORGE_GIT_DIR` to
+a clean Git checkout. `SWARMFORGE_BASE_DIR` supplies one complete base tree and
+is mutually exclusive with `SWARMFORGE_GIT_DIR`; when it contains the runtime
+helper it must be a clean Git checkout. `SWARMFORGE_SOURCE_COMMIT` may pin an
+exact commit already present in that local checkout. Conflicting or mixed
+sources fail before the forge is composed.
 
 The same command composes the bridge, because a forge that cannot reach a phone
 is half a forge. It downloads this family's bridge,
