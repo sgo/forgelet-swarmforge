@@ -3028,12 +3028,14 @@
       (write-file (fs/path host "README.md") "host-readme\n")
       (doseq [name ["swarmforge.sh" "handoffd.bb" "done_with_current.sh"
                     "route_card.sh" "route_card.bb"
-                    "install-agent-credentials.sh"]]
+                    "install-agent-credentials.sh" "doorbell.bb"]]
         (write-file (fs/path base "swarmforge/scripts" name) (str name "\n")))
       (write-file (fs/path base "swarmforge/scripts/route_card.sh")
                   "CURRENT-ROUTE-SH\n")
       (write-file (fs/path base "swarmforge/scripts/route_card.bb")
                   "CURRENT-ROUTE-BB\n")
+      (write-file (fs/path base "swarmforge/scripts/doorbell.bb")
+                  "CURRENT-DOORBELL\n")
       (write-file (fs/path base "swarmforge/constitution.prompt") "MAIN\n")
       (write-file (fs/path base "swarmforge/roles/lieutenant.prompt") "LIEUTENANT\n")
       (write-file (fs/path base "swarmforge/swarmforge.conf") "# Lieutenant grok\n")
@@ -3067,6 +3069,7 @@
                        "mkdir -p \"$MATRIX_BRIDGE_FORGE_ROOT/.swarmforge\"\n"
                        "cp \"$MATRIX_BRIDGE_KIT/route_card.sh\" \"$MATRIX_BRIDGE_FORGE_ROOT/swarmforge/scripts/route_card.sh\"\n"
                        "cp \"$MATRIX_BRIDGE_KIT/route_card.bb\" \"$MATRIX_BRIDGE_FORGE_ROOT/swarmforge/scripts/route_card.bb\"\n"
+                       "printf 'OLD-BRIDGE-DOORBELL\\n' > \"$MATRIX_BRIDGE_FORGE_ROOT/swarmforge/scripts/doorbell.bb\"\n"
                        "echo \"kit $MATRIX_BRIDGE_KIT\" >> \"$MATRIX_BRIDGE_FORGE_ROOT/.swarmforge/bridge-record\"\n"))
       (write-file (fs/path bridge "installers/install-rules")
                   (str "#!/bin/sh\n"
@@ -3099,6 +3102,9 @@
         (is (= "CURRENT-ROUTE-BB\n"
                (slurp (str (fs/path host
                                     "swarmforge/scripts/route_card.bb")))))
+        (is (= "CURRENT-DOORBELL\n"
+               (slurp (str (fs/path host
+                                    "swarmforge/scripts/doorbell.bb")))))
         (is (fs/exists? record))
         (let [lines (str/split-lines (slurp (str record)))]
           (is (= 2 (count lines)))

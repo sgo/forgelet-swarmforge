@@ -655,14 +655,18 @@ install_forgelet_bridge() {
     "$adapter" install-rules
 }
 
-restore_layer_route_gate() {
-  local src="$1/swarmforge/scripts"
-  local file
-  for file in route_card.sh route_card.bb; do
-    [[ -f "$src/$file" ]] || fail_missing "$file from the shared layer"
-    cp "$src/$file" "swarmforge/scripts/$file"
-    chmod +x "swarmforge/scripts/$file"
-  done
+restore_layer_runtime() {
+  local src="$1"
+  local adapter=""
+  if [[ -f swarmforge/scripts/matrix-bridge.sh ]]; then
+    adapter="$tmp_dir/matrix-bridge.sh.installed"
+    cp -p swarmforge/scripts/matrix-bridge.sh "$adapter"
+  fi
+  copy_shared_runtime "$src"
+  if [[ -n "$adapter" ]]; then
+    cp -p "$adapter" swarmforge/scripts/matrix-bridge.sh
+  fi
+  chmod +x swarm
 }
 
 validate_source_selection
@@ -777,7 +781,7 @@ fi
 require_files "${required_files[@]}"
 
 install_forgelet_bridge
-restore_layer_route_gate "$layer_dir"
+restore_layer_runtime "$layer_dir"
 write_runtime_manifest "$layer_dir"
 
 echo "SwarmForge forge installed from $host_from. Run ./swarm to start the dashboard."
