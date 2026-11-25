@@ -1,43 +1,52 @@
-{:task "forgelet-swarmforge"
+{:task "forgelet-swarmforge",
  :stages
- [{:name "spec"
-   :approval :operator
-   :spec ["tasks/*.md" "features/*.feature"]
+ [{:name "spec",
+   :approval :operator,
+   :spec ["tasks/*.md" "features/*.feature"],
    :stamp ["tasks" "features"]}
-  {:name "code"
-   :detached true
-   :runs [["bb" "test"]]
-   :evidence []
-   :stamp [".gitignore"
-           "AGENTS.md"
-           "mission.md"
-           "bb.edn"
-           "stages.edn"
-           "swarm"
-           "get-agent-project"
-           "get-swarm-forge"
-           "convert-pack-project"
-           "close-swarm"
-           "devbox"
-           "swarmforge"
-           "features"
-           "qa"
-           "test/layer_coverage.clj"
-           "test/swarmforge"
-           "test/dashboard/dashboard.spec.js"
-           "test/dashboard/package.json"
-           "test/dashboard/package-lock.json"
-           "test/dashboard/playwright.config.js"]}
-  {:name "clean"
-   :runs [["bb" "crap"]]
-   :evidence ["target/coverage/lcov.info"]
-   :stamp ["bb.edn"
-           "stages.edn"
-           "swarmforge/scripts"
-           "test/layer_coverage.clj"
-           "test/swarmforge/coverage_in_process_test.clj"]}
-  {:name "release"
-   :optional true
-   :runs []
-   :evidence []
-   :stamp ["README.md"]}]}
+  {:name "code",
+   :detached true,
+   :runs [["bb" "test"]],
+   :evidence [],
+   :stamp
+   [".gitignore"
+    "AGENTS.md"
+    "mission.md"
+    "bb.edn"
+    "stages.edn"
+    "swarm"
+    "get-agent-project"
+    "get-swarm-forge"
+    "convert-pack-project"
+    "close-swarm"
+    "devbox"
+    "swarmforge"
+    "features"
+    "qa"
+    "test/layer_coverage.clj"
+    "test/swarmforge"
+    "test/dashboard/dashboard.spec.js"
+    "test/dashboard/package.json"
+    "test/dashboard/package-lock.json"
+    "test/dashboard/playwright.config.js"]}
+  {:name "clean",
+   :runs [["bb" "crap"]],
+   :evidence ["target/coverage/lcov.info"],
+   :stamp
+   ["bb.edn"
+    "stages.edn"
+    "swarmforge/scripts"
+    "test/layer_coverage.clj"
+    "test/swarmforge/coverage_in_process_test.clj"]}
+  {:name "docs",
+   :runs [["scripts/check-documentation.sh"]],
+   :evidence ["target/documentation/check.log"],
+   :stamp
+   [:features
+    :sources
+    "README.md"
+    "docs"
+    "ARCHITECTURE.md"
+    "scripts/check-documentation.sh"
+    "swarmforge/scripts/check-documentation.bb"]}
+  {:name "release", :optional true, :runs [], :evidence [], :stamp ["README.md"]}]}

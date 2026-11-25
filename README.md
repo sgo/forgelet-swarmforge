@@ -33,6 +33,9 @@ with — including the bridge that puts a forge on the operator's phone.
 in this repository's `docs/`, a project's are in that project's `docs/`, and a forge's are in
 that forge's — so the reading copy comes with the values filled in.
 
+- [Layer manual](docs/manual.md) — composition, runtime identity, upgrades and rollout.
+- [Architecture](ARCHITECTURE.md) — the ownership boundaries between the composer, the
+  deployed forge and the independent Forgelet Host.
 - [What a project owns](docs/what-a-project-owns.md) — the files a project provides rather
   than receives: `swarmforge/language.conf`, `swarmforge/release.conf`,
   `swarmforge/hooks/card-complete.sh`, its local articles and helpers, and what reads each of

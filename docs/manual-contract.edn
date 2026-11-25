@@ -1,0 +1,36 @@
+{:documents
+ {:readme "README.md"
+  :manual "docs/manual.md"
+  :architecture "ARCHITECTURE.md"}
+ :sections
+ [{:id "readme-layer"
+   :document "README.md"
+   :heading "## The Forgelet layer"
+   :apis ["get-swarm-forge" "SWARMFORGE_SKIP_BRIDGE"]
+   :conceptual true
+   :reason "The layer overview maps source branches and composition ownership; executable composition and upgrade behavior are covered by the layer suite."}
+  {:id "readme-products"
+   :document "README.md"
+   :heading "## Products"
+   :apis ["six-pack" "four-pack" "project-manager" "lieutenant"]
+   :conceptual true
+   :reason "The products table names compositions; their package, helper and browser behavior run in the code gate."}
+  {:id "manual-composition"
+   :document "docs/manual.md"
+   :heading "## Composition"
+   :apis ["get-swarm-forge" "SWARMFORGE_SKIP_BRIDGE" "runtime-manifest.edn"]
+   :conceptual true
+   :reason "Composition downloads source branches and mutates a forge, so fixture tests exercise it without rewriting this documentation checkout."}
+  {:id "manual-runtime-upgrade"
+   :document "docs/manual.md"
+   :heading "## Runtime upgrades"
+   :apis ["forge_runtime_upgrade.sh status" "forge_runtime_upgrade.sh apply"
+          "bridge_policy" "compose-digest-mismatch" "bridge-policy-mismatch"]
+   :conceptual true
+   :reason "A truthful runtime upgrade needs idle disposable projects and host lifecycle ownership; the runtime-upgrade suite executes the preview, apply, policy and preservation paths."}
+  {:id "architecture-boundaries"
+   :document "ARCHITECTURE.md"
+   :heading "## Boundaries"
+   :apis ["get-swarm-forge" "forge-runtime-upgrade" "forgelet-host"]
+   :conceptual true
+   :reason "The architecture describes process and source ownership across a live forge; fixture tests prove the concrete file and digest contracts."}]}
