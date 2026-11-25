@@ -73,6 +73,12 @@ Work in vertical slices: one public behaviour through every gate. Tests,
 cleanup, architecture, hardening and verification are part of that slice, not
 separate backlog items and not gates deferred to a later card.
 
+Do not create disposable Families, rooms or invitations through the live Host
+or live Matrix homeserver for verification. Use disposable roots and a
+hermetic composer or a fixture with fake Host, bridge and homeserver state.
+Real app/Host creation after release is operator acceptance: run it only when
+the operator explicitly asks for that live check.
+
 ## Task report completion
 
 Every new or next-touched task note ends with `## Verification` and

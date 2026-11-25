@@ -45,6 +45,20 @@ different composed runtime.
 An upgrade does not grant permission to restart the independently managed
 `forgelet-host` process.
 
+Runtime identity acceptance is hermetic and does not use a live Host or Matrix:
+
+```sh
+qa/run-runtime-identity-acceptance.sh
+```
+
+The script clones the explicit source commit locally and composes with bridge
+installation disabled. It verifies the manifest source, all file hashes,
+digest and bridge-policy evidence, then removes its complete fixture tree on
+success, failure, timeout or interruption. Live bridge configuration, control
+state, homeserver data and operator invitations are outside this boundary.
+Real app/Host creation is a separately invoked operator acceptance check after
+release.
+
 ## MCP-only project preparation
 
 MCP-only stage execution remains disabled by default. A forge-owned

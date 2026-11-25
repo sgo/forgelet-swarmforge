@@ -199,6 +199,19 @@ forge or failed preflight exits `3`; execution and verification failures exit
 command and remain retryable. Operation records live under
 `.swarmforge/runtime-upgrades/operations/`.
 
+A source-tree runtime identity check does not require a Host or Matrix:
+
+```sh
+qa/run-runtime-identity-acceptance.sh
+```
+
+It clones one explicit source commit into this checkout's `tmp/`, composes from
+that local source with bridge installation skipped, and verifies every manifest
+file, the digest, source commit and bridge policy evidence. It reads no live
+Host token or bridge configuration and contacts no Host or Matrix endpoint.
+Creating a real app or Family through a released Host is operator acceptance
+and runs only when the operator explicitly requests it.
+
 The host supplies the published source checkout; it does not reconstruct
 composition or project-upgrade commands. Tailscale Serve is outside this
 contract and is never read or changed.

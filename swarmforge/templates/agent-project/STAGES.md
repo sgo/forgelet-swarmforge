@@ -37,6 +37,11 @@ complete. Only the operator can mark a pending check confirmed. Pending text
 never replaces release approval, destructive confirmation or another hard gate.
 Older notes without either section remain readable; add both on the next touch.
 
+Automated runtime identity and app-creation checks stay inside disposable
+fixtures. Never use the live Host, live bridge configuration or live Matrix
+homeserver to create a test Family or room. A released app/Host creation is a
+separate operator acceptance action and is not attempted automatically.
+
 `route_card.sh commit` reports the lane read back from the created board row.
 Its consumed proposal record keeps the original proposed `lane` and the actual
 `created-lane` separately, so a queued placement is visible in the audit trail.

@@ -59,6 +59,11 @@ replaces a required verification, release approval, destructive confirmation or
 policy approval. Older notes remain readable; add both sections next time the
 note is touched.
 
+Runtime identity and app-creation verification stay hermetic. Do not create a
+test Family, Matrix room or invitation on the live Host or homeserver. A live
+released app/Host creation is operator acceptance and requires an explicit
+operator request.
+
 The template assumes a Maven reactor with an `architecture` module and the
 acceptance script under `scripts/`. Adjust the commands and evidence paths to
 the library before the first `stage check`.
