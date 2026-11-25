@@ -2974,6 +2974,12 @@
       (write-file (fs/path host "README.md") "host-readme\n")
       (write-file (fs/path host "bb.edn") "{:paths [\"test\"]}\n")
       (write-file (fs/path host "test/keep.clj") "keep\n")
+      (write-file (fs/path host "swarmforge/scripts/matrix-bridge.sh")
+                  "BRIDGE-INSTALLED-ADAPTER\n")
+      (write-file (fs/path host ".swarmforge/matrix-bridge.json")
+                  "{\"state_dir\":\"bridge-state\"}\n")
+      (write-file (fs/path host "projects/forgelet-bridge/build/acceptance/bin/forgelet-bridge")
+                  "bridge binary\n")
       ;; A forge's own skill, and the layer's copy of one it already has: the
       ;; layer's files are replaced, and a skill the layer does not carry is not.
       (write-file (fs/path host "swarmforge/skills/a-forges-own/SKILL.md") "OWN\n")
@@ -3030,6 +3036,16 @@
         (is (= "host-readme\n" (slurp (str (fs/path host "README.md")))))
         (is (= "{:paths [\"test\"]}\n" (slurp (str (fs/path host "bb.edn")))))
         (is (= "keep\n" (slurp (str (fs/path host "test/keep.clj")))))
+        (is (= "BRIDGE-INSTALLED-ADAPTER\n"
+               (slurp (str (fs/path host
+                                    "swarmforge/scripts/matrix-bridge.sh")))))
+        (is (= "{\"state_dir\":\"bridge-state\"}\n"
+               (slurp (str (fs/path host
+                                    ".swarmforge/matrix-bridge.json")))))
+        (is (= "bridge binary\n"
+               (slurp (str (fs/path
+                             host
+                             "projects/forgelet-bridge/build/acceptance/bin/forgelet-bridge")))))
         (is (= "MAIN-ENGINEERING\n" (slurp (str (fs/path host "swarmforge/constitution/articles/engineering.prompt")))))
         (is (= "MAIN-WORKFLOW\n" (slurp (str (fs/path host "swarmforge/constitution/articles/workflow.prompt")))))
         (is (= "MAIN-HANDOFFS\n" (slurp (str (fs/path host "swarmforge/constitution/articles/handoffs.prompt")))))

@@ -28,6 +28,43 @@
    "stopping-without-finishing.prompt"])
 (def operation-dir-name "runtime-upgrades")
 
+(def bridge-composition-policy
+  {:id "preserve-installed-bridge-v1"
+   :mode "preserve-existing"
+   :skip-build-and-install true
+   :preserve-files ["swarmforge/scripts/matrix-bridge.sh"]
+   :preserve-paths ["projects/forgelet-bridge"
+                    ".swarmforge/matrix-bridge.json"]})
+
+(defn public-bridge-policy []
+  {:id (:id bridge-composition-policy)
+   :mode (:mode bridge-composition-policy)
+   :skip_build_and_install
+   (:skip-build-and-install bridge-composition-policy)
+   :preserve_files (:preserve-files bridge-composition-policy)
+   :preserve_paths (:preserve-paths bridge-composition-policy)})
+
+(defn bridge-policy-problem [policy]
+  (let [expected (public-bridge-policy)]
+    (cond
+      (not (map? policy)) "runtime manifest bridge policy is malformed"
+      (not= (:id policy) (:id expected))
+      "runtime manifest bridge policy is unsupported"
+      (not= (:mode policy) (:mode expected))
+      "runtime manifest bridge policy is unsupported"
+      (not= (:skip_build_and_install policy)
+            (:skip_build_and_install expected))
+      "runtime manifest bridge policy is unsupported"
+      (not= (:preserve_files policy) (:preserve_files expected))
+      "runtime manifest bridge policy is unsupported"
+      (not= (:preserve_paths policy) (:preserve_paths expected))
+      "runtime manifest bridge policy is unsupported"
+      :else nil)))
+
+(defn bridge-policy-from-env []
+  (when (= "1" (System/getenv "SWARMFORGE_SKIP_BRIDGE"))
+    (public-bridge-policy)))
+
 (def usage-text
   (str "Usage:\n"
        "  forge_runtime_upgrade.sh status --forge <dir> --source-layer <dir>\n"
@@ -136,15 +173,16 @@
    "swarmforge/swarmforge.conf"
    "swarmforge/roles/local-lieutenant.prompt"])
 
-(defn write-manifest! [root source product source-commit]
+(defn write-manifest! [root source product source-commit & [bridge-policy]]
   (let [root (fs/absolutize root)
         files (composition-files root source)
-        manifest {:version manifest-version
-                  :product product
-                  :source_commit source-commit
-                  :digest (str "sha256:" (digest-files files))
-                  :files files
-                  :excludes manifest-excludes}
+        manifest (cond-> {:version manifest-version
+                          :product product
+                          :source_commit source-commit
+                          :digest (str "sha256:" (digest-files files))
+                          :files files
+                          :excludes manifest-excludes}
+                   bridge-policy (assoc :bridge_policy bridge-policy))
         file (fs/path root ".swarmforge" "runtime-manifest.edn")]
     (fs/create-dirs (fs/parent file))
     (let [tmp (fs/create-temp-file {:dir (fs/parent file)
@@ -173,6 +211,9 @@
     (not= (:digest manifest)
           (str "sha256:" (digest-files (:files manifest))))
     "installed manifest digest does not match its file list"
+    (and (contains? manifest :bridge_policy)
+         (bridge-policy-problem (:bridge_policy manifest)))
+    (bridge-policy-problem (:bridge_policy manifest))
     :else nil))
 
 (defn read-manifest [root]
@@ -204,31 +245,87 @@
 (defn command-env [extra]
   (merge (into {} (System/getenv)) extra))
 
-(defn compose! [source target product commit check?]
+(defn policy-file-paths [policy]
+  (:preserve-files policy))
+
+(defn copy-policy-files! [from to policy]
+  (doseq [relative (policy-file-paths policy)
+          :let [source (fs/path from relative)
+                target (fs/path to relative)]
+          :when (fs/regular-file? source)]
+    (fs/create-dirs (fs/parent target))
+    (fs/copy source target {:replace-existing true})
+    (fs/set-posix-file-permissions
+     target (fs/posix-file-permissions source))))
+
+(defn snapshot-policy-files! [root policy]
+  (let [parent (fs/path root ".swarmforge" operation-dir-name)]
+    (fs/create-dirs parent)
+    (let [dir (fs/create-temp-dir
+               {:dir parent
+                :prefix ".bridge-preserved."})]
+      (copy-policy-files! root dir policy)
+      dir)))
+
+(defn restore-policy-files! [root snapshot policy]
+  (doseq [relative (policy-file-paths policy)
+          :let [saved (fs/path snapshot relative)
+                target (fs/path root relative)]
+          :when (fs/regular-file? saved)]
+    (fs/create-dirs (fs/parent target))
+    (fs/copy saved target {:replace-existing true})
+    (fs/set-posix-file-permissions
+     target (fs/posix-file-permissions saved))))
+
+(defn with-policy-files-preserved [root policy f]
+  (let [snapshot (snapshot-policy-files! root policy)]
+    (try
+      (f)
+      (finally
+        (restore-policy-files! root snapshot policy)
+        (fs/delete-tree snapshot)))))
+
+(defn compose-env [commit]
+  (cond-> {"SWARMFORGE_NO_SELF_UPDATE" "1"
+           "SWARMFORGE_SOURCE_COMMIT" commit}
+    (:skip-build-and-install bridge-composition-policy)
+    (assoc "SWARMFORGE_SKIP_BRIDGE" "1")))
+
+(defn compose! [source target product commit]
   (let [composer (fs/path source "get-swarm-forge")]
     (when-not (and (fs/regular-file? composer) (fs/executable? composer))
       (throw (ex-info "Published composer is unavailable"
                       {:kind :composer-unavailable})))
     (fs/create-dirs target)
-    (let [result (process/sh
-                  {:continue true
-                   :dir (str target)
-                   :env (command-env
-                         (cond-> {"SWARMFORGE_NO_SELF_UPDATE" "1"
-                                  "SWARMFORGE_SOURCE_COMMIT" commit}
-                           check? (assoc "SWARMFORGE_SKIP_BRIDGE" "1")))}
-                  (str composer) product)]
-      (when-not (zero? (:exit result))
-        (throw (ex-info "Composition failed"
-                        {:kind :compose-failed
-                         :exit (:exit result)}))))))
+    (with-policy-files-preserved
+      target bridge-composition-policy
+      (fn []
+        (let [result (process/sh
+                      {:continue true
+                       :dir (str target)
+                       :env (command-env (compose-env commit))}
+                      (str composer) product)]
+          (when-not (zero? (:exit result))
+            (throw (ex-info "Composition failed"
+                            {:kind :compose-failed
+                             :exit (:exit result)})))
+          (let [composed (read-manifest target)
+                policy (get-in composed [:manifest :bridge_policy])]
+            (when (:problem composed)
+              (throw (ex-info (:problem composed)
+                              {:kind :available-manifest-invalid})))
+            (when-not (= policy (public-bridge-policy))
+              (throw (ex-info "Composer did not apply the bridge policy"
+                              {:kind :bridge-policy-mismatch})))))))))
 
-(defn available-manifest! [forge source product commit check?]
+(defn available-manifest! [forge source product commit]
   (let [check-dir (fs/path forge ".swarmforge" operation-dir-name
                            (str "check-" (random-uuid)))]
     (try
-      (compose! source check-dir product commit check?)
-      (write-manifest! check-dir source product commit)
+      (copy-policy-files! forge check-dir bridge-composition-policy)
+      (compose! source check-dir product commit)
+      (write-manifest! check-dir source product commit
+                       (public-bridge-policy))
       (let [read (read-manifest check-dir)]
         (when (:problem read)
           (throw (ex-info (:problem read) {:kind :available-manifest-invalid})))
@@ -362,6 +459,7 @@
        :blockers (:blockers idle)
        :blockers_truncated (:blockers_truncated idle)
        :changes {:count 0 :items [] :truncated false}
+       :bridge_policy (public-bridge-policy)
        :project_upgrades_required []
        :project_upgrade_lines []}
       (let [installed (:manifest installed-result)
@@ -377,10 +475,11 @@
            :blockers (:blockers idle)
            :blockers_truncated (:blockers_truncated idle)
            :changes {:count 0 :items [] :truncated false}
+           :bridge_policy (public-bridge-policy)
            :project_upgrades_required []
            :project_upgrade_lines []}
           (try
-            (let [available (available-manifest! forge source product commit true)
+            (let [available (available-manifest! forge source product commit)
                   upgrades (project-upgrade-check forge source)
                   changes (change-list installed available)
                   status (cond
@@ -400,6 +499,7 @@
                :blockers (:blockers idle)
                :blockers_truncated (:blockers_truncated idle)
                :changes changes
+               :bridge_policy (public-bridge-policy)
                :project_upgrades_required (vec (distinct (:required upgrades)))
                :project_upgrade_lines (vec (:lines upgrades))})
             (catch Exception _
@@ -412,6 +512,7 @@
                :blockers (:blockers idle)
                :blockers_truncated (:blockers_truncated idle)
                :changes {:count 0 :items [] :truncated false}
+               :bridge_policy (public-bridge-policy)
                :project_upgrades_required []
                :project_upgrade_lines []})))))))
 
@@ -535,8 +636,9 @@
       (record! {:operation_id id :status "running" :phase "compose"
                 :installed (:installed before)
                 :available (:available before)})
-      (compose! source forge (:product (:installed before)) commit false)
-      (write-manifest! forge source (:product (:installed before)) commit)
+      (compose! source forge (:product (:installed before)) commit)
+      (write-manifest! forge source (:product (:installed before)) commit
+                       (public-bridge-policy))
       (let [after (read-manifest forge)
             digest (get-in after [:manifest :digest])]
         (when-not (= digest (get-in before [:available :digest]))
@@ -579,6 +681,7 @@
                                 :source_commit commit
                                 :product (:product (:installed before))}
                     :available (:available before)
+                    :bridge_policy (public-bridge-policy)
                     :reopened (vec names)
                     :project_upgrades_required
                     (:project_upgrades_required before)}]
@@ -593,10 +696,17 @@
                          :phase "preflight"
                          :updated_at (str (java.time.Instant/now))})
         record! (fn [value]
-                  (reset! operation value)
-                  (write-operation! forge id value))]
+                  (let [value (assoc value :bridge_policy
+                                     (public-bridge-policy))]
+                    (reset! operation value)
+                    (write-operation! forge id value)))]
     (try
       (let [before (status-core forge source commit)]
+        (when-not (= (:bridge_policy before) (public-bridge-policy))
+          (throw (ex-info "Runtime upgrade bridge policy changed before preflight"
+                          {:kind :bridge-policy-mismatch
+                           :exit 3
+                           :result before})))
         (when-not (#{"behind" "current"} (:status before))
           (record! (assoc before :phase "preflight" :completed false))
           (throw (ex-info "Upgrade preflight failed"
@@ -620,6 +730,7 @@
                         :completed true
                         :installed (:installed before)
                         :available (:available before)
+                        :bridge_policy (public-bridge-policy)
                         :reopened []
                         :project_upgrades_required []}]
             (record! result)
@@ -670,6 +781,7 @@
    :blockers []
    :blockers_truncated false
    :changes {:count 0 :items [] :truncated false}
+   :bridge_policy (public-bridge-policy)
    :project_upgrades_required []
    :project_upgrade_lines []})
 
@@ -722,7 +834,7 @@
     (fail-usage! "Unknown product"))
   (when-not (and commit (re-matches source-commit-re commit))
     (fail-usage! "A canonical 40-character source commit is required"))
-  (write-manifest! forge source product commit)
+  (write-manifest! forge source product commit (bridge-policy-from-env))
   (println "runtime manifest written"))
 
 (defn -main [& args]

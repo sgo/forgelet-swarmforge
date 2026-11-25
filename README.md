@@ -164,6 +164,13 @@ projects requiring a project-template upgrade. Status also stages a disposable
 composition under the forge's runtime-upgrade state to compute the available
 identity; it never modifies the source layer or projects.
 
+Forge-root upgrades use one bridge policy for both that check and apply:
+bridge build and installation are skipped, the installed adapter is preserved,
+and the bridge project, configuration, state and rooms are left in place.
+Status and operation records therefore carry the same `bridge_policy` evidence.
+If a published composer reports a different policy, the upgrade fails with
+`bridge-policy-mismatch` before comparing installed and preview digests.
+
 Apply takes the forge-scoped lock, rechecks idleness and both identities, then
 closes the original open set through the normal forge commands, stops only that
 forge's host runtime when it was healthy, composes the published layer, runs the

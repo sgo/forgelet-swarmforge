@@ -2,6 +2,7 @@
   (:require [babashka.fs :as fs]
             [babashka.process :as process]
             [cheshire.core :as json]
+            [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]))
 
@@ -97,7 +98,7 @@
     (write-file (fs/path source "swarmforge/skills/shared/SKILL.md") "shared\n")
     (fs/create-dirs (fs/path source "swarmforge/scripts"))
     (doseq [name ["forge_runtime_upgrade.bb" "forge_runtime_upgrade.sh"
-                  "stage_jobs.bb"]]
+                  "stage_jobs.bb" "matrix-bridge.sh"]]
       (fs/copy (fs/path scripts-dir name)
                (fs/path source "swarmforge/scripts" name)
                {:replace-existing true}))
@@ -118,7 +119,14 @@
             " swarmforge/scripts/forge_runtime_upgrade.sh\n"
             "cp " (str (fs/path source "swarmforge/scripts/stage_jobs.bb"))
             " swarmforge/scripts/stage_jobs.bb\n"
+            "cp " (str (fs/path source "swarmforge/scripts/matrix-bridge.sh"))
+            " swarmforge/scripts/matrix-bridge.sh\n"
             "chmod +x swarmforge/scripts/forge_runtime_upgrade.sh\n"
+            "printf '%s\\n' \"${SWARMFORGE_SKIP_BRIDGE:-0}\""
+            " >> \"${SWARMFORGE_TEST_BRIDGE_LOG:-/dev/null}\"\n"
+            "if [ -z \"${SWARMFORGE_SKIP_BRIDGE:-}\" ]; then "
+            "printf '#!/bin/sh\\n# bridge installed adapter\\n'"
+            " > swarmforge/scripts/matrix-bridge.sh; fi\n"
             "printf '%s\\n' \"${FAKE_RUNTIME_CONTENT:-v1}\" > swarmforge/scripts/runtime-marker\n"
             "printf '#!/bin/sh\\n' > swarm\n"
             "printf 'Constitution.\\n' > swarmforge/constitution.prompt\n"
@@ -129,6 +137,10 @@
             "\"swarmforge/constitution/articles/$name\"; done\n"
             "mkdir -p swarmforge/skills/shared\n"
             "printf 'shared\\n' > swarmforge/skills/shared/SKILL.md\n"
+            "if [ \"${FAKE_BRIDGE_POLICY_MISMATCH_ON_APPLY:-0}\" = 1 ]; then\n"
+            "  case \"$PWD\" in */runtime-upgrades/check-*) ;; "
+            "*) unset SWARMFORGE_SKIP_BRIDGE ;; esac\n"
+            "fi\n"
             "bb " (str (fs/path source "swarmforge/scripts/forge_runtime_upgrade.bb"))
             " manifest --forge \"$PWD\" --source-layer " source
             " --product \"$1\" --source-commit \"$SWARMFORGE_SOURCE_COMMIT\"\n"))
@@ -219,7 +231,39 @@
           :env {"FAKE_RUNTIME_CONTENT" "v1"
                 "SWARMFORGE_SOURCE_COMMIT" source-commit}}
          (str (fs/path source "get-swarm-forge")) "project-manager")
+    (write-file (fs/path forge ".swarmforge/matrix-bridge.json")
+                "{\"state_dir\":\"bridge-state\",\"rooms\":{\"alpha\":\"!room\"}}\n")
+    (write-file (fs/path forge "projects/forgelet-bridge/.git/HEAD")
+                "ref: refs/heads/master\n")
+    (write-file (fs/path forge "projects/forgelet-bridge/build/acceptance/bin/forgelet-bridge")
+                "BRIDGE-BINARY\n")
+    (write-file (fs/path forge "projects/forgelet-bridge/bridge-state/rooms.json")
+                "{\"alpha\":\"!room\"}\n")
+    (write-file (fs/path forge "swarmforge/scripts/matrix-bridge.sh")
+                "#!/bin/sh\n# bridge installed adapter\n")
+    (fs/set-posix-file-permissions
+     (fs/path forge "swarmforge/scripts/matrix-bridge.sh") "rwxr-xr-x")
     {:source source :forge forge}))
+
+(def bridge-fixture-paths
+  [".swarmforge/matrix-bridge.json"
+   "projects/forgelet-bridge/.git/HEAD"
+   "projects/forgelet-bridge/build/acceptance/bin/forgelet-bridge"
+   "projects/forgelet-bridge/bridge-state/rooms.json"
+   "swarmforge/scripts/matrix-bridge.sh"])
+
+(defn bridge-fixture-bytes [forge]
+  (into {}
+        (map (fn [relative]
+               [relative (vec (fs/read-all-bytes (fs/path forge relative)))])
+             bridge-fixture-paths)))
+
+(defn latest-operation [forge]
+  (let [files (->> (fs/list-dir
+                    (fs/path forge ".swarmforge/runtime-upgrades/operations"))
+                   (sort-by str))
+        latest (last files)]
+    (edn/read-string (slurp (str latest)))))
 
 (defn status! [{:keys [source forge]} env]
   (run {:dir forge :ok? false
@@ -419,6 +463,67 @@
         (is (= 2 (count (filter #(str/starts-with? % "--open-project ") commands)))))
       (is (= "current"
              (:status (parse-json (status! fixture {"FAKE_RUNTIME_CONTENT" "v2"}))))))))
+
+(deftest runtime-upgrade-uses-one-policy-and-preserves-the-installed-bridge
+  (let [{:keys [source forge] :as fixture} (forge-fixture!)
+        policy-log (fs/path forge ".swarmforge/bridge-policy.log")
+        bridge-before (bridge-fixture-bytes forge)]
+    (write-file (fs/path source "swarmforge/scripts/runtime-marker") "v2\n")
+    (let [status (status! fixture {"FAKE_RUNTIME_CONTENT" "v2"
+                                   "SWARMFORGE_TEST_BRIDGE_LOG" (str policy-log)})
+          before (parse-json status)
+          applied (apply! fixture {"FAKE_RUNTIME_CONTENT" "v2"
+                                   "SWARMFORGE_TEST_BRIDGE_LOG" (str policy-log)})
+          result (parse-json applied)
+          operation (latest-operation forge)]
+      (is (= "behind" (:status before)) (str (:err status) (:out status)))
+      (is (zero? (:exit applied)) (str (:err applied) (:out applied)))
+      (is (= "current" (:status result)))
+      (is (= (:digest (:available before))
+             (get-in result [:installed :digest])))
+      (let [policies (->> (slurp (str policy-log))
+                          str/split-lines
+                          (remove str/blank?)
+                          vec)]
+        (is (<= 3 (count policies)))
+        (is (= ["1"] (distinct policies))))
+      (is (= bridge-before (bridge-fixture-bytes forge)))
+      (doseq [policy [(:bridge_policy before)
+                      (:bridge_policy result)
+                      (:bridge_policy operation)]]
+        (is (= "preserve-installed-bridge-v1" (:id policy)))
+        (is (= "preserve-existing" (:mode policy)))
+        (is (= true (:skip_build_and_install policy)))
+        (is (= ["swarmforge/scripts/matrix-bridge.sh"]
+               (:preserve_files policy))))
+      (is (= "current"
+             (:status
+              (parse-json
+               (status! fixture {"FAKE_RUNTIME_CONTENT" "v2"}))))))))
+
+(deftest runtime-upgrade-rejects-a-bridge-policy-mismatch-before-digest-check
+  (let [{:keys [source forge] :as fixture} (forge-fixture!)
+        policy-log (fs/path forge ".swarmforge/bridge-policy.log")
+        bridge-before (bridge-fixture-bytes forge)]
+    (write-file (fs/path source "swarmforge/scripts/runtime-marker") "v2\n")
+    (let [status (status! fixture
+                          {"FAKE_RUNTIME_CONTENT" "v2"
+                           "SWARMFORGE_TEST_BRIDGE_LOG" (str policy-log)})
+          applied (apply! fixture
+                          {"FAKE_RUNTIME_CONTENT" "v2"
+                           "SWARMFORGE_TEST_BRIDGE_LOG" (str policy-log)
+                           "FAKE_BRIDGE_POLICY_MISMATCH_ON_APPLY" "1"})
+          result (parse-json applied)
+          operation (latest-operation forge)]
+      (is (= "behind" (:status (parse-json status))))
+      (is (= 4 (:exit applied)))
+      (is (= "failed" (:status result)))
+      (is (= "compose" (:phase result)))
+      (is (= "bridge-policy-mismatch" (:reason result)))
+      (is (not= "compose-digest-mismatch" (:reason result)))
+      (is (= "bridge-policy-mismatch" (name (:reason operation))))
+      (is (= "complete" (:recovery result)))
+      (is (= bridge-before (bridge-fixture-bytes forge))))))
 
 (deftest runtime-upgrade-failure-recovers-and-is-retryable
   (let [{:keys [source forge] :as fixture} (forge-fixture!)]

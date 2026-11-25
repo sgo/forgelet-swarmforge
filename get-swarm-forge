@@ -170,11 +170,23 @@ fail_missing() {
 
 copy_shared_scripts_and_articles() {
   local src="$1"
+  local preserved_adapter=""
   [[ -d "$src/swarmforge/scripts" ]] || fail_missing "swarmforge/scripts from $src"
   [[ -d "$src/swarmforge/constitution/articles" ]] || fail_missing "swarmforge/constitution/articles from $src"
   mkdir -p swarmforge/constitution/articles
+  # A bridge is installed by its own repository. Once composition is told to
+  # leave bridge installation alone, the layer's fallback adapter must not
+  # quietly replace the adapter the bridge installed in this forge.
+  if [[ -n "${SWARMFORGE_SKIP_BRIDGE:-}" \
+        && -f swarmforge/scripts/matrix-bridge.sh ]]; then
+    preserved_adapter="$tmp_dir/matrix-bridge.sh.preserved"
+    cp -p swarmforge/scripts/matrix-bridge.sh "$preserved_adapter"
+  fi
   rm -rf swarmforge/scripts
   cp -R "$src/swarmforge/scripts" swarmforge/scripts
+  if [[ -n "$preserved_adapter" ]]; then
+    cp -p "$preserved_adapter" swarmforge/scripts/matrix-bridge.sh
+  fi
   local shared_article
   for shared_article in engineering.prompt workflow.prompt handoffs.prompt privacy.prompt stopping-without-finishing.prompt; do
     [[ -f "$src/swarmforge/constitution/articles/$shared_article" ]] \
