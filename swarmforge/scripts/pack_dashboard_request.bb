@@ -211,8 +211,10 @@
   #"(?i)^(?:sudo\s+)?(?:rm|git|bb|sh|bash|zsh|curl|wget|gh|npm|mvn|java|node|python|ruby|perl|kill|pkill|chmod|chown|mkdir|mv|cp)\b")
 (def apparent-reply-instruction-re
   #"(?i)\b(?:reply\s+with|reply|respond\s+with)\s+`([^`\r\n]{1,200})`")
+(def apparent-confirm-when-request-re
+  #"(?i)\bconfirm\s+when\b")
 (def apparent-confirmation-request-re
-  #"(?i)\btell\s+me\b")
+  #"(?i)\b(?:tell\s+me|confirm\s+when)\b")
 (def apparent-say-request-re
   #"(?i)\bsay\s+\"[^\"\r\n]{1,200}\"")
 
@@ -270,6 +272,9 @@
 
 (defn apparent-confirmation-request? [text]
   (boolean (re-find apparent-confirmation-request-re (or text ""))))
+
+(defn apparent-confirm-when-request? [text]
+  (boolean (re-find apparent-confirm-when-request-re (or text ""))))
 
 (defn apparent-say-request? [text]
   (boolean (re-find apparent-say-request-re (or text ""))))
@@ -941,6 +946,11 @@
               (cond
                 instruction
                 (quick-reply-challenge! id instruction)
+
+                (apparent-confirm-when-request? text)
+                (quick-reply-challenge!
+                 id nil
+                 "The response appears to invite an operator reply with `confirm when`.\n")
 
                 (apparent-confirmation-request? text)
                 (quick-reply-challenge! id nil)

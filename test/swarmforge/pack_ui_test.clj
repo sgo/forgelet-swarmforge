@@ -3415,6 +3415,71 @@
       (is (str/includes? help-text "--reply-with"))
       (is (str/includes? help-text "--without-quick-reply")))))
 
+(deftest confirm-when-requests-require-explicit-quick-reply-metadata
+  (let [forge (tmp-dir)
+        answer (fs/path forge "tmp" "answer.txt")
+        command (script "pack_dashboard_request.sh")]
+    (setup-pack! forge ["specifier"])
+    (doseq [[request-id text]
+            [["req-confirm-when"
+              "Connect and unlock the iPhone, then confirm when it is ready.\n"]
+             ["req-confirm-when-case"
+              "Connect it and CONFIRM WHEN READY.\n"]
+             ["req-confirm-when-sentence"
+              "The device may take a moment. Please connect it and confirm when ready.\n"]
+             ["req-confirm-when-multiline"
+              "Connect and unlock the iPhone.\n\nConfirm when it is ready.\n"]]]
+      (let [pending (write-pending-chat! forge {:id request-id})]
+        (write-file answer text)
+        (let [missing (run {:dir forge :ok? false}
+                           command "answer" request-id (str answer))
+              diagnostic (str (:err missing) (:out missing))]
+          (is (not (zero? (:exit missing))))
+          (is (str/includes? diagnostic "Quick-reply action required"))
+          (is (str/includes? diagnostic "confirm when"))
+          (is (str/includes? diagnostic "--reply-with"))
+          (is (str/includes? diagnostic "--without-quick-reply"))
+          (is (fs/regular-file? pending)))))
+
+    (write-file answer "CONFIRM WHEN READY\n")
+    (let [answered (run {:dir forge}
+                        command "answer" "req-confirm-when-case" (str answer)
+                        "--reply-with" "ready")
+          row (get (into {} (map (juxt :id identity)
+                                 (:chat (web-state forge))))
+                   "req-confirm-when-case")]
+      (is (zero? (:exit answered)) (:err answered))
+      (is (= "ready" (get-in row [:actions 0 :reply_text]))))
+
+    (let [literal (run {:dir forge}
+                       command "answer" "req-confirm-when-multiline" (str answer)
+                       "--without-quick-reply")
+          row (get (into {} (map (juxt :id identity)
+                                 (:chat (web-state forge))))
+                   "req-confirm-when-multiline")]
+      (is (zero? (:exit literal)) (:err literal))
+      (is (not (contains? row :actions))))
+
+    (doseq [[request-id text]
+            [["req-confirm-bare" "Confirm.\n"]
+             ["req-confirm-that" "Confirm that it is ready.\n"]
+             ["req-confirms" "The test confirms readiness.\n"]
+             ["req-confirm-description" "The helper notes whether confirmation is required.\n"]]]
+      (write-pending-chat! forge {:id request-id})
+      (write-file answer text)
+      (let [ordinary (run {:dir forge}
+                          command "answer" request-id (str answer))
+            row (get (into {} (map (juxt :id identity)
+                                   (:chat (web-state forge))))
+                     request-id)]
+        (is (zero? (:exit ordinary)) (:err ordinary))
+        (is (not (contains? row :actions)))))
+
+    (let [help (run {:dir forge :ok? false} command)
+          help-text (str (:err help) (:out help))]
+      (is (str/includes? help-text "--reply-with"))
+      (is (str/includes? help-text "--without-quick-reply")))))
+
 (deftest say-quoted-instructions-require-explicit-quick-reply-metadata
   ;; Given an answer asks the operator to say an exact quoted phrase
   ;; When metadata is omitted, supplied, or overridden as literal prose
