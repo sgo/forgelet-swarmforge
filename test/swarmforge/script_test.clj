@@ -221,6 +221,38 @@
       (finally
         (fs/delete-tree root)))))
 
+(deftest lifecycle-help-and-option-errors-have-no-side-effects
+  (let [command (script "swarmforge.sh")
+        expected-options
+        ["--restart-forge" "--open-project" "--close-project"
+         "--start-project" "--stop-project" "--health" "--health-project"
+         "--stop-forge-runtime" "--restart-role" "--restart-dead-roles"]]
+    (doseq [option ["-h" "--help"]]
+      (let [root (tmp-dir)]
+        (try
+          (let [result (run {:dir root} command option)]
+            (is (zero? (:exit result)) (:err result))
+            (doseq [expected expected-options]
+              (is (str/includes? (:out result) expected)))
+            (is (empty? (fs/list-dir root))))
+          (finally
+            (fs/delete-tree root)))))
+
+    (doseq [[id args fragment]
+            [["unknown" ["--not-a-lifecycle-option"] "Unknown lifecycle option"]
+             ["missing-open" ["--open-project"] "requires <forge-root> <project>"]
+             ["missing-health" ["--health"] "requires <forge-root>"]]]
+      (let [root (tmp-dir)]
+        (try
+          (let [result (apply run {:dir root :ok? false} command args)
+                text (str (:err result) (:out result))]
+            (is (not (zero? (:exit result))) id)
+            (is (str/includes? text "Usage:") id)
+            (is (str/includes? text fragment) id)
+            (is (empty? (fs/list-dir root)) id))
+          (finally
+            (fs/delete-tree root)))))))
+
 (defn write-completion-hook! [root body]
   (let [hook (fs/path root "swarmforge/hooks/card-complete.sh")]
     (write-file hook (str "#!/bin/sh\n" body))

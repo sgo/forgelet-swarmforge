@@ -46,6 +46,86 @@
     (println message))
   (System/exit 1))
 
+(def lifecycle-usage
+  (str "Usage:\n"
+       "  swarmforge.sh [<forge-root>]\n"
+       "  swarmforge.sh --restart-forge [<forge-root>]\n"
+       "  swarmforge.sh --open-project <forge-root> <project>\n"
+       "  swarmforge.sh --close-project <forge-root> <project>\n"
+       "  swarmforge.sh --start-project <project-root>\n"
+       "  swarmforge.sh --stop-project <project-root>\n"
+       "  swarmforge.sh --health <forge-root>\n"
+       "  swarmforge.sh --health-project <forge-root> <project>\n"
+       "  swarmforge.sh --stop-forge-runtime <forge-root>\n"
+       "  swarmforge.sh --restart-role <forge-root> <role>\n"
+       "  swarmforge.sh --restart-dead-roles <forge-root>\n"
+       "\n"
+       "Help does not require a forge root and has no filesystem side effects.\n"))
+
+(def lifecycle-options
+  #{"--restart-forge" "--open-project" "--close-project" "--start-project"
+    "--stop-project" "--health" "--health-project" "--stop-forge-runtime"
+    "--restart-role" "--restart-dead-roles" "--dashboard-status"})
+
+(def test-options
+  #{"--test-parse" "--test-required-helpers" "--test-launch-plan"
+    "--test-start-order" "--test-terminal-bridge" "--test-launch-command"
+    "--test-lieutenant-launch-command" "--test-install-hooks"
+    "--test-agent-start-delay" "--test-sleep-inhibitor-prefix"
+    "--test-ensure-codex-trust" "--test-reset-pack-web-state"
+    "--test-start-pack-web" "--test-stop-pack-web" "--test-tmux-base-indexes"
+    "--test-dashboard-address" "--test-dashboard-port-usable"
+    "--test-create-role-session" "--test-enclosing-forge"
+    "--test-mark-project" "--test-forge-up" "--test-dead-agent"})
+
+(def supported-options (into lifecycle-options test-options))
+
+(def command-arguments
+  {"--open-project" ["<forge-root>" "<project>"]
+   "--close-project" ["<forge-root>" "<project>"]
+   "--start-project" ["<project-root>"]
+   "--stop-project" ["<project-root>"]
+   "--health" ["<forge-root>"]
+   "--health-project" ["<forge-root>" "<project>"]
+   "--stop-forge-runtime" ["<forge-root>"]
+   "--restart-role" ["<forge-root>" "<role>"]
+   "--restart-dead-roles" ["<forge-root>"]
+   "--dashboard-status" ["<forge-root>"]
+   "--test-terminal-bridge" ["<root>" "<backend>"]
+   "--test-install-hooks" ["<root>"]
+   "--test-ensure-codex-trust" ["<dir>"]
+   "--test-reset-pack-web-state" ["<root>"]
+   "--test-start-pack-web" ["<root>"]
+   "--test-stop-pack-web" ["<root>"]
+   "--test-tmux-base-indexes" ["<tmux-socket>"]
+   "--test-dashboard-address" ["<root>" "<address>"]
+   "--test-dashboard-port-usable" ["<root>"]
+   "--test-create-role-session" ["<tmux-socket>" "<session>"]
+   "--test-enclosing-forge" ["<project-root>"]
+   "--test-mark-project" ["<project-root>" "open|closed"]
+   "--test-forge-up" ["<forge-root>"]})
+
+(defn print-lifecycle-usage! [error]
+  (binding [*out* (if error *err* *out*)]
+    (when error
+      (println error))
+    (print lifecycle-usage)
+    (flush)))
+
+(defn validate-cli-arguments! [args]
+  (let [command (first args)]
+    (when (and (str/starts-with? (str command) "-")
+               (not (supported-options command)))
+      (print-lifecycle-usage!
+       (str "Unknown lifecycle option: " command))
+      (System/exit 2))
+    (when-let [required (get command-arguments command)]
+      (let [provided (max 0 (dec (count args)))]
+        (when (< provided (count required))
+          (print-lifecycle-usage!
+           (str command " requires " (str/join " " required)))
+          (System/exit 2))))))
+
 (defn sq [value]
   (str "'" (str/replace (str value) #"'" "'\"'\"'") "'"))
 
@@ -1895,7 +1975,13 @@
   (print-dashboard-status! (context root)))
 
 (defn -main [& args]
-  (case (first args)
+  (if (#{"-h" "--help"} (first args))
+    (do
+      (print-lifecycle-usage! nil)
+      (System/exit 0))
+    (do
+      (validate-cli-arguments! args)
+      (case (first args)
     "--test-parse" (test-parse! (or (second args) (System/getProperty "user.dir")))
     "--test-required-helpers" (test-required-helpers!)
     "--test-launch-plan" (test-launch-plan! (or (second args) (System/getProperty "user.dir")))
@@ -1939,7 +2025,7 @@
         (if (forge-up? root)
           (refuse-bare-forge-restart! root)
           (run-host! root))
-        (run-main! root)))))
+        (run-main! root)))))))
 
 (when (= (str *file*) (System/getProperty "babashka.file"))
   (apply -main *command-line-args*))

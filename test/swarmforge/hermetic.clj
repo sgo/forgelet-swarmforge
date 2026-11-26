@@ -42,7 +42,7 @@
       [target]
       (when (and (seq options)
                  (not-any? #(str/starts-with? % "--test-") options)
-                 (not (str/starts-with? (first options) "--")))
+                 (not (str/starts-with? (first options) "-")))
         [(first options)]))
     []))
 
