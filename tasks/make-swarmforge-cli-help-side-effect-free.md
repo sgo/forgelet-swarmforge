@@ -63,6 +63,20 @@ Top-level help is a pure command-line operation:
 
 ## Verification
 
-From an empty disposable directory, `--help` and `-h` leave no repository or
-state and an unknown option fails cleanly. Existing lifecycle validation and
-open/close/health behavior remain unchanged.
+The real `swarmforge.sh` wrapper now prints one lifecycle usage document for
+`-h` and `--help`, exiting 0 before dependency checks or context creation.
+Unknown leading options and missing required arguments exit 2 with bounded
+usage before any filesystem or runtime mutation.
+
+Focused tests ran from empty disposable directories and verified that both help
+forms, an unknown option, an open-project missing-argument call and a health
+missing-argument call left the directory unchanged. The existing bare-restart
+refusal and project-open marker tests remained green.
+
+The full `bb test` gate passed 542 tests with 4,403 assertions, all 20 dashboard
+browser tests, and the bounded-projection E2E; the detached lifecycle E2E
+completed in 1,494 ms. The `bb crap` clean gate passed 24 tests with 132
+assertions and wrote `target/coverage/lcov.info`. The documentation contract
+passed 3 documents and 5 sections.
+
+No bare start, restart, stop or teardown was run against the active forge.
