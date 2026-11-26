@@ -93,6 +93,11 @@ get-swarm-forge project-manager      # a forge with selectable packs
 ./swarm                              # dashboard, host lieutenant, projects/ waiting
 ```
 
+`swarmforge/scripts/swarmforge.sh --help` (or `-h`) prints the lifecycle
+operations without requiring a forge root and without creating Git or runtime
+state. Unknown leading options and missing command arguments print bounded
+usage and fail before any filesystem or tmux mutation.
+
 A modern Lieutenant Family carries its project template at
 `.swarmforge/project-pack` and does not need a top-level `packs/` directory.
 SwarmForge recognizes that marker for startup, health and project lifecycle
