@@ -80,3 +80,7 @@ assertions and wrote `target/coverage/lcov.info`. The documentation contract
 passed 3 documents and 5 sections.
 
 No bare start, restart, stop or teardown was run against the active forge.
+
+## Operator acceptance
+
+None.
