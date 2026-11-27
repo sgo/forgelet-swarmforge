@@ -365,6 +365,9 @@
         template (fs/absolutize
                   (or (option args "--template")
                       (fail! "--template is required")))
+        template-kind (or (option args "--template-kind") "java-maven")
+        _ (when-not (#{"generic" "java-maven"} template-kind)
+            (fail! "--template-kind must be generic or java-maven"))
         check-only? (flag? args "--check")
         mcp-only? (flag? args "--mcp-only")
         stages-file (fs/path root "stages.edn")
@@ -436,14 +439,15 @@
                   (conj "add required docs stage")
                   (and standard? (not= with-deploy with-e2e))
                   (conj "add required e2e stage")
-                  (and standard? (not (fs/regular-file? e2e-contract)))
+                  (and standard? maven?
+                       (not (fs/regular-file? e2e-contract)))
                   (conj "create qa/e2e.edn")
-                  (and standard?
+                  (and standard? maven?
                        (or (not (fs/regular-file? e2e-wrapper))
                            (not= (slurp (str e2e-wrapper))
                                  (slurp (str template-e2e-wrapper)))))
                   (conj "install run-qa-e2e.sh")
-                  (and standard?
+                  (and standard? maven?
                        (or (not (fs/regular-file? e2e-checker))
                            (not= (slurp (str e2e-checker))
                                  (slurp (str e2e-upgrade-source)))))
@@ -478,11 +482,15 @@
                        (some #(not (stage-execution-current? % root))
                              policy-files))
                   (conj "install MCP stage execution guidance")
-                  (not (fs/regular-file? checker)) (conj "install check-documentation.bb")
-                  (or (not (fs/regular-file? wrapper))
+                  (and maven? (not (fs/regular-file? checker)))
+                  (conj "install check-documentation.bb")
+                  (and maven?
+                       (or (not (fs/regular-file? wrapper))
                       (not= (slurp (str wrapper)) (slurp (str template-wrapper))))
+                       )
                   (conj "install check-documentation.sh")
-                  (not (fs/regular-file? contract)) (conj "create docs/manual-contract.edn"))]
+                  (and maven? (not (fs/regular-file? contract)))
+                  (conj "create docs/manual-contract.edn"))]
     (when (empty? pending)
       (println (str "get-agent-project: " root " has the current single-agent structure"))
       (System/exit 0))
@@ -541,19 +549,21 @@
               (install-managed-block!
                file stage-execution-begin stage-execution-end
                (stage-execution-block root)))))
-        (when-not (= (when (fs/regular-file? checker) (slurp (str checker)))
-                     (slurp (str upgrade-source)))
+        (when (and maven?
+                   (not= (when (fs/regular-file? checker) (slurp (str checker)))
+                         (slurp (str upgrade-source))))
           (fs/create-dirs (fs/parent checker))
           (fs/copy upgrade-source checker {:replace-existing true}))
-        (when-not (= (when (fs/regular-file? wrapper) (slurp (str wrapper)))
-                     (slurp (str template-wrapper)))
+        (when (and maven?
+                   (not= (when (fs/regular-file? wrapper) (slurp (str wrapper)))
+                         (slurp (str template-wrapper))))
           (fs/create-dirs (fs/parent wrapper))
           (fs/copy template-wrapper wrapper {:replace-existing true})
           (fs/set-posix-file-permissions wrapper "rwxr-xr-x"))
-        (when-not (fs/regular-file? contract)
+        (when (and maven? (not (fs/regular-file? contract)))
           (fs/create-dirs (fs/parent contract))
           (fs/copy template-contract contract))
-        (when standard?
+        (when (and standard? maven?)
           (when-not (fs/regular-file? e2e-contract)
             (fs/create-dirs (fs/parent e2e-contract))
             (fs/copy template-e2e-contract e2e-contract))

@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: get-agent-project <project-name> [--forge <forge-root>] [--profile standard|library] [--agent codex|claude|copilot|grok]
+Usage: get-agent-project <project-name> [--forge <forge-root>] [--profile standard|library] [--template generic|java-maven] [--agent codex|claude|copilot|grok]
        get-agent-project --upgrade <project-name-or-path> [--forge <forge-root>] [--check]
        get-agent-project --convert <project-name-or-path> [--forge <forge-root>] [--profile standard|library] [--apply]
 
@@ -19,6 +19,8 @@ nothing.
 nothing unless --apply is given.
 
 --agent selects the single agent for a new project. It defaults to codex.
+--template selects an explicit starter. The default generic scaffold makes no
+language or build-tool choice. java-maven preserves the complete Java starter.
 USAGE
 }
 
@@ -28,7 +30,8 @@ fail() {
 }
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
-template_dir="$script_dir/swarmforge/templates/agent-project"
+template_name="generic"
+template_set=0
 forge_root=""
 name=""
 profile="standard"
@@ -66,6 +69,12 @@ while [[ $# -gt 0 ]]; do
       profile="$2"
       shift 2
       ;;
+    --template)
+      [[ $# -ge 2 ]] || fail "--template needs a value"
+      template_name="$2"
+      template_set=1
+      shift 2
+      ;;
     --agent)
       [[ $# -ge 2 ]] || fail "--agent needs a value"
       agent="$2"
@@ -89,11 +98,16 @@ done
 
 [[ -n "$name" ]] || { usage >&2; exit 1; }
 [[ "$name" != *[!A-Za-z0-9._/-]* ]] || fail "project name must be letters, digits, dot, dash, underscore or slash"
-[[ -d "$template_dir" ]] || fail "template not found: $template_dir"
 case "$profile" in
   standard|library) ;;
   *) fail "unknown profile: $profile (use standard or library)" ;;
 esac
+case "$template_name" in
+  generic) template_dir="$script_dir/swarmforge/templates/agent-project" ;;
+  java-maven) template_dir="$script_dir/swarmforge/templates/java-maven" ;;
+  *) fail "unknown template: $template_name (use generic or java-maven)" ;;
+esac
+[[ -d "$template_dir" ]] || fail "template not found: $template_dir"
 [[ "$mode" == create ]] || [[ "$agent_set" == 0 ]] ||
   fail "--agent is only valid when creating a project"
 supported_agents_file="$script_dir/swarmforge/scripts/agents.conf"
@@ -127,6 +141,10 @@ if [[ -f "$allowlist" && ! -L "$allowlist" ]] &&
 fi
 
 if [[ "$mode" == convert ]]; then
+  if [[ "$template_set" == 0 ]]; then
+    template_name="java-maven"
+    template_dir="$script_dir/swarmforge/templates/java-maven"
+  fi
   converter="$script_dir/convert-pack-project"
   [[ -x "$converter" ]] || fail "conversion helper not found: $converter"
   convert_root="$name"
@@ -146,9 +164,25 @@ if [[ "$mode" == upgrade ]]; then
   fi
   [[ -f "$dest/.swarmforge/single-agent" ]] ||
     fail "not a single-agent project: $dest"
+  if [[ "$template_set" == 0 ]]; then
+    language=""
+    if [[ -f "$dest/swarmforge/language.conf" ]]; then
+      language="$(tr -d '[:space:]' < "$dest/swarmforge/language.conf")"
+    fi
+    if [[ -f "$dest/pom.xml" || -d "$dest/.mvn" \
+          || -d "$dest/acceptance/src/test/java" \
+          || "$language" == "Java" ]]; then
+      template_name="java-maven"
+      template_dir="$script_dir/swarmforge/templates/java-maven"
+    else
+      template_name="generic"
+      template_dir="$script_dir/swarmforge/templates/agent-project"
+    fi
+  fi
   helper="$script_dir/swarmforge/scripts/upgrade-agent-project.bb"
   [[ -f "$helper" ]] || fail "upgrade helper not found: $helper"
   args=(--root "$dest" --template "$template_dir")
+  args+=(--template-kind "$template_name")
   [[ "$mcp_only" == 1 ]] && args+=(--mcp-only)
   [[ "$check_only" == 1 ]] && args+=(--check)
   exec bb "$helper" "${args[@]}"
@@ -162,9 +196,11 @@ mkdir -p "$dest"
 cp -R "$template_dir/." "$dest/"
 artifact_name="${name##*/}"
 artifact_name="$(printf '%s' "$artifact_name" | sed 's#/#-#g')"
-sed "s/__PROJECT_ARTIFACT__/$artifact_name/g; s/__PROJECT_NAME__/$artifact_name/g" \
-  "$dest/pom.xml" > "$dest/pom.xml.tmp"
-mv "$dest/pom.xml.tmp" "$dest/pom.xml"
+if [[ "$template_name" == "java-maven" ]]; then
+  sed "s/__PROJECT_ARTIFACT__/$artifact_name/g; s/__PROJECT_NAME__/$artifact_name/g" \
+    "$dest/pom.xml" > "$dest/pom.xml.tmp"
+  mv "$dest/pom.xml.tmp" "$dest/pom.xml"
+fi
 if [[ "$profile" == "library" ]]; then
   mv "$dest/stages.library.edn" "$dest/stages.edn"
   mv "$dest/STAGES.library.md" "$dest/STAGES.md"
@@ -185,25 +221,17 @@ if [[ -f "$forge_root/swarmforge/constitution/articles/engineering.prompt" ]]; t
      "$dest/swarmforge/constitution/articles/engineering.prompt"
 fi
 chmod +x "$dest/swarm"
-if [[ -f "$dest/scripts/run-acceptance-tests.sh" ]]; then
-  chmod +x "$dest/scripts/run-acceptance-tests.sh"
-fi
-if [[ -f "$dest/scripts/install-snapshot.sh" ]]; then
-  chmod +x "$dest/scripts/install-snapshot.sh"
-fi
-if [[ -f "$dest/scripts/github-packages-token.sh" ]]; then
-  chmod +x "$dest/scripts/github-packages-token.sh"
-fi
-if [[ -f "$dest/scripts/check-documentation.sh" ]]; then
-  chmod +x "$dest/scripts/check-documentation.sh"
-fi
-if [[ -f "$dest/scripts/run-qa-e2e.sh" ]]; then
-  chmod +x "$dest/scripts/run-qa-e2e.sh"
-fi
-
+for script_name in run-acceptance-tests.sh install-snapshot.sh \
+                   github-packages-token.sh check-documentation.sh \
+                   run-qa-e2e.sh stage-placeholder.sh; do
+  if [[ -f "$dest/scripts/$script_name" ]]; then
+    chmod +x "$dest/scripts/$script_name"
+  fi
+done
 if [[ "$mcp_only" == 1 ]]; then
   bb "$forge_root/swarmforge/scripts/upgrade-agent-project.bb" \
-    --root "$dest" --template "$template_dir" --mcp-only
+    --root "$dest" --template "$template_dir" \
+    --template-kind "$template_name" --mcp-only
 fi
 
 mkdir -p "$dest/.swarmforge"
@@ -237,5 +265,6 @@ fi
 
 printf 'Single-agent project created: %s\n' "$dest"
 printf 'Profile: %s\n' "$profile"
+printf 'Template: %s\n' "$template_name"
 printf 'Agent: %s\n' "$agent"
 printf 'Next: %s\n' "$dest/swarm"

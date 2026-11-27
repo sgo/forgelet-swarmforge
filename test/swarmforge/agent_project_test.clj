@@ -4,6 +4,7 @@
             [cheshire.core :as json]
             [clojure.edn :as edn]
             [clojure.java.shell :as sh]
+            [clojure.pprint :as pprint]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [swarmforge.hermetic :as hermetic]))
@@ -36,8 +37,14 @@
 
 (defn run
   [dir & args]
-  (hermetic/guard! dir args)
-  (apply sh/sh (concat args [:dir (str dir)])))
+  (let [args
+        (if (and (seq args)
+                 (= composer (first args))
+                 (not (some #{"--template" "--upgrade" "--convert"} args)))
+          (concat [(first args) "--template" "java-maven"] (rest args))
+          args)]
+    (hermetic/guard! dir args)
+    (apply sh/sh (concat args [:dir (str dir)]))))
 
 (defn run-env
   [dir env & args]
@@ -63,8 +70,12 @@
     forge))
 
 (defn state [project]
-  (edn/read-string
-   (slurp (str (fs/path project ".swarmforge" "stages" "agent.edn")))))
+  (let [task (:task
+              (edn/read-string
+               (slurp (str (fs/path project "stages.edn")))))]
+    (edn/read-string
+     (slurp (str (fs/path project ".swarmforge" "stages"
+                          (str task ".edn")))))))
 
 (defn run-stage [project & args]
   (apply run project
@@ -321,6 +332,186 @@
         (stop-agent-session! project)
         (delete-tree! forge)))))
 
+(deftest generic-scaffold-is-language-neutral-and-fails-closed
+  (doseq [profile ["standard" "library"]]
+    (let [forge (fixture-forge)
+          name (str "generic-" profile)
+          project (fs/path forge "projects" name)
+          profile-args (if (= "library" profile) ["--profile" "library"] [])]
+      (try
+        (let [created
+              (apply run repo-root composer
+                     (concat ["--forge" (str forge) "--template" "generic"]
+                             profile-args [name]))]
+          (is (zero? (:exit created)) (str (:err created) (:out created))))
+        (doseq [required ["AGENTS.md" "STAGES.md" "README.md" "ARCHITECTURE.md"
+                          "stages.edn" "features" "tasks" "swarm"]]
+          (is (fs/exists? (fs/path project required)) required))
+        (doseq [absent ["swarmforge/language.conf" "pom.xml" ".mvn"
+                        "acceptance/src/test/java" "scripts/install-snapshot.sh"
+                        "swarmforge/release.conf"]]
+          (is (not (fs/exists? (fs/path project absent))) absent))
+        (is (= (str profile "\n")
+               (slurp (str (fs/path project ".swarmforge/profile")))))
+        (is (fs/regular-file? (fs/path project ".git" "HEAD")))
+        (let [stages-before (slurp (str (fs/path project "stages.edn")))]
+          (write-file (fs/path project "src" "neutral.txt") "project source\n")
+          (let [upgrade (run repo-root composer "--upgrade" name
+                             "--forge" (str forge))]
+            (is (zero? (:exit upgrade)) (str (:err upgrade) (:out upgrade))))
+          (is (= "project source\n"
+                 (slurp (str (fs/path project "src" "neutral.txt")))))
+          (is (= stages-before
+                 (slurp (str (fs/path project "stages.edn")))))
+          (is (not (fs/exists? (fs/path project "swarmforge/language.conf"))))
+          (is (not (fs/exists? (fs/path project "pom.xml")))))
+        (let [config (edn/read-string
+                      (slurp (str (fs/path project "stages.edn"))))
+              stages (:stages config)
+              names (mapv :name stages)
+              placeholder (fn [stage stage-name]
+                            (= [["scripts/stage-placeholder.sh" stage-name]]
+                               (:runs stage)))
+              placeholder-named? (fn [stage-name]
+                                   (some #(placeholder % stage-name) stages))]
+          (is (placeholder-named? "code"))
+          (is (placeholder-named? "docs"))
+          (is (placeholder-named? "deploy"))
+          (if (= profile "standard")
+            (do
+              (is (placeholder-named? "qa"))
+              (is (placeholder-named? "e2e"))
+              (is (not (contains? (set names) "verify"))))
+            (do
+              (is (placeholder-named? "verify"))
+              (is (not (contains? (set names) "qa")))
+              (is (not (contains? (set names) "e2e"))))))
+        (write-file (fs/path project "features" "generic.feature")
+                    "Feature: generic\n")
+        (write-file (fs/path project "tasks" "generic.md")
+                    "# generic\n\n## Operator-observed problem\n\nChoose a language.\n")
+        (write-file (fs/path project ".swarmforge/board/tasks.tsv")
+                    (str name "\tspec\t2026-11-27T00:00:00Z\t"
+                         "2026-11-27T00:00:00Z\t" name "\t0\n"))
+        (is (zero? (:exit
+                    (run-stage project "propose" "spec"
+                               "features/*.feature" "tasks/*.md"))))
+        (let [check (run-stage project "check" "code")
+              diagnostic (str (:err check) (:out check))
+              current (state project)]
+          (is (not (zero? (:exit check))))
+          (is (str/includes? diagnostic "language-neutral placeholder"))
+          (is (str/includes? diagnostic "choose the project language"))
+          (is (not= "done" (get-in current [:stages "code" :status])))
+          (is (empty? (get-in current [:stages "code" :evidence])))
+          (doseq [stage ["clean" "architect" "harden" "clean-final"
+                         (if (= profile "standard") "qa" "verify")
+                         "docs" "deploy" "release"]]
+            (let [placeholder
+                  (sh/sh (str (fs/path project "scripts"
+                                      "stage-placeholder.sh"))
+                         stage
+                         :dir (str project))]
+              (is (not (zero? (:exit placeholder))))
+              (is (str/includes? (str (:err placeholder))
+                                 "choose the project language")))))
+        (finally
+          (stop-agent-session! project)
+          (delete-tree! forge))))))
+
+(deftest explicit-java-maven-template-preserves-the-complete-starter
+  (doseq [profile ["standard" "library"]]
+    (let [forge (fixture-forge)
+          name (str "java-" profile)
+          project (fs/path forge "projects" name)
+          profile-args (if (= "library" profile) ["--profile" "library"] [])]
+      (try
+        (let [created
+              (apply run repo-root composer
+                     (concat ["--forge" (str forge)
+                              "--template" "java-maven"]
+                             profile-args [name]))]
+          (is (zero? (:exit created)) (str (:err created) (:out created))))
+        (is (= "Java\n"
+               (slurp (str (fs/path project "swarmforge/language.conf")))))
+        (is (fs/regular-file? (fs/path project "pom.xml")))
+        (is (fs/regular-file? (fs/path project ".mvn/settings.xml")))
+        (is (fs/regular-file?
+             (fs/path project "acceptance/src/test/java/com/sgo/acceptance/StepHandlers.java")))
+        (is (fs/regular-file? (fs/path project "scripts/install-snapshot.sh")))
+        (let [config (edn/read-string
+                      (slurp (str (fs/path project "stages.edn"))))
+              names (mapv :name (:stages config))
+              code (some #(when (= "code" (:name %)) %) (:stages config))]
+          (is (= [["mvn" "-q" "-Pwith-unit-tests" "verify"]]
+                 (:runs code)))
+          (if (= profile "standard")
+            (is (contains? (set names) "qa"))
+            (do
+              (is (contains? (set names) "verify"))
+              (is (not (contains? (set names) "qa"))))))
+        (finally
+          (stop-agent-session! project)
+          (delete-tree! forge))))))
+
+(deftest generic-first-card-can-choose-java-or-another-language
+  (doseq [[name language] [["java-first" "Java"]
+                           ["python-first" "Python"]]]
+    (let [forge (fixture-forge)
+          project (fs/path forge "projects" name)]
+      (try
+        (is (zero? (:exit
+                    (run repo-root composer "--forge" (str forge)
+                         "--template" "generic" name))))
+        (write-file (fs/path project "swarmforge" "language.conf")
+                    (str language "\n"))
+        (when (= language "Java")
+          (write-file (fs/path project "pom.xml") "<project/>\n")
+          (write-file (fs/path project ".mvn" "maven.config") "\n"))
+        (let [stages (edn/read-string
+                      (slurp (str (fs/path project "stages.edn"))))
+              updated (update stages :stages
+                               (fn [items]
+                                 (mapv (fn [stage]
+                                         (if (= "code" (:name stage))
+                                           (assoc stage
+                                                  :runs [["sh" "-c"
+                                                          (str "mkdir -p target/"
+                                                               (str/lower-case language)
+                                                               " && echo passed > target/"
+                                                               (str/lower-case language)
+                                                               "/code.log")]]
+                                                  :evidence [(str "target/"
+                                                                  (str/lower-case language)
+                                                                  "/code.log")])
+                                           stage))
+                                       items)))]
+          (write-file (fs/path project "stages.edn")
+                      (with-out-str (pprint/pprint updated))))
+        (write-file (fs/path project "features" "first.feature")
+                    "Feature: first\n")
+        (write-file (fs/path project "tasks" "first.md")
+                    "# first\n\n## Operator-observed problem\n\nChoose a language.\n")
+        (write-file (fs/path project ".swarmforge/board/tasks.tsv")
+                    (str name "\tspec\t2026-11-27T00:00:00Z\t"
+                         "2026-11-27T00:00:00Z\t" name "\t0\n"))
+        (is (zero? (:exit
+                    (run-stage project "propose" "spec"
+                               "features/*.feature" "tasks/*.md"))))
+        (let [check (run-stage project "check" "code")
+              evidence (get-in (state project) [:stages "code" :evidence])]
+          (is (zero? (:exit check)) (str (:err check) (:out check)))
+          (is (= 1 (count evidence)))
+          (is (fs/regular-file?
+               (fs/path project "target"
+                        (str/lower-case language) "code.log"))))
+        (if (= language "Java")
+          (is (fs/regular-file? (fs/path project "pom.xml")))
+          (is (not (fs/exists? (fs/path project "pom.xml")))))
+        (finally
+          (stop-agent-session! project)
+          (delete-tree! forge))))))
+
 (deftest single-agent-projects-persist-and-start-the-chosen-agent
   (let [forge (fixture-forge)
         fake-bin (fs/path forge "fake-agent-bin")
@@ -530,7 +721,7 @@
     (try
       (doseq [dir [project packages-project registry-project]]
         (fs/create-dirs (fs/path dir "swarmforge" "scripts"))
-        (fs/copy (fs/path repo-root "swarmforge" "templates" "agent-project"
+        (fs/copy (fs/path repo-root "swarmforge" "templates" "java-maven"
                            "scripts" "github-packages-token.sh")
                  (fs/path dir "swarmforge" "scripts" "github-packages-token.sh")
                  {:replace-existing true})
@@ -802,7 +993,7 @@
         (fs/create-dirs (fs/path dir "swarmforge" "scripts"))
         (let [helper (fs/path dir "swarmforge" "scripts"
                               "github-packages-token.sh")]
-          (fs/copy (fs/path repo-root "swarmforge" "templates" "agent-project"
+          (fs/copy (fs/path repo-root "swarmforge" "templates" "java-maven"
                              "scripts" "github-packages-token.sh")
                    helper {:replace-existing true})
           (fs/set-posix-file-permissions helper "rwxr-xr-x")))
@@ -958,6 +1149,13 @@
                 (str (fs/read-link (fs/path cache "current")))))
       (is (fs/regular-file?
            (fs/path cache "current/swarmforge/scripts/agents.conf")))
+      (is (fs/directory?
+           (fs/path cache "current/swarmforge/templates/agent-project")))
+      (is (fs/directory?
+           (fs/path cache "current/swarmforge/templates/java-maven")))
+      (is (fs/executable?
+           (fs/path cache
+                    "current/swarmforge/templates/agent-project/scripts/stage-placeholder.sh")))
 
       (doseq [agent agents]
         (let [name (str "cached-" agent)
@@ -967,7 +1165,21 @@
               role-line (slurp (str (fs/path project ".swarmforge" "roles.tsv")))
               role-fields (str/split (first (str/split-lines role-line)) #"\t")]
           (is (zero? (:exit result)) (:err result))
-          (is (= agent (nth role-fields 5 nil)))))
+          (is (= agent (nth role-fields 5 nil)))
+          (is (not (fs/exists? (fs/path project "pom.xml"))))
+          (is (not (fs/exists? (fs/path project "swarmforge/language.conf"))))))
+
+      (let [java-name "cached-java"
+            java (run-env root env (str wrapper)
+                          "--forge" (str forge)
+                          "--template" "java-maven"
+                          java-name)
+            java-project (fs/path forge "projects" java-name)]
+        (is (zero? (:exit java)) (:err java))
+        (is (fs/regular-file? (fs/path java-project "pom.xml")))
+        (is (= "Java\n"
+               (slurp (str (fs/path java-project
+                                    "swarmforge/language.conf"))))))
 
       (is (zero? (:exit (run-env repo-root env (str installer) "--check"))))
 
@@ -975,6 +1187,15 @@
       (let [missing (run-env repo-root env (str installer) "--check")]
         (is (not (zero? (:exit missing))))
         (is (str/includes? (str (:err missing) (:out missing))
+                           "run install.sh")))
+      (is (zero? (:exit (run-env repo-root env (str installer)))))
+      (is (zero? (:exit (run-env repo-root env (str installer) "--check"))))
+
+      (fs/delete-tree (fs/path cache "current/swarmforge/templates/java-maven"))
+      (let [missing-template (run-env repo-root env (str installer) "--check")]
+        (is (not (zero? (:exit missing-template))))
+        (is (str/includes? (str (:err missing-template)
+                                (:out missing-template))
                            "run install.sh")))
       (is (zero? (:exit (run-env repo-root env (str installer)))))
       (is (zero? (:exit (run-env repo-root env (str installer) "--check"))))

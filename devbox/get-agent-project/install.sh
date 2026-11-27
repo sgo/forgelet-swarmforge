@@ -53,6 +53,8 @@ release_complete() {
   local root="$1"
   local file
   [ -d "$root/swarmforge/templates/agent-project" ] || return 1
+  [ -d "$root/swarmforge/templates/java-maven" ] || return 1
+  [ -x "$root/swarmforge/templates/agent-project/scripts/stage-placeholder.sh" ] || return 1
   for file in "${required_files[@]}"; do
     [ -f "$root/$file" ] || return 1
   done
@@ -80,6 +82,8 @@ release_matches() {
   local file
   diff -qr "$source/swarmforge/templates/agent-project" \
            "$target/swarmforge/templates/agent-project" >/dev/null || return 1
+  diff -qr "$source/swarmforge/templates/java-maven" \
+           "$target/swarmforge/templates/java-maven" >/dev/null || return 1
   for file in "${required_files[@]}"; do
     cmp -s "$source/$file" "$target/$file" || return 1
   done
@@ -135,7 +139,8 @@ if ! cache_matches "$source_dir"; then
     cd "$source_dir"
     {
       for file in "${required_files[@]}"; do shasum -a 256 "$file"; done
-      find swarmforge/templates/agent-project -type f -print |
+      find swarmforge/templates/agent-project swarmforge/templates/java-maven \
+        -type f -print |
         LC_ALL=C sort |
         while IFS= read -r file; do shasum -a 256 "$file"; done
     } | shasum -a 256 | awk '{print $1}'

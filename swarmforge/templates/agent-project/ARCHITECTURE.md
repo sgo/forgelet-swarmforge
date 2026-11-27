@@ -1,13 +1,14 @@
-# Architecture decision
+# Architecture
 
 ## Decision
 
-What was restructured.
-
-## Why
-
-The forces that made this the better shape, and the alternatives rejected.
+The project is language-neutral until its first card chooses a language and
+replaces the placeholder lifecycle gates.
 
 ## Invariants
 
-What must stay true after the refactoring.
+- The project owns its language and build tool.
+- Every non-spec gate fails closed until the first card establishes a real,
+  executable gate.
+- Shared project, messaging and stage-runtime behavior is independent of the
+  chosen implementation language.

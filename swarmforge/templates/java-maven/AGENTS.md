@@ -1,0 +1,208 @@
+# Agent instructions
+
+You are the single agent for this project.
+
+Read `STAGES.md` first. It defines the specifier workflow and the gates.
+Read `mission.md` and the operator's task note before writing the spec.
+Read `swarmforge/constitution/articles/engineering.prompt` before setting up or
+changing the build. It carries the Java tool, profile, quality, release and
+deployment rules.
+
+The runner puts `.swarmforge/bin` and `swarmforge/scripts` first on `PATH`. Do
+the same in a manual shell before running a stage.
+
+The runner also loads project runtime defaults from
+`${SWARMFORGE_PROJECT_RUNTIME_ENV:-$HOME/.config/forgelet/project-runtime.env}`.
+Caller-supplied values win over that file. Do not commit device-specific values.
+The launch boundary removes `NO_COLOR` so agent output keeps colour; do not
+restore it in project configuration.
+
+The launch shell may also source the operator-owned
+`$HOME/.config/forgelet/agent-credentials.sh` hook. `GH_TOKEN` is available for
+GitHub pushes; `GITHUB_PACKAGES_TOKEN` is available only for Maven or explicitly
+package-registry projects. Never print either token. Check credentials by
+variable name or successful command outcome only. Do not copy hook values into
+the project, stage state, task notes, logs or handoffs.
+
+<!-- forgelet:operator-chat-guidance:begin -->
+## Operator chat
+
+When replying through Forgelet app chat, use the shared `operator-chat` skill
+for supported safe Markdown, fenced examples, channel behavior and the rule that
+prose is not approval or execution authority.
+<!-- forgelet:operator-chat-guidance:end -->
+
+The operator gives the card. You write the task note and Gherkin, validate
+them, and record the spec bundle. It is approved automatically by default, or
+proposed for operator approval when the forge opts back into that policy. Do
+not ask the operator to fill a template.
+
+<!-- forgelet:single-agent-correction-policy:begin -->
+## Spec approval
+
+A single-agent project approves its spec automatically by default and proceeds
+to implementation without an approval request. To restore explicit first-spec
+approval for every single-agent project in a forge, create
+`<forge>/swarmforge/local-spec-approval.conf` containing `spec=operator`.
+In that explicit mode, corrections to the same unfinished card's task note or
+Gherkin remain automatically approved after the first operator approval.
+<!-- forgelet:single-agent-correction-policy:end -->
+
+When the card arrived through routing, the stage tool binds that card's board
+name and task ID into the spec proposal and moves that same row through every
+gate. Do not create a project-named card to stand in for the routed card. If
+more than one routed card is active and the task note cannot identify one, stop
+and make the operator choose rather than guessing.
+
+<!-- forgelet:typed-clarification-guidance:begin -->
+## Operator clarifications
+
+When a decision is genuinely the operator's, ask in project chat:
+
+`pack_dashboard_request.sh clarify-chat clar-<stable-id> ./tmp/question.txt`
+
+Use one stable id for the question and keep it stable across retries. The
+question file may contain multiline Markdown. Stop and wait after asking; do not
+start unrelated work while the clarification is open. If the answer is
+insufficient, create a new clarification that references the answered one with
+`--reference clar-<answered-id>` rather than reopening the answered record.
+Never use the removed legacy `clarify` command.
+<!-- forgelet:typed-clarification-guidance:end -->
+
+Work in vertical slices: one public behaviour through every gate. Tests,
+cleanup, architecture, hardening and verification are part of that slice, not
+separate backlog items and not gates deferred to a later card.
+
+Do not create disposable Families, rooms or invitations through the live Host
+or live Matrix homeserver for verification. Use disposable roots and a
+hermetic composer or a fixture with fake Host, bridge and homeserver state.
+Real app/Host creation after release is operator acceptance: run it only when
+the operator explicitly asks for that live check.
+
+## Task report completion
+
+Every new or next-touched task note ends with `## Verification` and
+`## Operator acceptance`. Verification records automated gates, test counts and
+source delivery. Operator acceptance is either:
+
+```markdown
+## Operator acceptance
+
+None.
+```
+
+or bounded entries:
+
+```markdown
+## Operator acceptance
+
+- owner: operator | environment: physical signed iPhone | checks: install and verify save/restore | status: pending
+```
+
+Use `pending` when an environment or physical-device check is unavailable, even
+after automation and source delivery are complete. `stage complete` records the
+pending residual and closes the card; only the operator can later mark it
+`confirmed`. Pending acceptance never substitutes for a required gate, release
+approval, destructive confirmation or policy approval. Legacy notes without
+these sections remain readable; add both when the note is next touched.
+
+Single-agent routing keeps at most one active card. Additional approved cards
+wait in `queued`; do not edit a queued card into `spec` or invent a second
+request. Completing the active card through `stage complete` promotes the
+oldest queued card and creates its one request. Queued cards do not make an
+idle project active and do not depend on the agent's prompt readiness.
+
+Approving the spec, automatically or by the operator, moves the active card's
+visible board lane to `code`. This does not run the code gate or record its
+evidence; run `stage check code` when the implementation is ready.
+
+A stage marked `:detached true` returns a durable stage-job id instead of
+holding the turn open. End the turn as soon as the command prints that id; do
+not sleep or poll. The completion request wakes a later turn to run
+`stage status --json` or `stage check <name>`, which validates the exit record,
+evidence and source stamps and records the stage once. Use `stage job`,
+`stage jobs`, `stage cancel` and `stage retry` for bounded inspection and
+explicit recovery. Short stages stay foreground.
+
+Completion uses a durable two-event handshake: the supervisor writes a terminal
+event after exit/evidence state, and the launching client writes yield-ready
+after returning the job id. The supervisor joins those events through a
+filesystem watch and falls back to the durable request queue if readiness is
+missing after a bounded wait.
+
+Approved Gherkin is executable. Every step has a handler under `acceptance/src`
+that calls the public API, and `scripts/run-acceptance-tests.sh` must pass.
+Hand-written JUnit is unit coverage, not acceptance evidence.
+The harden gate runs PIT and then the explicit
+`gherkin-mutation:check` Maven-plugin goal from the pinned Innersource release.
+The plugin uses `acceptance/runner-worker.sh`, hard level, four workers and
+`target/gherkin-mutation/reports/mutation-report.json` as structured evidence.
+It is not bound to ordinary compile, test or package phases. The project POM
+sets the fixed adapter version, GitHub package repository, feature roots,
+project identity and dependency fingerprints. No global mutator is required.
+Write value-driven behaviour as Scenario Outlines with example tables. A plain
+scenario has no mutable cells, so it is not acceptance-mutation evidence; a
+boolean scenario may stay plain, with that choice recorded in the task note.
+
+In the standard profile, the `e2e` stage is part of QA. Register each card in
+`qa/e2e.edn` with its procedure, script and required environment-input names.
+Missing inputs fail the stage rather than skipping it. Never commit or print
+input values; the stage records only names and redacts values from output. If
+no end-to-end procedure applies, put an explicit `## E2E waiver` and reason in
+the approved task note.
+
+End every turn with a line exactly `<<AGENT READY>>`, so the relay knows the
+turn is complete.
+
+When an operator message arrives with `[phone <id>]`, write only the
+operator-facing answer to `./tmp/answer.txt` and run the `Answer with:`
+command. Your terminal output is not sent to the phone.
+
+A pre-commit hook refuses commits until the current spec bundle is approved.
+Do not use `--no-verify`; run `stage propose spec` and `stage approve` first.
+The proposal also appears in the project dashboard and the phone's approvals
+room; only the operator approves it, with their own words.
+
+<!-- forgelet:single-agent-commit-policy:begin -->
+## Commit working checkpoints
+
+After the current spec is approved, commit the approved spec before
+implementation and commit coherent working checkpoints as they are completed.
+Do not wait for every gate or for deployment to make your first commit, and do
+not defer the whole card to one final pre-deploy commit. Keep each checkpoint
+reviewable and free of unrelated or generated files.
+
+The pre-commit hook checks only that the current spec bundle is approved. Stage
+evidence is tied to the Git tree, so committing unchanged contents does not
+invalidate a stage that has passed. Before deployment, commit and push the final
+reviewed tree.
+<!-- forgelet:single-agent-commit-policy:end -->
+
+Documentation is part of the slice. Before `stage check docs`, review all three
+surfaces: `README.md` for installation, coordinates, quick start and project
+status; `docs/manual.md` for detailed public behaviour and extension guidance;
+and `ARCHITECTURE.md` for boundaries and structural decisions. Record in the
+task note what changed in each or why it did not need to change.
+
+Keep `docs/manual-contract.edn` current. Each section names the public APIs it
+owns and at least one executable example, unless it is explicitly conceptual
+with a reason. The example command runs against the current tree and must print
+the declared text; a removed or changed API therefore makes the documenting
+section fail rather than leaving stale prose behind.
+
+Local snapshot installation is part of card completion, not an optional
+release: after the reviewed tree is committed and pushed, run
+`stage check deploy`. It executes `scripts/install-snapshot.sh`, installs the
+current `-SNAPSHOT` into the operator's standard `~/.m2`, and deploys
+timestamped files to the host-supplied repository named by
+`SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY`. A missing or malformed value
+fails the gate. `stage complete` refuses if a Maven project has no required
+`deploy` stage or if that stage is stale.
+
+GitHub Packages is the release boundary, not the card-completion boundary.
+Publish there only through the deliberate `release:prepare` /
+`release:perform` path after the optional release gate. `swarmforge/release.conf`
+names that release target.
+
+Do not create worktrees or hand work to another role. The project root is the
+checkout.

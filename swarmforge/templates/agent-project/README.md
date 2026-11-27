@@ -1,138 +1,16 @@
 # Single-agent project
 
-This project is owned by one agent. It has a `stages.edn` and a `STAGES.md`
-instead of pack roles and handoffs. `./swarm` starts the local runner; the
-runner serves `pack_web` for this project and gives the agent one dashboard
-request at a time.
+This is a language-neutral single-agent project. The operator's first card must
+choose the implementation language and replace the placeholder lifecycle gates
+before product implementation begins.
 
-The forge dashboard marks this project as single-agent and links to the
-project's own dashboard.
-
-Before starting the agent, the runner loads
-`${SWARMFORGE_PROJECT_RUNTIME_ENV:-$HOME/.config/forgelet/project-runtime.env}`
-when present. The file contains assignment-only environment defaults; values
-already supplied to the runner win. A missing file is allowed, while an
-unreadable or malformed file fails the launch visibly.
-The launch boundary always removes `NO_COLOR`; terminal variables such as
-`TERM` and `COLORTERM` are preserved.
-
-The operator may install `$HOME/.config/forgelet/agent-credentials.sh` as an
-owner-only (`600`) device hook that exports `GH_TOKEN` and, when available,
-`GITHUB_PACKAGES_TOKEN`. Persistent agents source it into their final launch
-shell. `GH_TOKEN` is always exposed; the packages token is exposed only for
-projects with `pom.xml`, `.mvn/`, or `swarmforge/package-registry.conf` naming
-`github-packages`. Caller values win. The loader configures and verifies Git
-through `gh` without printing values. Restart the project agent after changing
-the hook. Use `install-agent-credentials.sh --install` or `--check` from the
-shared layer to create or verify the device hook without printing values.
-
-## Documentation contract
-
-Every completed card includes the `docs` gate. The maintained surfaces are:
-
-- `README.md` for setup, coordinates, quick start and project status;
-- `docs/manual.md` for detailed public behaviour; and
-- `ARCHITECTURE.md` for boundaries and structural decisions.
-
-`docs/manual-contract.edn` maps sections to the public APIs they explain and
-to executable examples. `scripts/check-documentation.sh` checks the documents,
-headings, API ownership, local links and example output. A section without an
-example must be explicitly conceptual and carry its reason.
-
-## Long-running stage jobs
-
-A stage marked `:detached true` returns one durable job id instead of holding
-the agent turn open. End the turn without polling when that happens. The
-supervisor writes a bounded exit record and queues exactly one completion
-request; the next `stage status --json` or `stage check <stage>` reconciles the
-exit, evidence and source stamps. Use `stage job <id>`, `stage jobs`,
-`stage cancel <id>` and `stage retry <id>` for bounded inspection and recovery.
-Completion joins a terminal event written after exit/evidence with a yield-ready
-event written as the launching turn ends. The normal path uses a filesystem
-watch; a bounded fallback still queues the result if readiness never arrives.
-
-## Snapshot installation and deployment
-
-A completed card installs its current `-SNAPSHOT` after every quality gate and
-after its reviewed commit has been pushed:
+The project already has one selected agent, a task and feature location, shared
+runtime tooling, Git, project status, and the runner entry point:
 
 ```sh
-stage check deploy
+./swarm
 ```
 
-The stage runs `scripts/install-snapshot.sh` and the `with-release-tests`
-profile. Maven's `deploy` lifecycle installs into the operator's standard
-`~/.m2` and then publishes timestamped SNAPSHOT files to the host-supplied
-`<repository-id>::default::<repository-url>` in
-`SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY`. A missing or malformed value
-fails the gate. `stage complete` refuses while the required deploy stage is
-absent or stale.
-
-GitHub Packages belongs exclusively to the optional release path.
-`swarmforge/release.conf` names that target; ordinary card completion does not
-write to it.
-
-## Acceptance
-
-The approved Gherkin is executed, not just translated into hand-written tests.
-`acceptance/src` carries the parser IR reader, the step dispatcher, and the
-per-scenario state. Add a `StepHandler` for every step shape; each handler
-calls the project's public API.
-
-```sh
-scripts/run-acceptance-tests.sh
-```
-
-The script compiles the harness separately from the Maven modules, so it works
-for a single module or a reactor. It writes `target/acceptance/acceptance.log`
-and fails on an unhandled or ambiguous step.
-
-Gherkin mutation runs in `harden`:
-
-```sh
-scripts/run-acceptance-tests.sh --prepare
-mvn -q gherkin-mutation:check
-```
-
-The project POM pins `sgo.innersource:gherkin-mutation-maven-adapter:0.1.0`,
-declares its GitHub package repository, and configures the feature roots,
-`acceptance/runner-worker.sh`, hard level, four workers, project identity and
-initial dependency fingerprints. The plugin writes
-`target/gherkin-mutation/reports/mutation-report.json` and mutates copies, so
-approved feature files are untouched. It is invoked explicitly after PIT and is
-not bound to compile, test or package. No global mutator or legacy mutation
-shell script is required.
-
-## End-to-end QA
-
-The standard profile adds an `e2e` stage after `qa`. Register the active card in
-`qa/e2e.edn` with its procedure, script and required environment-variable names,
-then run:
-
-```sh
-scripts/run-qa-e2e.sh
-```
-
-The runner validates every named input, fails when one is absent, redacts input
-values from captured output and writes `target/e2e/check.log`. A card whose
-approved task note has an explicit `## E2E waiver` with a reason passes without
-a card-specific entry.
-
-## Operator acceptance
-
-New and next-touched task notes carry both `## Verification` and
-`## Operator acceptance`. Automated evidence belongs in Verification. A physical
-device or unavailable operator environment check is recorded explicitly:
-
-```markdown
-## Operator acceptance
-
-- owner: operator | environment: physical signed iPhone | checks: install and verify save/restore | status: pending
-```
-
-If no operator residual exists, write `None.` under the section. Pending
-acceptance is visible in `stage list`, `stage status --json`, and the persisted
-completion record; it does not keep a fully automated, pushed card in a gate
-lane. Only the operator can mark a check confirmed, and pending acceptance never
-replaces a required gate or approval. Older notes without the sections remain
-readable and gain them on their next edit.
+The project language is not assumed. When the first card chooses it, write the
+language to `swarmforge/language.conf` and establish that language's build,
+test, mutation, acceptance, documentation, deployment and release gates.

@@ -1,228 +1,36 @@
 # Stages
 
-This project is run by one agent. The stages are gates in tooling, not
-handoffs: the next one refuses while an earlier one is stale.
+This project is language-neutral. The first card must choose the project
+language, write `swarmforge/language.conf`, establish that language's build,
+test, mutation and documentation tools, and replace the placeholder gates in
+`stages.edn` before product implementation.
 
-The shared engineering rules are in
-`swarmforge/constitution/articles/engineering.prompt`; read them before setting
-up or changing the build.
+The `spec` stage is usable immediately. Every non-spec stage runs
+`scripts/stage-placeholder.sh` and fails closed until replaced. A placeholder
+must never be treated as passing evidence.
 
-The project tools live in `.swarmforge/bin`. Before running a gate manually:
+The standard lifecycle is:
 
-```sh
-export PATH="$PWD/.swarmforge/bin:$PWD/swarmforge/scripts:$PATH"
-```
-
-Single-agent cards enter the board through `queued` or `spec`. When no card is
-active, routing creates the approved card directly in `spec`; otherwise it is
-durably queued in creation-time/task-id order and no dashboard request is
-created. `stage complete` is the only promotion boundary: after every required
-gate is current it completes the active card, promotes the oldest queued card
-to `spec`, and creates that card's request. An empty queue records project
-idleness instead. `queued` is a board state, not a gate.
-
-Every new or next-touched task report carries `## Verification` and
-`## Operator acceptance`. Verification contains automated gate counts and
-source-delivery evidence. Operator acceptance is `None.` or bounded lines:
-
-```markdown
-- owner: operator | environment: physical signed iPhone | checks: install and verify save/restore | status: pending
-```
-
-Environment-bound checks that cannot run yet stay `pending`; they do not keep a
-fully automated, pushed card in a gate lane. `stage complete` retains those
-safe residuals in its completion record, and `stage list`/`status` distinguishes
-automation incomplete, automation complete with pending acceptance, and fully
-complete. Only the operator can mark a pending check confirmed. Pending text
-never replaces release approval, destructive confirmation or another hard gate.
-Older notes without either section remain readable; add both on the next touch.
-
-Automated runtime identity and app-creation checks stay inside disposable
-fixtures. Never use the live Host, live bridge configuration or live Matrix
-homeserver to create a test Family or room. A released app/Host creation is a
-separate operator acceptance action and is not attempted automatically.
-
-`route_card.sh commit` reports the lane read back from the created board row.
-Its consumed proposal record keeps the original proposed `lane` and the actual
-`created-lane` separately, so a queued placement is visible in the audit trail.
-
-An operator or automatic spec approval moves the active card from `spec` to
-`code`. That is visibility only: it records the approved spec evidence but
-does not run or complete the code gate. The code stage stays todo until
-`stage check code` succeeds.
-
-## Vertical slices
-
-A task is one public behaviour through every gate, not a layer of a behaviour.
-Do not put "API", "storage", "tests", "clean", "architect", "harden" or
-"verify" on the backlog as separate items; they belong to the same slice.
-Spec-only and bootstrap tasks need an explicit waiver in the approved spec,
-not a deferred gate.
-
-```
+```text
 spec -> code -> clean -> architect -> harden -> clean-final -> qa -> e2e -> docs -> deploy -> release?
 ```
 
-Run `bb swarmforge/scripts/stage.bb list --root .` when you think the work is
-finished. The list is the reminder; `stage complete` refuses while any required
-stage is todo or stale.
+The library profile uses `verify` instead of `qa` and `e2e`; the language is
+still not implied by the profile.
 
-## Source inputs and report metadata
+An operator or automatic spec approval moves the active card to `code`. That is
+visibility only and does not run the code gate.
 
-Task-note spec hashes omit only `## Verification` and
-`## Operator acceptance`. Those remain in the file and `stage complete` parses
-them for report validation and residuals, but changing their content does not
-re-run a technical gate. Requirement text and every other section still count.
+Detached stages return a durable job id. End the turn without polling. The
+completion wake enables `stage status --json` or `stage check <name>` to
+validate the exit, evidence and source stamps once.
 
-Declare focused `:stamp` inputs matching what each gate consumes. Do not copy
-`:whole-tree` merely for convenience: an unrelated task, README or design-doc
-commit should not invalidate tested source. Missing inputs stay visible and
-stale, and unknown stamp values still widen to the whole tree with a warning.
-Committing and completing still require the exact final tree and every
-non-optional stage current.
+Every new or next-touched task note carries `## Verification` and
+`## Operator acceptance`. Pending acceptance does not replace a required gate.
 
-The template's `stages.edn` assumes a Maven reactor with an `architecture`
-module and the acceptance script under `scripts/`. Adjust the commands and
-evidence paths to the project before the first `stage check`.
+After the current spec is approved, commit the spec before implementation and
+commit coherent working checkpoints as they are completed. Do not use
+`--no-verify`.
 
-<!-- forgelet:single-agent-commit-policy:begin -->
-## Commit working checkpoints
-
-After the current spec is approved, commit the approved spec before
-implementation and commit coherent working checkpoints as they are completed.
-Do not wait for every gate or for deployment to make your first commit, and do
-not defer the whole card to one final pre-deploy commit. Keep each checkpoint
-reviewable and free of unrelated or generated files.
-
-The pre-commit hook checks only that the current spec bundle is approved. Stage
-evidence is tied to the Git tree, so committing unchanged contents does not
-invalidate a stage that has passed. Before deployment, commit and push the final
-reviewed tree.
-<!-- forgelet:single-agent-commit-policy:end -->
-
-## Specifier workflow
-
-The operator gives a card or chat request with the observed problem. You are
-the specifier: read `mission.md` and the code, then write `tasks/<name>.md`
-and one or more `features/<name>*.feature` files. Prune the Gherkin, run
-`gherkin-parser` and `ir-dry-checker`, list every feature file and the task
-note in `:spec`, and then run `stage propose spec <file>...`. The operator
-approves the exact bundle; they do not fill a template. Ask when the request is
-ambiguous; otherwise write the specification yourself and continue as the same
-agent.
-
-The template starts with no feature or task files; the specifier's first turn
-creates them. The default `:spec` bundle is `features/*.feature` plus
-`tasks/*.md`.
-
-Every approved step must be executable through the public API. The template
-ships `acceptance/src` with a runner and an empty handler list; add one
-handler per step shape and keep `scripts/run-acceptance-tests.sh` green. A
-step the harness cannot execute is not a scenario, only prose.
-
-A bootstrap feature is waived only by naming it, with a reason, in
-`acceptance/waived-features.txt`. The runner prints the waiver, so a skipped
-feature is visible in the gate log rather than silently ignored.
-
-`harden` runs PIT and then the explicit `gherkin-mutation:check` Maven-plugin
-goal from the pinned Innersource release. The plugin uses the persistent
-`acceptance/runner-worker.sh` boundary and writes structured evidence to
-`target/gherkin-mutation/reports/mutation-report.json`. A survivor or an
-infrastructure error fails the gate. The plugin mutates copies, so it never
-rewrites approved feature files. The project POM controls feature roots, runner
-command, hard level, four workers, project identity and dependency fingerprints;
-the goal is not bound to ordinary lifecycle phases. No global mutator or legacy
-mutation shell script is required. The adapter mutates example cells only:
-value-driven scenarios must be Scenario Outlines, and a non-waived feature that
-reports zero mutations must be parameterized or have its exemption recorded in
-the task note.
-
-- **spec**: the recorded feature bundle. `stage propose spec <file>...` records
-  it and, by default, approves it automatically for a single-agent project. A
-  forge with `spec=operator` instead prints a proposal that
-  `stage approve <id> --words "<their words>"` must approve explicitly.
-  Approval is tied to the exact bundle and is stale when any file in it changes.
-  The pre-commit hook refuses a commit until the current bundle is approved.
-  In explicit mode the proposal is also posted to the project dashboard and
-  phone's approvals room; `stage approve` or `stage reject` clears it.
-  While a proposal is pending, a new proposal is refused; decide it, or pass
-  `--replace` to supersede it explicitly. The old proposal is recorded as
-  superseded and the bridge reports that ending.
-- **code**: `mvn -Pwith-unit-tests verify`.
-- **clean**: `crap4java` for CRAP and `dry4java` for duplicate pairs. The
-  project's CRAP ceiling is 6; DRY and mutation are deltas against the task's
-  base commit.
-- **architect**: green invariants plus `ARCHITECTURE.md`, which states what was
-  restructured and why. This is refactoring, not a behaviour change.
-- **harden**: PIT with XML output, acceptance preparation, then the explicit
-  `gherkin-mutation:check` Maven goal. A PIT survivor on a touched line blocks
-  unless the project records why it is equivalent; a Gherkin survivor or error
-  blocks.
-- **clean-final**: the same clean check on the hardened tree.
-- **qa**: property tests first, then the acceptance suite.
-  `scripts/run-acceptance-tests.sh` parses every feature and dispatches every
-  step to a handler under `acceptance/src`. A step with no handler or two
-  matching handlers fails the gate.
-- **e2e**: required for every standard-profile card unless its approved task
-  note contains `## E2E waiver` with a reason. Register the card in
-  `qa/e2e.edn` with its procedure, script and required environment-variable
-  names. The procedure is `qa/<card>.md`; the script exercises the same
-  end-to-end path through the user interface. Missing inputs fail, never skip.
-  Input values are not recorded or printed; captured output and
-  `target/e2e/check.log` replace them with `<redacted:NAME>`. Library-profile
-  projects use their public-API `verify` gate instead.
-- **docs**: required for every card. Update `README.md`, `docs/manual.md` and
-  `ARCHITECTURE.md` where their audiences require it. `docs/manual-contract.edn`
-  links each document section to the public APIs it explains and to executable
-  examples whose output checks the prose. `scripts/check-documentation.sh`
-  verifies required documents, headings, API ownership, examples and local
-  links. The task report records what changed or why a surface was unchanged.
-- **deploy**: required for every completed card. After every earlier gate is
-  current, commit and push the card, then run `stage check deploy`. The stage
-  executes `scripts/install-snapshot.sh`, which requires a `-SNAPSHOT` version,
-  activates `with-release-tests`, installs into the operator's standard `~/.m2`,
-  and deploys timestamped files to the host-supplied repository coordinate in
-  `SWARMFORGE_MAVEN_SNAPSHOT_DEPLOY_REPOSITORY`. A missing or malformed value
-  fails the gate. `stage complete` refuses while this stage is absent, optional
-  or stale.
-  GitHub Packages is written only by the separate release path, configured by
-  `swarmforge/release.conf`.
-- **release**: optional; `n/a` is not a pass for a release that was skipped.
-
-Each `stage check` moves the project's card on `.swarmforge/board/tasks.tsv`,
-which is what the phone's activity room reads. `stage complete` moves it to
-`done`.
-
-Stages marked `:detached true` start one durable supervisor job and return its
-id immediately. The agent must end its turn without polling. The supervisor
-records heartbeat, progress and a bounded exit record, then queues one
-`Work complete for stage job <id>` request. On the next status or check call,
-the stage validates exit, evidence and source stamps and records completion
-once without rerunning the command. `stage job`, `stage jobs`, `stage cancel`
-and `stage retry` are the bounded inspection and recovery commands. A running
-or unconsumed job keeps the project non-idle.
-
-Completion is joined from two durable events: terminal after exit/evidence, and
-yield-ready when the launching turn ends. A filesystem watch provides the normal
-join; a bounded fallback still queues the terminal result if yield readiness is
-missing. Both events carry job and project/card scope for revalidation.
-
-<!-- forgelet:single-agent-correction-policy:begin -->
-## Spec approval
-
-A single-agent project approves its spec automatically by default and proceeds
-to implementation without an approval request. To restore explicit first-spec
-approval for every single-agent project in a forge, create
-`<forge>/swarmforge/local-spec-approval.conf` containing `spec=operator`.
-In that explicit mode, corrections to the same unfinished card's task note or
-Gherkin remain automatically approved after the first operator approval.
-<!-- forgelet:single-agent-correction-policy:end -->
-
-`stage propose spec` binds one active board card to the proposal and keeps its
-name and `task_id`. Every later stage moves that same row. A project-named row
-created by older stage tooling is removed when the routed card is bound; it is
-not a second card. If several routed cards are active and the task note cannot
-identify the intended one, the stage tool refuses rather than guessing.
-
-Do not create worktrees. Do not hand work to another role. The project root is
-the checkout.
+The first card may retain this profile's work shape while changing all language
+specific commands, evidence, tooling and documentation contracts.

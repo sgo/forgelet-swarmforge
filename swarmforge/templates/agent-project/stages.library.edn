@@ -6,52 +6,39 @@
    :spec ["features/*.feature" "tasks/*.md"]
    :stamp ["features" "tasks"]}
   {:name "code"
-   :runs [["mvn" "-q" "-Pwith-unit-tests" "verify"]]
-   :evidence ["target/surefire-reports/*.xml"]
+   :runs [["scripts/stage-placeholder.sh" "code"]]
+   :evidence []
    :stamp [:sources]}
   {:name "clean"
-   :runs [["crap4java" "--test-command" "mvn -q -Pwith-unit-tests test" "."]
-          ["dry4java" "--format" "edn" "src/main/java"]]
+   :runs [["scripts/stage-placeholder.sh" "clean"]]
    :evidence []
    :stamp [:sources]}
   {:name "architect"
-   :runs [["mvn" "-q" "-Pwith-unit-tests" "-pl" "architecture" "verify"]]
-   :evidence ["ARCHITECTURE.md"]
+   :runs [["scripts/stage-placeholder.sh" "architect"]]
+   :evidence []
    :stamp [:sources]}
   {:name "harden"
-   :detached true
-   :runs [["mvn" "-Pwith-mutation-tests"
-           "-DoutputFormats=XML,HTML" "verify"]
-          ["scripts/run-acceptance-tests.sh" "--prepare"]
-          ["mvn" "-q" "gherkin-mutation:check"]]
-   :evidence ["target/pit-reports/mutations.xml"
-              "target/gherkin-mutation/reports/mutation-report.json"]
-   :stamp [:features :sources "acceptance"
-           "scripts/run-acceptance-tests.sh"
-           "pom.xml"]}
+   :runs [["scripts/stage-placeholder.sh" "harden"]]
+   :evidence []
+   :stamp [:features :sources]}
   {:name "clean-final"
-   :runs [["crap4java" "--test-command" "mvn -q -Pwith-unit-tests test" "."]
-          ["dry4java" "--format" "edn" "src/main/java"]]
+   :runs [["scripts/stage-placeholder.sh" "clean-final"]]
    :evidence []
    :stamp [:sources]}
   {:name "verify"
-   :runs [["mvn" "-q" "-Pwith-property-tests" "verify"]
-          ["scripts/run-acceptance-tests.sh"]]
-   :evidence ["target/surefire-reports/*.xml"
-              "target/acceptance/acceptance.log"]
-   :stamp [:features :sources "acceptance" "scripts/run-acceptance-tests.sh"]}
-  {:name "docs"
-   :runs [["scripts/check-documentation.sh"]]
-   :evidence ["target/documentation/check.log"]
-   :stamp [:features :sources "README.md" "docs" "ARCHITECTURE.md"
-           "scripts/check-documentation.sh"
-           "swarmforge/scripts/check-documentation.bb"]}
-  {:name "deploy"
-   :runs [["scripts/install-snapshot.sh"]]
+   :runs [["scripts/stage-placeholder.sh" "verify"]]
    :evidence []
-   :stamp [:sources "scripts/install-snapshot.sh" "pom.xml" ".mvn"]}
+   :stamp [:features :sources]}
+  {:name "docs"
+   :runs [["scripts/stage-placeholder.sh" "docs"]]
+   :evidence []
+   :stamp [:sources "README.md" "docs" "ARCHITECTURE.md"]}
+  {:name "deploy"
+   :runs [["scripts/stage-placeholder.sh" "deploy"]]
+   :evidence []
+   :stamp [:sources]}
   {:name "release"
    :optional true
-   :runs [["scripts/release_preflight.sh"]]
+   :runs [["scripts/stage-placeholder.sh" "release"]]
    :evidence []
-   :stamp ["pom.xml"]}]}
+   :stamp [:sources]}]}
