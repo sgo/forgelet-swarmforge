@@ -54,20 +54,32 @@ silently decides a fact the family rules say belongs only to the project.
 
 ## Verification
 
-- Fixture tests compose generic standard and library projects and prove the
-  common shell exists, `language.conf` and language-specific build files do
-  not, and the agent/mission/profile/Git/runtime contracts are intact.
-- Attempt representative non-spec gates before setup and prove each fails with
-  actionable guidance and records no success.
-- A disposable Java first-card setup writes `Java` and Maven infrastructure,
-  replaces the placeholders and passes a representative code gate.
-- At least one non-Java disposable setup proves the scaffold does not secretly
-  assume Maven or Java.
-- The explicit `--template java-maven` path reproduces the current complete
-  Java/Maven standard and library scaffolds.
-- Existing Java project upgrade tests, generic upgrade tests, installed-cache
-  tests, architecture/clean/hardening/documentation gates and the layer's full
-  suite pass.
+The default template is now `generic`; `--template java-maven` explicitly
+selects the preserved Java/Maven starter. Generic standard and library fixtures
+contain the project shell, neutral instructions, mission, selected agent,
+profile, Git, feature/task locations and shared runtime, with no language or
+build files. Every non-spec stage runs the fail-closed placeholder helper; the
+spec stage remains usable and no placeholder records passing evidence.
+
+A disposable generic first card established Java plus Maven files and another
+established Python; both replaced the code placeholder and passed their code
+gate, while only the Java fixture contained a POM. Generic in-place upgrade
+preserved project source and `stages.edn` without writing a language or POM.
+The explicit Java/Maven template reproduced both complete standard and library
+starters, including the Java language choice and Maven-specific stages.
+
+The installed-cache fixture contained both template roots and the generic
+placeholder helper, composed default projects as generic, composed an explicit
+Java/Maven project, detected a missing Java template, and reinstalled cleanly.
+The complete agent-project namespace passed 41 tests with 787 assertions,
+including existing Java upgrade, conversion, credential, cache and lifecycle
+coverage.
+
+The full `bb test` gate passed 545 tests with 4,550 assertions, all 20 dashboard
+browser tests, and the bounded-projection E2E; the detached lifecycle E2E
+completed in 1,496 ms. The `bb crap` clean gate passed 24 tests with 132
+assertions and wrote `target/coverage/lcov.info`. The documentation contract
+passed 3 documents and 5 sections.
 
 ## Boundaries
 
@@ -80,7 +92,4 @@ silently decides a fact the family rules say belongs only to the project.
 
 ## Operator acceptance
 
-- Owner: operator | environment: Forgelet desktop and mobile app | checks:
-  create a generic project from the app, confirm no language or build files are
-  assumed, then confirm an explicitly Java/Maven scaffolded project remains
-  selectable through the supported internal contract | status: pending
+- owner: operator | environment: Forgelet desktop and mobile app | checks: create a generic project from the app, confirm no language or build files are assumed, then confirm an explicitly Java/Maven scaffolded project remains selectable through the supported internal contract | status: pending
