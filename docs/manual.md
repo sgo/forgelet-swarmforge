@@ -59,6 +59,26 @@ state, homeserver data and operator invitations are outside this boundary.
 Real app/Host creation is a separately invoked operator acceptance check after
 release.
 
+## Single-agent project templates
+
+`get-agent-project` defaults to the language-neutral `generic` template. The
+`standard` and `library` profiles select work shape only: standard uses the
+`qa` lifecycle placeholder and library uses `verify`. Neither selects a
+language or build tool.
+
+Generic creation contains no `swarmforge/language.conf`, POM, Gradle files,
+Java acceptance source, snapshot installer or release configuration. Its
+non-spec stages invoke `scripts/stage-placeholder.sh`, which exits nonzero with
+instructions to choose a language, write `swarmforge/language.conf`, establish
+the language's gates, and replace the placeholders. The `spec` stage is usable
+immediately.
+
+The explicit `--template java-maven` starter preserves the complete Java/Maven
+scaffold, including its language choice and Maven-specific stages. The
+installed composer cache includes both generic and Java/Maven template roots.
+Upgrades preserve existing source and gates; Maven-specific additions follow
+actual Maven evidence in the project rather than a default language choice.
+
 ## MCP-only project preparation
 
 MCP-only stage execution remains disabled by default. A forge-owned

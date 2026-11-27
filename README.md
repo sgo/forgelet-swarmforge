@@ -230,6 +230,25 @@ checkout:
 ./get-agent-project <name> --forge <forge-root> [--agent codex|claude|copilot|grok]
 ```
 
+The default `generic` template chooses no language or build tool. It creates
+the single-agent shell, mission, selected agent, Git, board/messaging runtime,
+feature and task locations, and neutral instructions. Its non-spec stages fail
+closed through `scripts/stage-placeholder.sh` until the first card writes
+`swarmforge/language.conf`, establishes that language's gates, and replaces the
+placeholders. Neither `standard` nor `library` implies a language.
+
+The complete Java/Maven scaffold remains available explicitly:
+
+```sh
+./get-agent-project <name> --forge <forge-root> --template java-maven
+```
+
+Only this starter seeds `swarmforge/language.conf` with `Java` and installs the
+POM, Maven settings, Java acceptance harness, snapshot and Maven release gates.
+The versioned composer cache carries both template roots and the generic
+placeholder helper. Existing-project upgrades choose template details from the
+project's existing build evidence and never assign a language on their own.
+
 The layer owns the machine-wide composer cache installer:
 
 ```sh

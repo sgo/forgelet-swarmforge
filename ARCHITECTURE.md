@@ -18,3 +18,10 @@ Bridge-owned files are transitional. Upgrades preserve the installed adapter,
 bridge project, configuration, state and rooms while runtime updates continue
 for files the layer owns. The runtime digest still hashes every composed runtime
 file, and preview/apply must agree on that set.
+
+The default single-agent project template owns execution structure, not
+language. `generic` supplies project identity, Git, messaging, feature/task
+locations and fail-closed stage placeholders. The explicit `java-maven` starter
+owns the Java language choice and its build-specific files. Template
+composition, the versioned composer cache, and upgrades keep those concerns
+separate.
