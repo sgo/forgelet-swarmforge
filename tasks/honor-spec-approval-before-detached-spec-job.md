@@ -105,11 +105,30 @@ or compose the active forge as part of the card.
 
 ## Verification
 
-Automatic and operator approval modes are proven through the detached stage-job
-path. Successful launches always carry a current non-nil spec hash, invalid
-approval cannot produce a no-op job, active cards advance through the existing
-shared transition, and the full layer test suite remains green. Source is
-committed and pushed on the `forgelet` branch.
+Detached spec launch now resolves approval before creating a job. Automatic
+mode records or reuses the current forge-policy approval, records the spec
+stage and hash, advances the active card to `code`, and binds the job and its
+reconciliation to that hash. Operator mode requires a current approved bundle;
+missing or pending approval creates no job. Changed bundles invalidate the old
+approval before the next automatic launch. A simulated approval-persistence
+failure and an absent board card both produced no job.
+
+The focused detached-spec regressions passed 4 tests with 52 assertions,
+including first launch, idempotent reuse, changed content, operator rejection,
+operator-approved reconciliation and fail-closed persistence. The complete
+stage lifecycle suite passed 40 tests with 460 assertions, including timeout,
+cancellation, retry, wake, evidence and one-time reconciliation behavior.
+
+The MCP `StageProtocolStdioTest` passed 1 test with 0 failures and still exposes
+only the six scoped stage tools, with no approval tool.
+
+The full `bb test` gate passed 549 tests with 4,602 assertions, all 20 dashboard
+browser tests, and the bounded-projection E2E; the detached lifecycle E2E
+completed in 1,539 ms. The `bb crap` clean gate passed 24 tests with 132
+assertions and wrote `target/coverage/lcov.info`. The documentation contract
+passed 3 documents and 5 sections.
+
+No active forge lifecycle operation was performed.
 
 ## Operator acceptance
 
