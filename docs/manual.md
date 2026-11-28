@@ -45,6 +45,13 @@ different composed runtime.
 An upgrade does not grant permission to restart the independently managed
 `forgelet-host` process.
 
+Detached spec jobs cross the same spec-approval boundary as foreground stages.
+Automatic single-agent approval is recorded before the job and advances the
+active card through the normal `spec` to `code` transition. Operator approval
+must already exist and match the current bundle. Approval failure occurs before
+the job store or board can gain a launched spec job, and the detached job is
+bound to the approved non-nil hash for reconciliation.
+
 Runtime identity acceptance is hermetic and does not use a live Host or Matrix:
 
 ```sh

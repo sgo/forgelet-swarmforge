@@ -1043,12 +1043,20 @@
                      :supervisor_session session
                      :supervisor_socket (str socket)))))
 
+(declare active-card-board-lane!)
+(declare ensure-current-spec-approval!)
+
 (defn launch-stage-job!
   [root config state stage tree fingerprint options]
-  (let [id (stage-job-id (:name stage))
+  (let [spec-stage? (= "spec" (:name stage))
+        card (or (:card state) (fallback-card root config []))
+        card (if spec-stage?
+               (assoc card :lane (active-card-board-lane! root card))
+               card)
+        state (assoc state :card card)
+        id (stage-job-id (:name stage))
         timeout (stage-timeout-seconds stage options)
         commands (vec (:runs stage))
-        card (or (:card state) (fallback-card root config []))
         lane (or (:lane card) (:name stage))
         job {:id id
              :status "launching"
@@ -1076,7 +1084,8 @@
                  :started-at (now)}]
     (stage-jobs/atomic-write-edn! (stage-jobs/job-file root id) job)
     (save-state root (:task config) (assoc state :running running))
-    (update-board! root config card (:name stage))
+    (when-not spec-stage?
+      (update-board! root config card (:name stage)))
     (swap! *outcome-context* assoc
            :job_id id
            :current_status "waiting-for-job")
@@ -1609,7 +1618,18 @@
           (exit! 1 (str "Stage " name " is blocked by: "
                         (str/join ", " blocked))))
         (if (or (:detach options) (:detached stage))
-          (launch-stage-job! root config state stage tree fingerprint options)
+          (if (= name "spec")
+            (let [{approved-state :state}
+                  (ensure-current-spec-approval! root config state)
+                  approved-fingerprints
+                  (stage-fingerprints root config approved-state)
+                  approved-fingerprint
+                  (get approved-fingerprints "spec")]
+              (when-not (:input_hash approved-fingerprint)
+                (exit! 1 "No current approved proposal for the active spec bundle"))
+              (launch-stage-job! root config approved-state stage tree
+                                 approved-fingerprint options))
+            (launch-stage-job! root config state stage tree fingerprint options))
           (let [state (begin-stage! root config state name tree)]
             (try
               (let [state
@@ -1666,6 +1686,82 @@
         (exit! 1 (str "Cannot advance spec approval: active card " (:name card)
                       " (" (:id card) ") is in lane " lane))
         :else nil))))
+
+(defn ensure-current-spec-approval!
+  "Resolve the shared approval state before a direct or detached spec gate.
+  Operator mode never creates approval. Automatic mode records the same
+  forge-policy approval and board transition as stage propose spec."
+  [root config state]
+  (let [stage (spec-stage config)
+        spec (or (:spec stage) (:file stage))
+        files (spec-files root (or spec
+                                  (exit! 1 "The spec stage needs :spec <file> or a vector of paths")))
+        approved (approved-spec-proposal root config state)]
+    (cond
+      approved
+      {:state state :proposal approved :created false}
+
+      (= :operator (spec-approval-mode root))
+      (let [pending-current
+            (some (fn [[id proposal]]
+                    (when (and (= :pending (:status proposal))
+                               (proposal-for-active-card? state proposal)
+                               (proposal-current? root proposal))
+                      id))
+                  (:proposals state))]
+        (if pending-current
+          (exit! 1 (str "Spec proposal(s) already pending: " pending-current
+                        ". Approve, reject or explicitly replace the pending spec."))
+          (exit! 1 "No current approved proposal for the active spec bundle")))
+
+      :else
+      (do
+        (when (empty? files)
+          (exit! 1 (str "No spec files found for " (str/join ", " (spec-patterns spec)))))
+        (let [card (select-card root config state files)
+              _lane (when (single-agent? root)
+                      (active-card-board-lane! root card))
+              pending (pending-proposals state)
+              id (str "spec-" (System/currentTimeMillis))
+              tree (worktree-tree root)
+              superseded
+              (reduce (fn [result [pending-id proposal]]
+                        (record-resolution! root config
+                                            (or (:card proposal) card)
+                                            pending-id "superseded")
+                        (assoc-in result [:proposals pending-id]
+                                  (assoc proposal
+                                         :status :superseded
+                                         :superseded-at (now)
+                                         :superseded-by id)))
+                      state pending)
+              proposal {:id id
+                        :card card
+                        :patterns (vec (spec-patterns spec))
+                        :files files
+                        :file (first files)
+                        :hash (spec-hash root files)
+                        :at (now)
+                        :status :approved
+                        :approved-at (now)
+                        :approval-policy "forge policy: automatic spec approval"
+                        :words "automatic spec approval under forge policy"}
+              state (assoc-in (assoc superseded :card card)
+                              [:proposals id] proposal)
+              state (record-stage state "spec" tree (:hash proposal)
+                                  [{:proposal id
+                                    :hash (:hash proposal)
+                                    :files files}]
+                                  files)]
+          (save-state root (:task config) state)
+          (remove-stage-approvals! root)
+          (when (single-agent? root)
+            (advance-approved-card! root config card))
+          (record-resolution! root config card id "automatic_spec_approval")
+          {:state (assoc-in state [:card :lane]
+                            (active-card-board-lane! root card))
+           :proposal proposal
+           :created true})))))
 
 (defn propose! [root config state patterns replace?]
   (let [files (spec-files root patterns)]

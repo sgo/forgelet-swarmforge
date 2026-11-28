@@ -128,7 +128,7 @@
 (defn stage-job-exit [root id]
   (edn/read-string (slurp (str (stage-job-exit-file root id)))))
 
-(declare fixture-at commit-change!)
+(declare fixture fixture-at commit-change! seed-single-agent-card!)
 
 (defn short-job-env []
   {"STAGE_JOB_HEARTBEAT_MS" "50"
@@ -157,6 +157,57 @@
    (write-file (fs/path root "source.txt") "source\n")
    (commit-change! root "detached stage fixture")
    root))
+
+(defn detached-spec-config []
+  (update stage-config :stages
+          (fn [stages]
+            (mapv (fn [stage]
+                    (if (= "spec" (:name stage))
+                      (assoc stage
+                             :detached true
+                             :runs []
+                             :evidence [])
+                      stage))
+                  stages))))
+
+(defn detached-spec-fixture []
+  (let [root (fixture)]
+    (write-file (fs/path root "stages.edn")
+                (pr-str (detached-spec-config)))
+    (seed-single-agent-card! root)
+    (commit-change! root "detached spec stage")
+    root))
+
+(defn operator-detached-spec-fixture []
+  (let [forge (fs/create-temp-dir {:dir "/tmp" :prefix "sf-stage-spec-forge."})
+        root (fs/path forge "projects" "fixture")]
+    (fs/create-dirs root)
+    (fixture-at root)
+    (write-file (fs/path root "stages.edn")
+                (pr-str (detached-spec-config)))
+    (seed-single-agent-card! root)
+    (write-file (fs/path forge "swarmforge" "local-spec-approval.conf")
+                "spec=operator\n")
+    (commit-change! root "operator detached spec stage")
+    {:forge forge :root root}))
+
+(defn spec-job-files [root]
+  (->> (fs/glob root ".swarmforge/stage-jobs/stage-job-spec-*.edn")
+       (remove #(str/ends-with? (str %) ".exit.edn"))
+       vec))
+
+(defn reconcile-spec-job! [root id]
+  (is (wait-until #(fs/regular-file? (stage-job-exit-file root id)) 5000))
+  (let [status (run-stage-env root (short-job-env) "status" "--json")]
+    (is (zero? (:exit status)) (:err status))
+    (json/parse-string (:out status) true)))
+
+(defn remove-recorded-spec-stage! [root]
+  (let [current (state root)
+        updated (update current :stages dissoc "spec")]
+    (write-file (fs/path root ".swarmforge" "stages" "fixture.edn")
+                (pr-str updated))
+    updated))
 
 (defn handshake-job!
   [root id]
@@ -716,6 +767,148 @@
                            elapsed-ms))))
       (finally
         (delete-tree-best-effort forge)))))
+
+(deftest automatic-detached-spec-launch-records-and-reuses-current-approval
+  (let [root (detached-spec-fixture)]
+    (try
+      (let [launch (run-stage-env root (short-job-env) "check" "spec")
+            id (stage-job-id-from-output launch)
+            job (stage-job root id)
+            current (state root)
+            proposals (:proposals current)
+            proposal-id (->> proposals vals (sort-by :at) last :id)]
+        (is (zero? (:exit launch)) (:err launch))
+        (is id)
+        (is (string? (:input_hash job)))
+        (is (= (:input_hash job)
+               (get-in current [:stages "spec" :input_hash])))
+        (is (= "forge policy: automatic spec approval"
+               (get-in proposals [proposal-id :approval-policy])))
+        (is (= :approved (get-in proposals [proposal-id :status])))
+        (is (= "code" (board-lane root "fixture-card")))
+        (is (= 1 (count proposals)))
+        (is (= 1
+               (count (fs/list-dir
+                       (fs/path root ".swarmforge" "approvals" "resolved")))))
+        (let [parsed (reconcile-spec-job! root id)]
+          (is (= "done"
+                 (some #(when (= "spec" (:name %)) (:status %))
+                       (:stages parsed))))
+          (is (= (:input_hash job)
+                 (get-in (state root) [:stages "spec" :input_hash]))))
+
+        ;; A second launch of the same approved bundle reuses the proposal and
+        ;; resolution. Remove only the prior stage record so the launch is not
+        ;; short-circuited by already-consumed evidence.
+        (remove-recorded-spec-stage! root)
+        (let [before (state root)
+              second-launch (run-stage-env root (short-job-env)
+                                            "check" "spec")
+              second-id (stage-job-id-from-output second-launch)
+              second-job (stage-job root second-id)]
+          (is (zero? (:exit second-launch)) (:err second-launch))
+          (is (= (:hash (get-in before [:proposals proposal-id]))
+                 (:input_hash second-job)))
+          (is (= 1 (count (:proposals (state root)))))
+          (is (= 1
+                 (count (fs/list-dir
+                         (fs/path root ".swarmforge" "approvals" "resolved")))))
+          (is (= "done"
+                 (some #(when (= "spec" (:name %)) (:status %))
+                       (:stages (reconcile-spec-job! root second-id))))))
+
+        (write-file (fs/path root "spec.md")
+                    "# Fixture spec\n\nA changed automatic spec bundle.\n")
+        (commit-change! root "change detached spec")
+        (remove-recorded-spec-stage! root)
+        (let [changed-launch (run-stage-env root (short-job-env)
+                                             "check" "spec")
+              changed-id (stage-job-id-from-output changed-launch)
+              changed-job (stage-job root changed-id)
+              changed (state root)]
+          (is (zero? (:exit changed-launch)) (:err changed-launch))
+          (is (not= (:input_hash job) (:input_hash changed-job)))
+          (is (= 2 (count (:proposals changed))))
+          (is (= (:input_hash changed-job)
+                 (get-in changed [:stages "spec" :input_hash])))
+          (is (= "code" (board-lane root "fixture-card")))
+          (reconcile-spec-job! root changed-id)))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest detached-spec-launch-honors-operator-approval
+  (let [{:keys [forge root]} (operator-detached-spec-fixture)]
+    (try
+      (let [refused (run-stage-env root (short-job-env) "check" "spec")
+            outcome (result-outcome refused)]
+        (is (not (zero? (:exit refused))))
+        (is (= "STAGE_SPEC_MISSING" (:code outcome)))
+        (is (empty? (spec-job-files root)))
+        (is (= "spec" (board-lane root "fixture-card")))
+        (is (not (fs/exists? (fs/path root ".swarmforge" "stages" "fixture.edn")))))
+
+      (let [proposal (run-stage root "propose" "spec"
+                                "spec.md" "features/extra.feature")
+            id (latest-proposal-id root)]
+        (is (zero? (:exit proposal)) (:err proposal))
+        (let [pending-launch (run-stage-env root (short-job-env)
+                                             "check" "spec")
+              outcome (result-outcome pending-launch)]
+          (is (not (zero? (:exit pending-launch))))
+          (is (= "STAGE_SPEC_PENDING" (:code outcome)))
+          (is (empty? (spec-job-files root)))
+          (is (= "spec" (board-lane root "fixture-card"))))
+        (let [approved (run-stage root "approve" id "--words" "approve")]
+        (is (zero? (:exit approved)) (:err approved))
+        (is (= "code" (board-lane root "fixture-card")))
+        (remove-recorded-spec-stage! root)
+        (let [launch (run-stage-env root (short-job-env) "check" "spec")
+              job-id (stage-job-id-from-output launch)
+              job (stage-job root job-id)
+              parsed (reconcile-spec-job! root job-id)]
+          (is (zero? (:exit launch)) (:err launch))
+          (is (= (get-in (state root) [:proposals id :hash])
+                 (:input_hash job)))
+          (is (= "done"
+                 (some #(when (= "spec" (:name %)) (:status %))
+                       (:stages parsed))))
+          (is (= 1 (count (spec-job-files root))))
+          (is (= 1 (count (:proposals (state root))))))))
+      (finally
+        (fs/delete-tree forge)))))
+
+(deftest detached-spec-launch-cannot-create-a-job-without-an-active-board-card
+  (let [root (fixture)]
+    (try
+      (write-file (fs/path root "stages.edn")
+                  (pr-str (detached-spec-config)))
+      (write-file (fs/path root ".swarmforge" "single-agent") "agent\n")
+      (commit-change! root "detached spec without board card")
+      (let [launch (run-stage-env root (short-job-env) "check" "spec")]
+        (is (not (zero? (:exit launch))))
+        (is (empty? (spec-job-files root))))
+      (finally
+        (fs/delete-tree root)))))
+
+(deftest detached-spec-launch-creates-no-job-when-approval-cannot-persist
+  (let [root (detached-spec-fixture)
+        config (stage-call "load-config" root)
+        initial (stage-call "load-state" root (:task config))
+        state (stage-call "hydrate-state-card" root config initial)
+        save-state-var (ns-resolve 'stage 'save-state)]
+    (try
+      (is (thrown? Exception
+                   (with-redefs-fn
+                     {save-state-var
+                      (fn [& _]
+                        (throw (ex-info "simulated approval persistence failure" {})))}
+                     #(stage-call "check!" root config state "spec"
+                                  {:detach true}))))
+      (is (empty? (spec-job-files root)))
+      (is (= "spec" (board-lane root "fixture-card")))
+      (is (not (fs/exists? (fs/path root ".swarmforge" "stages" "fixture.edn"))))
+      (finally
+        (fs/delete-tree root)))))
 
 (deftest completion-handshake-joins-in-either-order-with-a-bounded-fallback
   (let [wait-var (get (ns-publics 'stage) 'handshake-wait-ms)

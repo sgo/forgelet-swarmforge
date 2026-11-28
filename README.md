@@ -295,6 +295,13 @@ The project pre-commit hook now asks a shared stage helper for
 runtime configuration. Missing helpers, invalid output and unapproved specs all
 refuse the commit.
 
+Detached spec jobs cross the same approval boundary before job creation.
+Automatic single-agent mode reuses a matching approved bundle or records the
+normal forge-policy approval and moves the active card from `spec` to `code`.
+Operator mode requires an already-current operator-approved bundle. Missing or
+stale approval creates no job; every launched spec job and its reconciliation
+carry the approved non-nil hash.
+
 While a delivered request is otherwise idle, the runner reads that project's
 typed clarification records before considering a continuation nudge. Any open
 clarification holds every later nudge pass, including after its attention moves
